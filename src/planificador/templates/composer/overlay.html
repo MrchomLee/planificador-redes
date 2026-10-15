@@ -1,0 +1,4 @@
+{#- Composer as a full-screen overlay: htmx fragment swapped into #modal-root (app.js opens the layer).
+    Context: see routes/composer.py composer_context(). -#}
+{% set layer = "overlay" %}
+{% include "composer/_composer.html" %}

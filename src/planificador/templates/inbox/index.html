@@ -1,0 +1,34 @@
+{#- Comentarios (doc 05 §5): two white cards — conversation list (≈1/3) and the selected conversation (≈2/3). -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+
+{% block head %}<link rel="stylesheet" href="{{ static_url('css/inbox.css') }}">{% endblock %}
+{% block scripts %}<script src="{{ static_url('js/inbox.js') }}" defer></script>{% endblock %}
+{% block body_class %}page-inbox{% endblock %}
+{% block main_class %}ib-main{% endblock %}
+
+{% block content %}
+<header class="ib-header">
+  <div class="ib-header__titles">
+    <h1 class="ib-header__title">Comentarios</h1>
+    {% include "inbox/_updated.html" %}
+  </div>
+  <div class="ib-header__actions">
+    <button type="button" class="btn btn--secondary tool ib-refresh" id="inbox-refresh"
+            hx-post="/comentarios/actualizar" hx-include="#inbox-filters" hx-target="#inbox-list-panel" hx-swap="outerHTML"
+            hx-disabled-elt="this" title="Buscar comentarios nuevos ahora">
+      {{ icon("refresh-cw", 18, cls="ib-refresh__icon") }}<span>Actualizar</span>
+    </button>
+  </div>
+</header>
+
+<div class="ib-layout{% if thread %} has-thread{% endif %}" id="inbox-layout">
+  {% include "inbox/_list_panel.html" %}
+
+  <section class="card ib-panel ib-thread-panel" aria-label="Conversación" aria-live="polite">
+    <div id="inbox-thread" class="ib-thread-root">
+      {% if thread %}{% include "inbox/_thread.html" %}{% else %}{% include "inbox/_empty_thread.html" %}{% endif %}
+    </div>
+  </section>
+</div>
+{% endblock %}

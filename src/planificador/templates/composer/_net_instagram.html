@@ -1,0 +1,70 @@
+{#- "Configuración de Instagram" (doc 05 §5b; SPEC §7: collaborators, audio, share_to_feed, trial reel, alt text,
+    first comment, cover frame, location). Vars: K, T, O, info. -#}
+<div class="cmp-fields">
+  <div class="cmp-field cmp-field--row" data-field="collaborators" x-show="fmt('{{ K }}') !== 'story'">
+    <span class="cmp-label">Colaboradores:</span>
+    <div class="cmp-chips">
+      <template x-for="(c, ci) in {{ O }}.collaborators" :key="c">
+        <span class="chip cmp-chip">@<span x-text="c"></span>
+          <button type="button" class="cmp-chip__x" @click="removeChip('{{ K }}', 'collaborators', ci)" :disabled="ro" :aria-label="'Quitar a @' + c">{{ icon("x", 13) }}</button></span>
+      </template>
+      <span class="cmp-dashed-input" x-show="{{ O }}.collaborators.length < cfg.limits.ig_collaborators">
+        {{ icon("user-plus", 17) }}
+        <input type="text" class="cmp-dashed-input__field" x-model="drafts['{{ K }}collaborators']" placeholder="Añadir colaborador"
+               @keydown="chipKey($event, '{{ K }}', 'collaborators', cfg.limits.ig_collaborators)" @blur="addChip('{{ K }}', 'collaborators', cfg.limits.ig_collaborators)"
+               :disabled="ro" aria-label="Usuario de Instagram del colaborador" autocomplete="off" spellcheck="false">
+      </span>
+    </div>
+    <p class="cmp-help cmp-field__full">Hasta 5 cuentas (@usuario). Recibirán una invitación para aparecer como coautoras.</p>
+    <p class="cmp-error cmp-field__full" x-show="fieldError('{{ K }}', 'collaborators')" x-text="fieldError('{{ K }}', 'collaborators')"></p>
+  </div>
+
+  <div class="cmp-field cmp-field--row" data-field="audio_name" x-show="fmt('{{ K }}') === 'reel'">
+    <label class="cmp-label" for="ig-audio-{{ K }}">Audio del reel:</label>
+    <span class="cmp-dashed-input">
+      {{ icon("music", 17) }}
+      <input id="ig-audio-{{ K }}" type="text" class="cmp-dashed-input__field" x-model="{{ O }}.audio_name" placeholder="Añadir nombre del audio" :disabled="ro" maxlength="100">
+    </span>
+    <p class="cmp-help cmp-field__full">Nombre del audio original del reel (la música de la biblioteca de Instagram solo se puede añadir en la app).</p>
+  </div>
+
+  <div class="cmp-field" data-field="share_to_feed" x-show="fmt('{{ K }}') === 'reel'">
+    <label class="switch">
+      <input type="checkbox" role="switch" x-model="{{ O }}.share_to_feed" :disabled="ro">
+      <span class="switch__track" aria-hidden="true"></span>
+      <span class="switch__text"><span class="switch__label">Mostrar reel en el feed</span><span class="switch__help">Además de en la pestaña Reels, aparecerá en tu cuadrícula de publicaciones.</span></span>
+    </label>
+  </div>
+
+  <div class="cmp-field" data-field="trial_reel" x-show="fmt('{{ K }}') === 'reel'">
+    <label class="cmp-label" for="ig-trial-{{ K }}">Reel de prueba</label>
+    <select id="ig-trial-{{ K }}" class="select" :value="{{ O }}.trial_reel || ''" @change="{{ O }}.trial_reel = $event.target.value || null" :disabled="ro">
+      {% for value, label in ig_trial %}<option value="{{ value }}">{{ label }}</option>{% endfor %}
+    </select>
+    <p class="cmp-help">Se muestra primero a personas que no te siguen; después decides si pasa a tu perfil.</p>
+  </div>
+
+  <div class="cmp-field" data-field="thumb_offset_ms" x-show="fmt('{{ K }}') === 'reel' && coverMax('{{ K }}') > 0">
+    <label class="cmp-label" for="ig-cover-{{ K }}">Portada del reel <span class="muted fw-500" x-text="'(segundo ' + coverLabel('{{ K }}', 'thumb_offset_ms') + ')'"></span></label>
+    <input id="ig-cover-{{ K }}" type="range" class="cmp-range" min="0" :max="coverMax('{{ K }}')" step="100"
+           :value="{{ O }}.thumb_offset_ms || 0" @input="{{ O }}.thumb_offset_ms = Number($event.target.value)" :disabled="ro">
+  </div>
+
+  <div class="cmp-field" data-field="alt_text" x-show="fmt('{{ K }}') === 'post' && hasImages('{{ K }}')">
+    <label class="cmp-label" for="ig-alt-{{ K }}">Texto alternativo <span class="optional">(opcional)</span></label>
+    <input id="ig-alt-{{ K }}" class="input" x-model="{{ O }}.alt_text" maxlength="1000" :disabled="ro" placeholder="Describe la imagen para personas con discapacidad visual">
+  </div>
+
+  <div class="cmp-field" data-field="first_comment" x-show="fmt('{{ K }}') !== 'story'">
+    <label class="cmp-label" for="ig-fc-{{ K }}">Primer comentario <span class="optional">(opcional)</span></label>
+    <textarea id="ig-fc-{{ K }}" class="textarea" rows="2" x-model="{{ O }}.first_comment" :disabled="ro" placeholder="Por ejemplo, tus hashtags"></textarea>
+  </div>
+
+  <div class="cmp-field" data-field="location_id" x-show="fmt('{{ K }}') !== 'story'">
+    <label class="cmp-label" for="ig-loc-{{ K }}">ID de ubicación <span class="optional">(opcional)</span></label>
+    <input id="ig-loc-{{ K }}" class="input" inputmode="numeric" x-model.trim="{{ O }}.location_id" :disabled="ro" placeholder="Identificador de la página del lugar">
+  </div>
+
+  <p class="cmp-note" x-show="fmt('{{ K }}') === 'story'">{{ icon("info", 15) }} Las historias solo se pueden publicar desde cuentas de empresa y no muestran texto.</p>
+  <p class="cmp-note" x-show="fmt('{{ K }}') === 'post' && hasVideo('{{ K }}') && pvMedia('{{ K }}').length === 1">{{ icon("info", 15) }} Un vídeo solo se publica en Instagram como reel.</p>
+</div>

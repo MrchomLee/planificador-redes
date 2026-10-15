@@ -28,6 +28,9 @@
  *     uses the styled dialog; plain forms/links can use data-confirm="..." the same way.
  *   - Copy: any element with data-copy="text" or data-copy-target="#selector".
  *   - Relative times: <time datetime="ISO" data-timeago> is refreshed every minute.
+ *   - Notifications: clicking an element with data-notif-read="<id>" marks that notification as read
+ *     (POST /notificaciones/<id>/leer, fire and forget) while the click carries on (link / htmx request).
+ *     The bell summary carries data-notify-items (browser notifications) and data-unread (tab title counter).
  */
 (function () {
   "use strict";
@@ -448,9 +451,12 @@
               body: i.body || "",
               tag: "planificador-" + i.id,
               icon: doc.body.dataset.favicon || undefined,
+              // "Publicación asistida" needs the user: keep it on screen until it is dismissed.
+              requireInteraction: i.kind === "manual_publish",
             });
             n.onclick = () => {
               window.focus();
+              App.notify.markRead(i.id);
               if (i.url) window.location.href = i.url;
               n.close();
             };
@@ -459,9 +465,47 @@
           }
         });
     },
+    // Offer browser notifications once per session when something urgent arrives and the user never decided.
+    nudge(items) {
+      if (App.notify.permission() !== "default" || !Array.isArray(items)) return;
+      if (doc.body && doc.body.dataset.browserNotify === "0") return;
+      if (!items.some((i) => i.kind === "manual_publish" || i.kind === "error")) return;
+      try {
+        if (window.sessionStorage.getItem(STORAGE_PREFIX + "notif.nudged")) return;
+        window.sessionStorage.setItem(STORAGE_PREFIX + "notif.nudged", "1");
+      } catch (e) {
+        return;
+      }
+      App.toast("Pulsa «Activar avisos» en la campana para enterarte aunque estés en otra pestaña.", "info", {
+        title: "Avisos del navegador",
+      });
+    },
+    markRead(id) {
+      if (!id) return;
+      try {
+        fetch("/notificaciones/" + encodeURIComponent(id) + "/leer", {
+          method: "POST",
+          headers: { "X-CSRF-Token": App.csrfToken(), Accept: "application/json" },
+          credentials: "same-origin",
+          keepalive: true,
+        })
+          .then(() => {
+            if (window.htmx) window.htmx.trigger(doc.body, "notifications:refresh");
+          })
+          .catch(() => {});
+      } catch (e) {
+        /* ignore */
+      }
+    },
+    // "(3) Planificación · Planificador" while there are unread notifications.
+    setUnread(count) {
+      const n = Math.max(0, Number(count) || 0);
+      if (App.notify.baseTitle === undefined) App.notify.baseTitle = doc.title.replace(/^\(\d+\+?\)\s+/, "");
+      doc.title = (n ? "(" + (n > 99 ? "99+" : n) + ") " : "") + App.notify.baseTitle;
+    },
     syncUI() {
       const perm = App.notify.permission();
-      $$("[data-notify-enable]").forEach((el) => (el.hidden = perm !== "default"));
+      $$("[data-notify-enable], [data-notify-prompt]").forEach((el) => (el.hidden = perm !== "default"));
       $$("[data-notify-status]").forEach((el) => {
         el.textContent =
           perm === "granted" ? "Avisos del navegador activados" : perm === "denied" ? "Avisos bloqueados en el navegador" : perm === "unsupported" ? "Avisos no disponibles" : "";
@@ -472,8 +516,12 @@
   function readNotifyPayload(root) {
     const holder = root && (root.matches && root.matches("[data-notify-items]") ? root : $("[data-notify-items]", root));
     if (!holder) return;
+    if (holder.hasAttribute("data-unread")) App.notify.setUnread(holder.getAttribute("data-unread"));
     try {
-      App.notify.process(JSON.parse(holder.getAttribute("data-notify-items") || "[]"));
+      const items = JSON.parse(holder.getAttribute("data-notify-items") || "[]");
+      const lastSeen = App.storage.get("notif.lastSeen", null);
+      App.notify.process(items);
+      if (lastSeen !== null) App.notify.nudge(items.filter((i) => Number(i.id) > Number(lastSeen)));
     } catch (e) {
       /* malformed payload: ignore */
     }
@@ -558,6 +606,24 @@
     App.toast(STATUS_MESSAGES[0], "error");
   });
   doc.addEventListener("htmx:timeout", () => App.toast(STATUS_MESSAGES[408], "warning"));
+
+  // Background requests (bell polling, self-refreshing panels: elements inside [data-silent-errors]) must not
+  // drive navigation. When the session ends (optional password) the server answers them with HX-Redirect to
+  // /login?next=<API path>: go to the login page for the *current page* instead, and never while the page is
+  // already navigating away (e.g. "Cerrar sesión").
+  let unloading = false;
+  window.addEventListener("beforeunload", () => (unloading = true));
+  window.addEventListener("pageshow", () => (unloading = false));
+  doc.addEventListener("htmx:beforeOnLoad", (e) => {
+    const xhr = e.detail && e.detail.xhr;
+    const elt = e.detail && e.detail.elt;
+    if (!xhr || !elt || !elt.closest || !elt.closest("[data-silent-errors]")) return;
+    const target = xhr.getResponseHeader("HX-Redirect");
+    if (!target) return;
+    e.preventDefault();
+    if (unloading || !/^\/login(\?|$)/.test(target)) return;
+    window.location.href = "/login?next=" + encodeURIComponent(window.location.pathname + window.location.search);
+  });
 
   // Styled confirmation for hx-confirm.
   doc.addEventListener("htmx:confirm", (e) => {
@@ -650,6 +716,15 @@
       }
       App.copy(text, copier.getAttribute("data-copy-message") || undefined);
       return;
+    }
+
+    // Notification items: mark as read in the background, let the click continue.
+    const notifEl = t.closest("[data-notif-read]");
+    if (notifEl && notifEl.getAttribute("data-notif-read")) {
+      const id = notifEl.getAttribute("data-notif-read");
+      notifEl.removeAttribute("data-notif-read");
+      notifEl.classList.remove("is-unread");
+      App.notify.markRead(id);
     }
 
     // Browser notification permission
@@ -837,6 +912,27 @@
   };
   window.addEventListener("themechange", () => App.applyChartDefaults());
 
+  // Unread comments badge on the "Comentarios" nav item (GET /api/comentarios/resumen; refreshed when the
+  // inbox changes something). Background request: never navigates, failures are silent.
+  App.refreshInboxBadge = function () {
+    const badge = doc.querySelector("[data-inbox-badge]");
+    if (!badge || !window.fetch) return;
+    fetch("/api/comentarios/resumen", { headers: { Accept: "application/json" }, credentials: "same-origin", redirect: "manual" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        const n = data && Number(data.no_leidos);
+        if (n > 0) {
+          badge.textContent = n > 99 ? "99+" : String(n);
+          badge.setAttribute("aria-label", n + (n === 1 ? " comentario sin leer" : " comentarios sin leer"));
+          badge.hidden = false;
+        } else {
+          badge.hidden = true;
+        }
+      })
+      .catch(() => {});
+  };
+  doc.addEventListener("inbox:changed", () => App.refreshInboxBadge());
+
   // ------------------------------------------------------------------ init
   function init() {
     App.applyChartDefaults();
@@ -865,6 +961,7 @@
     }
     App.refreshTimes();
     setInterval(() => App.refreshTimes(), 60000);
+    setTimeout(() => App.refreshInboxBadge(), 400);
   }
 
   if (doc.readyState === "loading") doc.addEventListener("DOMContentLoaded", init);

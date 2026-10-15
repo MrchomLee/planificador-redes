@@ -1,0 +1,4 @@
+{#- One tab counter (id inbox-count-<key>); `oob` → out-of-band swap. -#}
+{% set n = counts.get(key, 0) %}
+<span class="count-pill ib-count{% if n %} has-items{% endif %}" id="inbox-count-{{ key }}"{% if oob %} hx-swap-oob="true"{% endif %}
+      {%- if not n %} hidden{% endif %} aria-label="{{ n }} conversaciones">{{ n }}</span>

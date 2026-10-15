@@ -1,0 +1,160 @@
+{#- Preview mocks (doc 05 §3.2): Facebook post card, Instagram post, phone frame (reels, stories, TikTok,
+    YouTube Shorts), YouTube video and Demo card. Each macro renders ONE root element (for x-if). K = account key. -#}
+
+{% macro avatar(K, cls="") -%}
+<span class="pv-avatar{% if cls %} {{ cls }}{% endif %}" x-text="avatarLetter('{{ K }}')" aria-hidden="true"></span>
+{%- endmacro %}
+
+{% macro media_grid(K) -%}
+<div class="pv-grid" :class="'pv-grid--' + Math.min(pvMedia('{{ K }}').length, 4)" x-show="pvMedia('{{ K }}').length">
+  <template x-for="(m, i) in pvMedia('{{ K }}').slice(0, 4)" :key="m.id">
+    <div class="pv-grid__item">
+      <img :src="m.thumb_url" alt="" loading="lazy">
+      <span class="pv-play" x-show="m.kind === 'video'">{{ icon("play", 22, stroke=2.2) }}</span>
+      <span class="pv-grid__more" x-show="i === 3 && pvMedia('{{ K }}').length > 4" x-text="'+' + (pvMedia('{{ K }}').length - 4)"></span>
+    </div>
+  </template>
+</div>
+{%- endmacro %}
+
+{% macro fb_card(K) -%}
+<article class="pv-fb">
+  <header class="pv-fb__head">
+    {{ avatar(K) }}
+    <div class="pv-fb__who"><strong x-text="displayName('{{ K }}')"></strong>
+      <small><span x-text="pvDate()"></span> · {{ icon("globe", 12) }}</small></div>
+    <span class="pv-fb__more">{{ icon("ellipsis", 20) }}</span>
+  </header>
+  <div class="pv-fb__text" x-show="pvText('{{ K }}')" x-html="pvRich('{{ K }}', 260)" @click="pvExpanded = !pvExpanded"></div>
+  {{ media_grid(K) }}
+  <div class="pv-fb__link" x-show="!pvMedia('{{ K }}').length && targets['{{ K }}'].options.link">
+    <div class="pv-fb__linkimg">{{ icon("link", 26) }}</div>
+    <div class="pv-fb__linkmeta"><small x-text="(targets['{{ K }}'].options.link || '').replace(/^https?:\/\//, '').split('/')[0].toUpperCase()"></small>
+      <strong>Vista previa del enlace</strong></div>
+  </div>
+  <footer class="pv-fb__actions">
+    <span title="Me gusta">{{ icon("thumbs-up", 18) }}</span><span title="Comentar">{{ icon("message-circle", 18) }}</span><span title="Compartir">{{ icon("share-2", 18) }}</span>
+  </footer>
+</article>
+{%- endmacro %}
+
+{% macro ig_card(K) -%}
+<article class="pv-ig">
+  <header class="pv-ig__head">
+    {{ avatar(K, "pv-avatar--ring") }}
+    <strong x-text="handle('{{ K }}')"></strong>
+    <span class="pv-ig__more">{{ icon("ellipsis", 20) }}</span>
+  </header>
+  <div class="pv-ig__media" :class="{'is-empty': !pvFirst('{{ K }}')}">
+    <template x-if="pvFirst('{{ K }}')"><img :src="pvFirst('{{ K }}').thumb_url" alt=""></template>
+    <span class="pv-play" x-show="pvFirst('{{ K }}') && pvFirst('{{ K }}').kind === 'video'">{{ icon("play", 26, stroke=2.2) }}</span>
+    <span class="pv-ig__count" x-show="pvMedia('{{ K }}').length > 1" x-text="'1/' + pvMedia('{{ K }}').length"></span>
+    <span class="pv-placeholder" x-show="!pvFirst('{{ K }}')">{{ icon("image", 34, stroke=1.5) }}<span>Añade una foto o un vídeo</span></span>
+  </div>
+  <div class="pv-ig__actions">
+    {{ icon("heart", 22) }}{{ icon("message-circle", 22) }}{{ icon("send", 22) }}
+    <span class="pv-ig__dots" x-show="pvMedia('{{ K }}').length > 1">
+      <template x-for="(m, i) in pvMedia('{{ K }}').slice(0, 10)" :key="m.id"><i :class="{'is-on': i === 0}"></i></template>
+    </span>
+    <span class="pv-ig__save">{{ icon("bookmark", 22) }}</span>
+  </div>
+  <p class="pv-ig__likes">0 Me gusta</p>
+  <p class="pv-ig__caption" x-show="pvText('{{ K }}')" @click="pvExpanded = !pvExpanded"><strong x-text="handle('{{ K }}')"></strong> <span x-html="pvRich('{{ K }}', 125)"></span></p>
+  <p class="pv-ig__date" x-text="pvDate()"></p>
+</article>
+{%- endmacro %}
+
+{# Phone frame: Facebook/Instagram reels and stories, TikTok, YouTube Shorts. #}
+{% macro phone(K, network) -%}
+<div class="pv-phone pv-phone--{{ network }}" :class="'is-' + fmt('{{ K }}')">
+  <div class="pv-phone__screen">
+    <div class="pv-phone__bg" :style="pvBg('{{ K }}')"></div>
+    <div class="pv-phone__shade"></div>
+    <div class="pv-phone__empty" x-show="!pvFirst('{{ K }}')">{{ icon("clapperboard", 34, stroke=1.5) }}<span x-text="fmt('{{ K }}') === 'story' ? 'Añade una foto o un vídeo' : 'Añade un vídeo'"></span></div>
+
+    {# top bars #}
+    <div class="pv-story-top" x-show="fmt('{{ K }}') === 'story'">
+      <div class="pv-story-top__bar"><span></span></div>
+      <div class="pv-story-top__who">{{ avatar(K, "pv-avatar--sm") }}<strong x-text="{{ "handle" if network == "instagram" else "displayName" }}('{{ K }}')"></strong><small>Ahora</small><span class="ml-auto">{{ icon("ellipsis", 18) }}</span><span>{{ icon("x", 18) }}</span></div>
+    </div>
+    {% if network == "tiktok" %}
+    <div class="pv-phone__top pv-tt-top"><span class="pv-tt-top__live">{{ icon("tv", 18) }}</span><span>Siguiendo</span><strong>Para ti</strong><span class="pv-tt-top__search">{{ icon("search", 18) }}</span></div>
+    {% elif network == "youtube" %}
+    <div class="pv-phone__top pv-yt-top"><strong>Shorts</strong><span class="ml-auto">{{ icon("search", 18) }}</span><span>{{ icon("ellipsis-vertical", 18) }}</span></div>
+    {% else %}
+    <div class="pv-phone__top" x-show="fmt('{{ K }}') === 'reel'"><strong>Reels</strong><span class="ml-auto">{{ icon("camera", 20) }}</span></div>
+    {% endif %}
+
+    <span class="pv-phone__play" x-show="pvFirst('{{ K }}') && pvFirst('{{ K }}').kind === 'video'">{{ icon("play", 30, stroke=2) }}</span>
+
+    {# right rail #}
+    <div class="pv-rail" x-show="fmt('{{ K }}') !== 'story'">
+      {% if network == "tiktok" %}
+      <span class="pv-rail__me">{{ avatar(K, "pv-avatar--rail") }}<i>{{ icon("plus", 11, stroke=3) }}</i></span>
+      {% endif %}
+      <span>{{ icon("thumbs-up" if network in ("facebook", "youtube") else "heart", 24) }}<small>0</small></span>
+      <span>{{ icon("message-circle", 24) }}<small>0</small></span>
+      {% if network == "tiktok" %}<span>{{ icon("bookmark", 24) }}<small>0</small></span>{% endif %}
+      <span>{{ icon("send" if network == "instagram" else "forward", 24) }}<small>0</small></span>
+      {% if network == "tiktok" %}<span class="pv-rail__disc">{{ avatar(K, "pv-avatar--disc") }}</span>{% else %}<span>{{ icon("ellipsis", 22) }}</span>{% endif %}
+    </div>
+
+    {# bottom info #}
+    <div class="pv-phone__info" x-show="fmt('{{ K }}') !== 'story'">
+      <div class="pv-phone__who">
+        {% if network != "tiktok" %}{{ avatar(K, "pv-avatar--sm") }}{% endif %}
+        <strong x-text="{{ "'@' + handle" if network in ("tiktok", "youtube") else ("handle" if network == "instagram" else "displayName") }}('{{ K }}')"></strong>
+        {% if network != "tiktok" %}<span class="pv-follow">{{ "Suscribirse" if network == "youtube" else "Seguir" }}</span>{% endif %}
+      </div>
+      <p class="pv-phone__cap" x-show="pvText('{{ K }}')" x-html="pvRich('{{ K }}', 90)" @click="pvExpanded = !pvExpanded"></p>
+      <span class="pv-music">{{ icon("music", 12) }}<span x-text="(targets['{{ K }}'].options.audio_name || 'Audio original') + ' · ' + displayName('{{ K }}')"></span></span>
+    </div>
+    <div class="pv-story-reply" x-show="fmt('{{ K }}') === 'story'"><span>Enviar mensaje</span>{{ icon("heart", 22) }}{{ icon("send", 22) }}</div>
+
+    {% if network == "tiktok" %}
+    <nav class="pv-tt-nav" aria-hidden="true">
+      <span>{{ icon("house", 20) }}<small>Inicio</small></span><span>{{ icon("users", 20) }}<small>Amigos</small></span>
+      <span class="pv-tt-nav__plus">{{ icon("plus", 18, stroke=3) }}</span>
+      <span>{{ icon("inbox", 20) }}<small>Bandeja</small></span><span>{{ icon("user", 20) }}<small>Perfil</small></span>
+    </nav>
+    {% elif network == "instagram" %}
+    <nav class="pv-ig-nav" aria-hidden="true" x-show="fmt('{{ K }}') === 'reel'">{{ icon("house", 22) }}{{ icon("search", 22) }}{{ icon("square-plus", 22) }}{{ icon("clapperboard", 22) }}{{ icon("circle-user-round", 22) }}</nav>
+    {% endif %}
+  </div>
+</div>
+{%- endmacro %}
+
+{% macro yt_video(K) -%}
+<article class="pv-yt">
+  <div class="pv-yt__player" :class="{'is-empty': !pvFirst('{{ K }}')}">
+    <div class="pv-yt__img" :style="pvBg('{{ K }}')"></div>
+    <span class="pv-placeholder" x-show="!pvFirst('{{ K }}')">{{ icon("clapperboard", 34, stroke=1.5) }}<span>Añade un vídeo</span></span>
+    <span class="pv-yt__play" x-show="pvFirst('{{ K }}')">{{ icon("play", 22, stroke=2.4) }}</span>
+    <span class="pv-yt__dur" x-show="firstVideo('{{ K }}') && firstVideo('{{ K }}').duration_s" x-text="firstVideo('{{ K }}') ? duration(firstVideo('{{ K }}').duration_s) : ''"></span>
+  </div>
+  <div class="pv-yt__body">
+    <h3 class="pv-yt__title" x-text="ytTitle('{{ K }}')"></h3>
+    <p class="pv-yt__meta"><span>0 visualizaciones · </span><span x-text="hasDate() ? 'Se estrenará el ' + pvDate() : 'Hace un momento'"></span>
+      <span class="pv-yt__privacy" x-show="(targets['{{ K }}'].options.privacy_status || 'public') !== 'public'">{{ icon("lock", 12) }}<span x-text="targets['{{ K }}'].options.privacy_status === 'private' ? 'Privado' : 'Oculto'"></span></span></p>
+    <div class="pv-yt__channel">
+      {{ avatar(K) }}
+      <div class="grow"><strong x-text="displayName('{{ K }}')"></strong><small>0 suscriptores</small></div>
+      <span class="pv-yt__sub">Suscribirse</span>
+    </div>
+    <div class="pv-yt__actions"><span>{{ icon("thumbs-up", 16) }} 0 <i></i>{{ icon("thumbs-down", 16) }}</span><span>{{ icon("forward", 16) }} Compartir</span><span>{{ icon("download", 16) }} Descargar</span></div>
+    <div class="pv-yt__desc" x-show="pvText('{{ K }}')" x-html="pvRich('{{ K }}', 220)" @click="pvExpanded = !pvExpanded"></div>
+  </div>
+</article>
+{%- endmacro %}
+
+{% macro demo_card(K) -%}
+<article class="pv-fb pv-demo">
+  <header class="pv-fb__head">
+    <span class="pv-avatar pv-avatar--demo">{{ icon("flask-conical", 18) }}</span>
+    <div class="pv-fb__who"><strong x-text="displayName('{{ K }}')"></strong><small>Red de prueba · <span x-text="pvDate()"></span></small></div>
+  </header>
+  <div class="pv-fb__text" x-show="pvText('{{ K }}')" x-html="pvRich('{{ K }}', 300)" @click="pvExpanded = !pvExpanded"></div>
+  {{ media_grid(K) }}
+  <footer class="pv-demo__foot">{{ icon("info", 14) }} En la red Demo no se publica nada de verdad.</footer>
+</article>
+{%- endmacro %}

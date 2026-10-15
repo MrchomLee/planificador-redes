@@ -1,0 +1,27 @@
+{#- Estadísticas layout (doc 05 §4, screenshot 2): left network sidebar + content column.
+    Child templates fill: an_header (tabs / title + period pickers), an_content. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% import "analytics/_macros.html" as am with context %}
+
+{% block head %}<link rel="stylesheet" href="{{ static_url('css/analytics.css') }}">{% endblock %}
+{% block scripts %}
+<script src="{{ static_url('vendor/chart.js/chart.umd.min.js') }}" defer></script>
+<script src="{{ static_url('js/analytics.js') }}" defer></script>
+{% endblock %}
+{% block body_class %}page-analytics{% endblock %}
+{% block main_class %}app-main--wide an-main{% endblock %}
+
+{% block content %}
+<div class="an-layout">
+  <aside class="an-layout__side">
+    {{ am.sidebar(sidebar, resumen_href, export_url, active_section) }}
+  </aside>
+  <div class="an-layout__main" id="an-main">
+    {% block an_header %}{% endblock %}
+    {% block an_content %}{% endblock %}
+  </div>
+</div>
+<script type="application/json" id="an-data">{{ chart_data|tojson }}</script>
+<div class="an-tip" id="an-tip" role="tooltip" hidden></div>
+{% endblock %}

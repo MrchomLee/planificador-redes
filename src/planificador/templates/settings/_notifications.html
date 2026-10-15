@@ -1,0 +1,43 @@
+{#- Ajustes → Avisos. Context: notif {desktop, browser}. -#}
+{% import "components/ui.html" as ui with context %}
+{% import "settings/_macros.html" as sm with context %}
+<section class="settings-section card" id="avisos" aria-labelledby="avisos-title">
+  <header class="settings-section__head">
+    <span class="settings-section__icon" aria-hidden="true">{{ icon("bell", 20) }}</span>
+    <div class="settings-section__titles">
+      <h2 class="settings-section__title" id="avisos-title">Avisos</h2>
+      <p class="settings-section__subtitle">Te avisamos cuando toca una publicación asistida, cuando falla una publicación o cuando hay que reconectar una cuenta.</p>
+    </div>
+  </header>
+  <div class="settings-section__body">
+    <form method="post" action="/ajustes/avisos" hx-post="/ajustes/avisos" hx-target="#avisos" hx-swap="outerHTML" class="stack">
+      {{ sm.csrf() }}
+      {{ ui.switch("desktop", "Avisos de escritorio", checked=notif.desktop, id="sw-notif-desktop",
+                   help="Notificación del sistema (Windows, macOS o Linux) aunque el navegador esté cerrado, mientras la aplicación esté en marcha.") }}
+      {{ ui.switch("browser", "Avisos del navegador", checked=notif.browser, id="sw-notif-browser",
+                   help="Notificación del navegador cuando tienes Planificador abierto en una pestaña (aunque estés en otra).") }}
+      <div class="settings-section__foot settings-section__foot--inline">
+        <button type="button" class="btn btn--secondary" hx-post="/ajustes/avisos/probar" hx-swap="none">{{ icon("send", 16) }}<span>Enviar aviso de prueba</span></button>
+        {{ sm.save_button() }}
+      </div>
+    </form>
+    <div class="notify-help">
+      <div class="notify-help__row">
+        <span class="notify-help__icon">{{ icon("bell-ring", 18) }}</span>
+        <div class="notify-help__text">
+          <strong>Permiso del navegador</strong>
+          <span class="text-sm muted" data-notify-status>Comprobando…</span>
+        </div>
+        <button type="button" class="btn btn--soft btn--sm" data-notify-enable hidden>{{ icon("bell-ring", 15) }}<span>Activar avisos del navegador</span></button>
+      </div>
+      <details class="advanced">
+        <summary>{{ icon("circle-question-mark", 15) }}<span>¿Los avisos del navegador están bloqueados?</span>{{ icon("chevron-down", 15, cls="advanced__chev") }}</summary>
+        <ol class="advanced__body notify-help__steps">
+          <li>Pulsa el icono a la izquierda de la dirección (<code>localhost</code>) en la barra del navegador.</li>
+          <li>En <em>Notificaciones</em>, elige <strong>Permitir</strong>.</li>
+          <li>Recarga esta página. En Windows, revisa también que el modo «No molestar» esté desactivado.</li>
+        </ol>
+      </details>
+    </div>
+  </div>
+</section>

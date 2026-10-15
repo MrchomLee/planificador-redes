@@ -1,0 +1,66 @@
+{#- Ideas board columns (swapped into #ideas-board). Context: idea_columns, idea_stage_labels. -#}
+{% import "components/ui.html" as ui with context %}
+{% import "planner/_macros.html" as pm with context %}
+{% for col in idea_columns %}
+<section class="idea-col idea-col--{{ col.key }}{% if not col.rows %} is-empty{% endif %}" data-stage="{{ col.key }}"
+         aria-labelledby="idea-col-{{ col.key }}"
+         @dragover="over($event, '{{ col.key }}')" @dragleave="leave($event, '{{ col.key }}')" @drop="drop($event, '{{ col.key }}')"
+         :class="overCol === '{{ col.key }}' && 'is-over'">
+  <header class="idea-col__head">
+    <span class="idea-col__dot" aria-hidden="true"></span>
+    <h2 class="idea-col__title" id="idea-col-{{ col.key }}">{{ col.label }}</h2>
+    <span class="count-pill" data-count>{{ col.rows|length }}</span>
+    <a class="icon-btn icon-btn--sm idea-col__add" href="/publicaciones/nueva?tipo=idea&amp;etapa={{ col.key }}"
+       hx-get="/publicaciones/nueva?tipo=idea&amp;etapa={{ col.key }}" hx-target="#modal-root" hx-swap="innerHTML" hx-push-url="false"
+       aria-label="Nueva idea en «{{ col.label }}»" title="Nueva idea en «{{ col.label }}»">{{ icon("plus", 16) }}</a>
+  </header>
+  <p class="idea-col__hint">{{ col.hint }}</p>
+  <div class="idea-col__list" role="list">
+    {% for row in col.rows %}
+    <article class="idea-card" id="idea-{{ row.id }}" role="listitem" draggable="true" data-id="{{ row.id }}"
+             data-search="{{ row.text }} {{ row.notes or '' }}"
+             @dragstart="start($event, {{ row.id }})" @dragend="end($event)">
+      {% if row.thumb_url %}{{ pm.thumb(row, 56, cls="idea-card__thumb") }}{% endif %}
+      <button type="button" class="idea-card__open" hx-get="/publicaciones/{{ row.id }}" hx-target="#drawer-root" hx-swap="innerHTML"
+              title="Ver el detalle de la idea">
+        <span class="idea-card__text">{% if row.excerpt %}{{ row.excerpt }}{% else %}<em class="subtle">Idea sin texto</em>{% endif %}</span>
+      </button>
+      <footer class="idea-card__foot">
+        {% if row.targets %}{{ pm.nets(row, 18, show_status=False) }}{% endif %}
+        {% if row.notes %}<span class="idea-card__note" title="Tiene notas internas">{{ icon("sticky-note", 14) }}</span>{% endif %}
+        <span class="idea-card__time">{{ ui.reltime(row.updated_at) }}</span>
+        <div class="dropdown idea-card__menu" x-data="dropdown" @keydown="onKeydown($event)" @click.outside="close()">
+          <button type="button" class="icon-btn icon-btn--sm" x-ref="button" @click="toggle()" :aria-expanded="open ? 'true' : 'false'"
+                  aria-haspopup="menu" aria-label="Acciones de la idea" title="Acciones">{{ icon("ellipsis", 16) }}</button>
+          <div class="dropdown__menu dropdown__menu--end" x-ref="menu" x-show="open" x-cloak role="menu"
+               x-transition:enter.duration.120ms x-transition:leave.duration.80ms
+               @click="if ($event.target.closest('button, a[href]')) close()">
+            <button type="button" class="dropdown__item" role="menuitem" hx-get="/publicaciones/{{ row.id }}" hx-target="#drawer-root" hx-swap="innerHTML">
+              {{- icon("eye", 16) }}<span>Ver detalle</span></button>
+            <div class="dropdown__label">Mover a</div>
+            {% for key, label in idea_stage_labels.items() if key != col.key %}
+            <button type="button" class="dropdown__item" role="menuitem" hx-post="/ideas/{{ row.id }}/etapa" hx-vals='{"etapa": "{{ key }}"}'
+                    hx-target="#ideas-board" hx-swap="innerHTML">
+              {{- icon("arrow-right", 16) }}<span>{{ label }}</span></button>
+            {% endfor %}
+            <div class="dropdown__sep" role="separator"></div>
+            <button type="button" class="dropdown__item" role="menuitem" hx-post="/ideas/{{ row.id }}/acciones" hx-vals='{"accion": "duplicar"}'
+                    hx-target="#ideas-board" hx-swap="innerHTML">
+              {{- icon("copy", 16) }}<span>Duplicar</span></button>
+            <button type="button" class="dropdown__item dropdown__item--danger" role="menuitem" hx-post="/ideas/{{ row.id }}/acciones"
+                    hx-vals='{"accion": "papelera"}' hx-target="#ideas-board" hx-swap="innerHTML"
+                    hx-confirm="La idea se moverá a la papelera. Podrás restaurarla durante 45 días."
+                    data-confirm-title="¿Mover a la papelera?" data-confirm-ok="Mover a la papelera" data-confirm-danger>
+              {{- icon("trash", 16) }}<span>Mover a la papelera</span></button>
+          </div>
+        </div>
+      </footer>
+    </article>
+    {% endfor %}
+  </div>
+  <div class="idea-col__empty">
+    {{ icon("lightbulb", 20, stroke=1.75) }}
+    <span>{% if loop.first %}Apunta aquí tus ocurrencias con «Nueva idea»{% else %}Arrastra aquí una idea{% endif %}</span>
+  </div>
+</section>
+{% endfor %}

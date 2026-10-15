@@ -1,0 +1,33 @@
+{#- "Publicación asistida" as a full page (fallback for direct navigation / desktop notification links). -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% block content %}
+<nav class="pd-crumbs" aria-label="Ruta">
+  <a href="/planificacion">{{ icon("calendar-days", 15) }}<span>Planificación</span></a>
+  {{ icon("chevron-right", 14) }}
+  <a href="/publicaciones/{{ post.id }}">Publicación</a>
+  {{ icon("chevron-right", 14) }}
+  <span aria-current="page">Publicación asistida</span>
+</nav>
+<div class="card assist-page">
+  <header class="assist-page__head">
+    <span class="assist-modal__icon" aria-hidden="true">{{ icon("hand", 20) }}</span>
+    <div>
+      <h1 class="assist-page__title">Publicación asistida</h1>
+      <p class="muted">Publícala tú en {{ network_name }} en cinco pasos y márcala como publicada.</p>
+    </div>
+  </header>
+  <div class="assist-page__body">
+    {% include "posts/_assisted_body.html" %}
+  </div>
+  <footer class="card__footer">
+    <a class="btn btn--ghost" href="/publicaciones/{{ post.id }}">{{ icon("arrow-left", 16) }}<span>Volver a la publicación</span></a>
+    <span class="spacer" style="margin-right:auto"></span>
+    {% if can_mark_done %}
+    <button type="submit" class="btn btn--primary" form="assist-done-{{ target.id }}">{{ icon("circle-check", 17) }}<span>Marcar como publicado</span></button>
+    {% elif done %}
+    <button type="submit" class="btn btn--secondary" form="assist-done-{{ target.id }}">{{ icon("link", 16) }}<span>Guardar enlace</span></button>
+    {% endif %}
+  </footer>
+</div>
+{% endblock %}

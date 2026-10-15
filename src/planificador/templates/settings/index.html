@@ -1,0 +1,27 @@
+{#- Ajustes. Context: routes.settings.full_context(). -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% block head %}<link rel="stylesheet" href="{{ static_url('css/settings.css') }}">{% endblock %}
+{% block scripts %}<script src="{{ static_url('js/settings.js') }}" defer></script>{% endblock %}
+{% block body_class %}page-settings{% endblock %}
+{% block content %}
+{{ ui.page_header("Ajustes", subtitle="Claves de tus apps de desarrollador, publicación, URL pública para Instagram, contraseña y avisos.") }}
+<div class="settings-layout">
+  <nav class="settings-nav" aria-label="Secciones de ajustes" data-settings-nav>
+    {% for key, label, ic in sections %}
+    <a class="settings-nav__link{% if loop.first %} is-active{% endif %}" href="#{{ key }}" data-section="{{ key }}">{{ icon(ic, 18) }}<span>{{ label }}</span></a>
+    {% endfor %}
+    <div class="settings-nav__sep" role="separator"></div>
+    <a class="settings-nav__link settings-nav__link--secondary" href="/conexiones">{{ icon("plug", 18) }}<span>Cuentas conectadas</span>{{ icon("arrow-up-right", 14, cls="settings-nav__ext") }}</a>
+    <a class="settings-nav__link settings-nav__link--secondary" href="/marcas">{{ icon("building", 18) }}<span>Marcas</span>{{ icon("arrow-up-right", 14, cls="settings-nav__ext") }}</a>
+  </nav>
+  <div class="settings-content">
+    {% include "settings/_credentials.html" %}
+    {% include "settings/_publishing.html" %}
+    {% include "settings/_public_media.html" %}
+    {% include "settings/_security.html" %}
+    {% include "settings/_notifications.html" %}
+    {% include "settings/_about.html" %}
+  </div>
+</div>
+{% endblock %}

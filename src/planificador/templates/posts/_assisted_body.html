@@ -1,0 +1,154 @@
+{#- "Publicación asistida" steps (modal body / page). Context: assisted_publish() in routes/posts.py. -#}
+{% import "components/ui.html" as ui with context %}
+{% import "posts/_macros.html" as pm with context %}
+{% set t = target %}
+<div class="assist" x-data="assistedChecklist({{ t.id }})">
+  <div class="assist-head">
+    {{ net_icon(network, 40) }}
+    <div class="grow">
+      <div class="assist-head__account">{{ account.display_name if account else "Cuenta eliminada" }}</div>
+      <div class="assist-head__meta">
+        <span>{{ network_name }}</span><span class="ptarget__fmt">{{ format_label }}</span>
+        {% if t.scheduled_at %}<span>{{ icon("calendar-clock", 14) }}{{ t.scheduled_at|dt_es(tz) }}</span>{% endif %}
+      </div>
+    </div>
+    {{ ui.badge(status) }}
+  </div>
+
+  {% if done %}
+  {% set view %}{% if t.external_url %}<a class="btn btn--secondary btn--sm" href="{{ t.external_url }}" target="_blank" rel="noopener noreferrer">{{ icon("external-link", 15) }}<span>Ver en {{ network_name }}</span></a>{% endif %}{% endset %}
+  {{ ui.info_alert("Ya está marcada como publicada" ~ (" el " ~ (t.published_at|dt_es(tz)) if t.published_at else "") ~ ".", tone="success", actions=view) }}
+  {% elif deleted %}
+  {{ ui.info_alert("Esta publicación está en la papelera. Restáurala si quieres publicarla.", tone="warning") }}
+  {% elif status == "scheduled" %}
+  {{ ui.info_alert("Todavía no es la hora programada. Puedes prepararla ya: te avisaremos también a la hora prevista.") }}
+  {% endif %}
+
+  <ol class="assist-steps">
+    <li class="assist-step">
+      <span class="assist-step__num" aria-hidden="true">1</span>
+      <div class="assist-step__body">
+        <h3 class="assist-step__title">Copia el texto</h3>
+        {% if youtube %}
+        <div class="assist-field">
+          <div class="assist-field__head"><label for="assist-title-{{ t.id }}">Título</label>
+            <button type="button" class="btn btn--soft btn--sm" data-copy-target="#assist-title-{{ t.id }}" data-copy-message="Título copiado" autofocus>{{ icon("copy", 15) }}<span>Copiar título</span></button></div>
+          <input class="input" id="assist-title-{{ t.id }}" type="text" readonly value="{{ youtube.title }}">
+        </div>
+        <div class="assist-field">
+          <div class="assist-field__head"><label for="assist-text-{{ t.id }}">Descripción</label>
+            <button type="button" class="btn btn--soft btn--sm" data-copy-target="#assist-text-{{ t.id }}" data-copy-message="Descripción copiada">{{ icon("copy", 15) }}<span>Copiar descripción</span></button></div>
+          <textarea class="textarea assist-text" id="assist-text-{{ t.id }}" rows="6" readonly>{{ text }}</textarea>
+        </div>
+        <div class="assist-field">
+          <div class="assist-field__head"><label for="assist-tags-{{ t.id }}">Etiquetas</label>
+            {% if youtube.tags %}<button type="button" class="btn btn--soft btn--sm" data-copy-target="#assist-tags-{{ t.id }}" data-copy-message="Etiquetas copiadas">{{ icon("copy", 15) }}<span>Copiar etiquetas</span></button>{% endif %}</div>
+          <input class="input" id="assist-tags-{{ t.id }}" type="text" readonly value="{{ youtube.tags }}" placeholder="Sin etiquetas">
+        </div>
+        {% else %}
+        <div class="assist-field">
+          <textarea class="textarea assist-text" id="assist-text-{{ t.id }}" rows="6" readonly aria-label="Texto de la publicación">{{ text }}</textarea>
+          <div class="assist-field__foot">
+            <span class="char-counter">{{ text|length }} caracteres</span>
+            <button type="button" class="btn btn--primary btn--sm" data-copy-target="#assist-text-{{ t.id }}" data-copy-message="Texto copiado: pégalo en {{ network_name }}" {% if not text %}disabled{% else %}autofocus{% endif %}>{{ icon("copy", 15) }}<span>Copiar texto</span></button>
+          </div>
+        </div>
+        {% endif %}
+      </div>
+    </li>
+
+    <li class="assist-step">
+      <span class="assist-step__num" aria-hidden="true">2</span>
+      <div class="assist-step__body">
+        <h3 class="assist-step__title">Descarga los medios</h3>
+        {% if media_rows %}
+        <ul class="assist-media" role="list">
+          {% for row in media_rows %}
+          {% set a = row.asset %}
+          <li class="assist-media__row">
+            <span class="assist-media__thumb">
+              <img class="js-pd-thumb" src="/medios/{{ a.id }}/miniatura" alt="" loading="lazy">
+              <span class="pd-thumb__fallback" aria-hidden="true">{{ icon("video" if a.is_video else "image", 18) }}</span>
+              {% if a.is_video %}<span class="pd-thumb__play" aria-hidden="true">{{ icon("play", 11, stroke=2.5) }}</span>{% endif %}
+            </span>
+            <span class="assist-media__info">
+              <span class="assist-media__name truncate" title="{{ a.original_name }}">{{ loop.index }}. {{ a.original_name or ("Medio " ~ a.id) }}</span>
+              <span class="assist-media__meta">
+                {{ "Vídeo" if a.is_video else "Imagen" }} · {{ a.size_bytes|filesize }}
+                {%- if a.width and a.height %} · {{ a.width }}×{{ a.height }}{% endif %}
+                {%- if a.is_video and a.duration_s %} · {{ (a.duration_s // 60)|int }}:{{ "%02d"|format((a.duration_s % 60)|int) }}{% endif %}
+              </span>
+            </span>
+            {% if row.available %}
+            <a class="btn btn--secondary btn--sm" href="/medios/{{ a.id }}/archivo?descargar=1" download>{{ icon("download", 15) }}<span>Descargar</span></a>
+            {% else %}
+            <span class="badge tone-danger" title="El archivo ya no está en el disco">{{ icon("file-x", 13) }}<span>No disponible</span></span>
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+        {% if zip_ready %}
+        <a class="btn btn--soft assist-zip" href="/objetivos/{{ t.id }}/medios.zip" download>{{ icon("file-archive", 16) }}<span>Descargar todo (.zip)</span></a>
+        {% endif %}
+        {% else %}
+        <p class="pd-empty">Esta publicación no lleva medios.</p>
+        {% endif %}
+      </div>
+    </li>
+
+    <li class="assist-step">
+      <span class="assist-step__num" aria-hidden="true">3</span>
+      <div class="assist-step__body">
+        <h3 class="assist-step__title">Abre {{ network_name }}</h3>
+        {% if open_url %}
+        <a class="assist-open assist-open--{{ network }}" href="{{ open_url }}" target="_blank" rel="noopener noreferrer">
+          {{ net_icon(network, 28, title=False) }}<span>{{ open_label }}</span>{{ icon("external-link", 16) }}</a>
+        <p class="assist-hint">Se abre en una pestaña nueva. Comprueba que has iniciado sesión con <strong>{{ account.display_name if account else network_name }}</strong>.</p>
+        {% else %}
+        <p class="assist-hint">La red Demo es simulada: márcala como publicada para probar el flujo completo.</p>
+        {% endif %}
+      </div>
+    </li>
+
+    <li class="assist-step">
+      <span class="assist-step__num" aria-hidden="true">4</span>
+      <div class="assist-step__body">
+        <h3 class="assist-step__title">Antes de publicar, revisa</h3>
+        <ul class="assist-check" role="list">
+          {% for item in checklist %}
+          <li class="assist-check__item">
+            <label class="check">
+              <input type="checkbox" :checked="isDone({{ loop.index0 }})" @change="toggle({{ loop.index0 }}, $event.target.checked)">
+              <span class="check__label">{{ item.text }}</span>
+            </label>
+            {% if item.copy %}<button type="button" class="btn btn--ghost btn--sm" data-copy="{{ item.copy }}">{{ icon("copy", 14) }}<span>Copiar</span></button>{% endif %}
+            {% if item.download_url %}<a class="btn btn--ghost btn--sm" href="{{ item.download_url }}" download>{{ icon("download", 14) }}<span>Descargar</span></a>{% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+    </li>
+
+    <li class="assist-step">
+      <span class="assist-step__num" aria-hidden="true">5</span>
+      <div class="assist-step__body">
+        <h3 class="assist-step__title">Marca como publicado</h3>
+        {% if can_mark_done or done %}
+        <form id="assist-done-{{ t.id }}" class="assist-done"
+              {%- if htmx_layer %} hx-post="/objetivos/{{ t.id }}/marcar-publicado" hx-swap="none"
+              {%- else %} method="post" action="/objetivos/{{ t.id }}/marcar-publicado"{% endif %}>
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="origen" value="asistida">
+          {% if not htmx_layer %}<input type="hidden" name="next" value="/publicaciones/{{ post.id }}">{% endif %}
+          <label class="form-field__label" for="assist-url-{{ t.id }}">Enlace a la publicación <span class="optional">(opcional)</span></label>
+          <input class="input" type="url" name="url" id="assist-url-{{ t.id }}" inputmode="url" autocomplete="off"
+                 placeholder="https://…" value="{{ t.external_url or '' }}">
+          <p class="form-field__help">Pega el enlace cuando ya esté publicada para poder abrirla desde el calendario.</p>
+        </form>
+        {% else %}
+        <p class="assist-hint">Esta publicación está «{{ status|status_label }}» y no se puede marcar como publicada.</p>
+        {% endif %}
+      </div>
+    </li>
+  </ol>
+</div>

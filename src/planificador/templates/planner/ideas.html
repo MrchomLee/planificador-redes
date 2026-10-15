@@ -1,0 +1,26 @@
+{#- Planificación › Ideas: Kanban of undated posts (kind=idea) — Idea · En progreso · Lista. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% import "planner/_macros.html" as pm with context %}
+
+{% block head %}<link rel="stylesheet" href="{{ static_url('css/planner.css') }}">{% endblock %}
+{% block scripts %}<script src="{{ static_url('js/planner.js') }}" defer></script>{% endblock %}
+{% block body_class %}page-planner{% endblock %}
+
+{% block content %}
+<h1 class="visually-hidden">Planificación · Ideas</h1>
+{% include "planner/_subnav.html" %}
+
+<section class="planner-ideas" x-data="ideasBoard" aria-label="Tablero de ideas">
+  <div class="ptoolbar" role="toolbar" aria-label="Herramientas de ideas">
+    {{ pm.search(placeholder="Buscar ideas", attrs={"x-model": "q", "@input.debounce.150ms": "filter()",
+                                                    "@keydown.escape": "q = ''; filter()"}) }}
+    <p class="ptoolbar__hint">{{ icon("info", 15) }}<span>Arrastra las tarjetas entre columnas. Las ideas no tienen fecha: prográmalas desde su detalle.</span></p>
+    {{ pm.create_button("Nueva idea", short="Nueva", query="tipo=idea") }}
+  </div>
+
+  <div id="ideas-board" class="ideas-board" hx-get="/ideas" hx-trigger="planner:refresh from:body" hx-target="this" hx-swap="innerHTML">
+    {% include "planner/_ideas_board.html" %}
+  </div>
+</section>
+{% endblock %}

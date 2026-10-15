@@ -1,0 +1,106 @@
+{#- Right card: the selected conversation — header with actions, post context (thumbnail, caption, link),
+    the comment and its replies, and the reply box (htmx). `thread` is an inbox.Thread. -#}
+{% import "components/ui.html" as ui with context %}
+{% set t = thread %}
+{% set net = t.network_name %}
+<article class="ib-thread" data-thread-id="{{ t.id }}" x-data="inboxThread({{ t.root.id }}, {{ t.reply_max }})">
+  <header class="ib-thread__head">
+    <button type="button" class="icon-btn ib-thread__back" data-inbox-back aria-label="Volver a la lista" title="Volver a la lista">{{ icon("arrow-left", 18) }}</button>
+    <span class="ib-thread__avatar">
+      {{ ui.avatar(t.author[:1]|upper, avatar_color(t.author), size=40, title=t.author) }}
+      {{ net_icon(t.network, 18, title=False, cls="ib-item__net") }}
+    </span>
+    <div class="ib-thread__titles">
+      <h2 class="ib-thread__title truncate">{{ t.author }}</h2>
+      <p class="ib-thread__sub">
+        Comentó en {{ net }} · {{ t.account.display_name }} · {{ ui.reltime(t.root.created_time) }}
+      </p>
+    </div>
+    <div class="ib-thread__actions">
+      {% if t.is_resolved %}
+      <span class="badge tone-success badge--lg">{{ icon("circle-check", 14) }}<span>Resuelto</span></span>
+      <button type="button" class="btn btn--ghost btn--sm" hx-post="/comentarios/{{ t.root.id }}/resolver" hx-vals='{"resuelto": "0"}'
+              hx-target="#inbox-thread" hx-swap="innerHTML" hx-disabled-elt="this">{{ icon("undo", 16) }}<span>Reabrir</span></button>
+      {% else %}
+      <button type="button" class="btn btn--secondary btn--sm ib-resolve" hx-post="/comentarios/{{ t.root.id }}/resolver" hx-vals='{"resuelto": "1"}'
+              hx-target="#inbox-thread" hx-swap="innerHTML" hx-disabled-elt="this">{{ icon("check", 16) }}<span>Marcar como resuelto</span></button>
+      {% endif %}
+      {% call ui.dropdown("Más acciones", icon_name="ellipsis-vertical", align="end", variant="ghost", size="sm", icon_only=True) %}
+        {{ ui.dropdown_item("Marcar como no leído", icon_name="mail-dot", attrs={"hx-post": "/comentarios/" ~ t.root.id ~ "/no-leido", "hx-target": "#inbox-thread", "hx-swap": "innerHTML"}) }}
+        {% if t.comment_link %}{{ ui.dropdown_item("Ver el comentario en " ~ net, href=t.comment_link, icon_name="external-link", attrs={"target": "_blank", "rel": "noopener noreferrer"}) }}{% endif %}
+        {% if t.context.permalink %}{{ ui.dropdown_item("Ver la publicación en " ~ net, href=t.context.permalink, icon_name="external-link", attrs={"target": "_blank", "rel": "noopener noreferrer"}) }}{% endif %}
+        {% if t.context.post_id %}{{ ui.dropdown_item("Abrir en Planificación", icon_name="calendar-days", attrs={"hx-get": "/publicaciones/" ~ t.context.post_id, "hx-target": "#drawer-root", "hx-swap": "innerHTML"}) }}{% endif %}
+      {% endcall %}
+    </div>
+  </header>
+
+  <div class="ib-thread__scroll" data-inbox-scroll>
+    <section class="ib-post" aria-label="Publicación comentada">
+      <div class="ib-post__thumb">
+        {% if t.context.thumb_url %}<img src="{{ t.context.thumb_url }}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
+        {{ icon("image", 20, cls="ib-post__ph") }}
+      </div>
+      <div class="ib-post__body">
+        <div class="ib-post__label">{{ net_icon(t.network, 16, title=False) }}<span>Publicación de {{ t.account.display_name }}</span></div>
+        {% if t.context.caption %}
+        <p class="ib-post__caption clamp-3">{{ t.context.caption }}</p>
+        {% else %}
+        <p class="ib-post__caption muted">Publicación sin texto o no disponible.</p>
+        {% endif %}
+        <div class="ib-post__links">
+          {% if t.context.permalink %}<a href="{{ t.context.permalink }}" target="_blank" rel="noopener noreferrer">{{ icon("external-link", 14) }}<span>Ver en {{ net }}</span></a>{% endif %}
+          {% if t.context.post_id %}<button type="button" class="btn--link" hx-get="/publicaciones/{{ t.context.post_id }}" hx-target="#drawer-root" hx-swap="innerHTML">{{ icon("calendar-days", 14) }}<span>Abrir en Planificación</span></button>{% endif %}
+        </div>
+      </div>
+    </section>
+
+    <ol class="ib-msgs" aria-label="Comentarios">
+      {% for c in t.comments %}
+      {% set is_root = c.id == t.root.id %}
+      {% set who = (t.account.display_name if c.from_us else (c.author_name or "Usuario")) %}
+      <li class="ib-msg{% if c.from_us %} ib-msg--ours{% endif %}{% if not is_root %} ib-msg--reply{% endif %}{% if not c.from_us and not c.read_at %} is-new{% endif %}" id="ib-msg-{{ c.id }}">
+        {% if c.from_us %}
+        {{ ui.avatar(brand.name if brand else who, (brand.color if brand else None) or "#5b4cf0", size=32, shape="rounded") }}
+        {% else %}
+        {{ ui.avatar(who[:1]|upper, avatar_color(who), size=32, title=who) }}
+        {% endif %}
+        <div class="ib-msg__bubble">
+          <div class="ib-msg__head">
+            <span class="ib-msg__author">{{ who }}</span>
+            {% if c.from_us %}<span class="ib-you">Tú</span>{% endif %}
+            <span class="ib-msg__time">{{ ui.reltime(c.created_time) }}</span>
+          </div>
+          <p class="ib-msg__text pre-line break">{{ c.text or "(sin texto)" }}</p>
+          {% if not c.from_us and t.can_reply %}
+          <button type="button" class="ib-msg__reply" @click="replyTo({{ c.id }}, {{ (c.author_name or 'Usuario')|tojson|forceescape }}, {{ 'true' if is_root else 'false' }})">
+            {{ icon("reply", 14) }}<span>Responder</span></button>
+          {% endif %}
+        </div>
+      </li>
+      {% endfor %}
+    </ol>
+  </div>
+
+  <footer class="ib-reply">
+    {% if t.can_reply %}
+    <form class="ib-reply__form" hx-post="/comentarios/{{ t.root.id }}/responder" hx-target="#inbox-thread" hx-swap="innerHTML"
+          hx-disabled-elt="find button[type=submit]" @keydown.ctrl.enter.prevent="submit($event)" @keydown.meta.enter.prevent="submit($event)">
+      <input type="hidden" name="responder_a" :value="target" value="{{ t.root.id }}">
+      <div class="ib-reply__to" x-show="targetName" x-cloak>
+        {{ icon("corner-down-right", 14) }}<span>Respondiendo a <strong x-text="targetName"></strong></span>
+        <button type="button" class="icon-btn icon-btn--sm" @click="clearTarget()" aria-label="Responder al comentario principal">{{ icon("x", 14) }}</button>
+      </div>
+      <label class="visually-hidden" for="ib-reply-text">Tu respuesta</label>
+      <textarea id="ib-reply-text" class="textarea ib-reply__text" name="texto" rows="2" maxlength="{{ t.reply_max }}" required
+                placeholder="Escribe una respuesta pública en {{ net }}…" x-ref="text" x-model="text"></textarea>
+      <div class="ib-reply__bar">
+        <span class="ib-reply__hint">{{ icon("globe", 13) }}La respuesta será pública · Ctrl + Intro para enviar</span>
+        <span class="char-counter" :class="{'is-near': text.length > max * 0.9, 'is-over': text.length > max}" x-text="text.length + ' / ' + max">0 / {{ t.reply_max }}</span>
+        <button type="submit" class="btn btn--primary btn--sm" :disabled="!text.trim()">{{ icon("send", 16) }}<span>Responder</span></button>
+      </div>
+    </form>
+    {% else %}
+    <div class="ib-reply__blocked">{{ icon("lock", 16) }}<span>{{ t.reply_block_reason }}</span></div>
+    {% endif %}
+  </footer>
+</article>

@@ -1,0 +1,50 @@
+{#- Cuentas conectadas (SPEC §6). Context: cards, connected_count, real_count, attention, demo_on. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% import "connections/_macros.html" as conn with context %}
+{% block head %}<link rel="stylesheet" href="{{ static_url('css/settings.css') }}">{% endblock %}
+{% block scripts %}<script src="{{ static_url('js/settings.js') }}" defer></script>{% endblock %}
+{% block body_class %}page-connections{% endblock %}
+{% block content %}
+{% call ui.page_header("Cuentas conectadas", subtitle="Una cuenta por red social para cada marca. Las conexiones usan el inicio de sesión oficial de cada red: la app nunca ve tus contraseñas.") %}
+  {% if active_brand %}
+  <a class="conn-brand" href="/marcas" title="Gestionar marcas">
+    {{ ui.brand_avatar(active_brand, 28) }}
+    <span class="conn-brand__text"><span class="conn-brand__eyebrow">Marca</span><span class="conn-brand__name truncate">{{ active_brand.name }}</span></span>
+    {{ icon("arrow-left-right", 15) }}
+  </a>
+  {% endif %}
+{% endcall %}
+
+<div class="conn-summary" role="status">
+  <div class="conn-summary__nets" aria-hidden="true">
+    {% for c in cards if c.network != "demo" %}{{ net_icon(c.network, 26, cls="" if c.has_account else "is-off") }}{% endfor %}
+  </div>
+  <p class="conn-summary__text"><strong>{{ connected_count }} de {{ real_count }}</strong> redes conectadas
+    {%- if active_brand %} en «{{ active_brand.name }}»{% endif %}.
+    {% if connected_count == 0 %}Conecta al menos una para empezar a programar.{% endif %}</p>
+  <a class="btn btn--ghost btn--sm conn-summary__help" href="/ayuda/meta">{{ icon("book-open", 15) }}<span>Guías de configuración</span></a>
+</div>
+
+{% for c in attention %}
+{% call ui.info_alert(tone="warning", title=c.label ~ " necesita que la vuelvas a conectar") %}
+  Las publicaciones programadas en {{ c.label }} no saldrán hasta que la reconectes{% if c.account and c.account.last_error %}: {{ c.account.last_error }}{% else %}.{% endif %}
+{% endcall %}
+{% endfor %}
+
+<div class="conn-grid">
+  {% for c in cards %}{{ conn.card(c) }}{% endfor %}
+</div>
+
+<div class="conn-notes">
+  {% call ui.info_alert(title="Fotos de Instagram") %}
+    Instagram descarga las fotos desde una dirección pública de Internet. Para publicar fotos activa la
+    <a href="/ajustes#url-publica">URL pública en Ajustes</a> (los vídeos y Facebook no la necesitan).
+  {% endcall %}
+  {% if not demo_on %}
+  {% call ui.info_alert(tone="muted", title="¿Quieres probar sin conectar nada?") %}
+    Activa el <a href="/ajustes#publicacion">modo prueba</a> y conecta la red Demo: podrás programar y «publicar» sin tocar tus redes.
+  {% endcall %}
+  {% endif %}
+</div>
+{% endblock %}

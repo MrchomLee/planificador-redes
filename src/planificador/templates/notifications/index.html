@@ -1,0 +1,47 @@
+{#- Notification centre (SPEC §11). Context: notifications_page(). -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% block body_class %}page-notifications{% endblock %}
+{% block content %}
+{% call ui.page_header("Notificaciones", subtitle="Avisos de publicación asistida, errores al publicar y conexiones que hay que renovar.") %}
+  <button type="button" class="btn btn--secondary" hx-post="/notificaciones/leer-todas" hx-swap="none"{% if not counts["no-leidas"] %} disabled{% endif %}>
+    {{- icon("check-check", 17) }}<span>Marcar todas como leídas</span></button>
+{% endcall %}
+
+<div class="alert alert--info notif-prompt" role="note" data-notify-prompt hidden>
+  {{ icon("bell-ring", 18) }}
+  <div class="alert__body">
+    <div class="alert__title">Recibe un aviso aunque estés en otra pestaña</div>
+    <div>Activa los avisos del navegador para enterarte en cuanto toque una publicación asistida o falle una publicación.</div>
+  </div>
+  <div class="alert__actions"><button type="button" class="btn btn--primary btn--sm" data-notify-enable>Activar avisos</button></div>
+</div>
+
+{% set qs_tipo = ("&tipo=" ~ tipo) if tipo else "" %}
+{% set tab_items = [
+  {"key": "todas", "label": "Todas", "href": "/notificaciones?filtro=todas" ~ qs_tipo, "count": counts["todas"]},
+  {"key": "no-leidas", "label": "No leídas", "href": "/notificaciones?filtro=no-leidas" ~ qs_tipo, "count": counts["no-leidas"]},
+] %}
+{% call ui.subtabs(tab_items, active=filtro, label="Filtrar notificaciones") %}
+  <div class="dropdown" x-data="dropdown" @keydown="onKeydown($event)" @click.outside="close()">
+    <button type="button" class="btn btn--ghost btn--sm nfilter__btn{% if tipo %} is-on{% endif %}" x-ref="button" @click="toggle()"
+            :aria-expanded="open ? 'true' : 'false'" aria-haspopup="menu">
+      {{- icon("funnel", 15) }}<span>{{ kind_filters[tipo] }}</span>{{ icon("chevron-down", 15) }}</button>
+    <div class="dropdown__menu dropdown__menu--end" x-ref="menu" role="menu" x-show="open" x-cloak
+         x-transition:enter.duration.120ms x-transition:leave.duration.80ms>
+      {% for key, label in kind_filters.items() %}
+      <a class="dropdown__item{% if key == tipo %} is-active{% endif %}" role="menuitemradio" aria-checked="{{ 'true' if key == tipo else 'false' }}"
+         href="/notificaciones?filtro={{ filtro }}{{ ('&tipo=' ~ key) if key else '' }}">
+        <span>{{ label }}</span>{% if key == tipo %}<span class="trail">{{ icon("check", 15) }}</span>{% endif %}</a>
+      {% endfor %}
+    </div>
+  </div>
+{% endcall %}
+
+<div class="card notif-page">
+  <div id="notif-page-list" class="notif-page__list" hx-get="/notificaciones?filtro={{ filtro }}{{ qs_tipo }}"
+       hx-trigger="notifications:changed from:body" hx-target="this" hx-swap="innerHTML">
+    {% include "notifications/_list.html" %}
+  </div>
+</div>
+{% endblock %}

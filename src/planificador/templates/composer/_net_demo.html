@@ -1,0 +1,10 @@
+{#- "Configuración de Demo": the fake network used in demo mode (SPEC §5). Vars: K, T, O, info. -#}
+<div class="cmp-fields">
+  <p class="cmp-note">{{ icon("flask-conical", 15) }} Red de prueba: no publica nada de verdad. Sirve para probar la planificación, los avisos y los errores.</p>
+  <div class="cmp-field" data-field="demo_fail">
+    <label class="cmp-label" for="demo-fail-{{ K }}">Resultado simulado</label>
+    <select id="demo-fail-{{ K }}" class="select" @change="{{ O }}.demo_fail = $event.target.value === 'none' ? null : $event.target.value" :disabled="ro">
+      {% for value, label in demo_failures %}<option value="{{ value }}" :selected="({{ O }}.demo_fail || 'none') === '{{ value }}'">{{ label }}</option>{% endfor %}
+    </select>
+  </div>
+</div>

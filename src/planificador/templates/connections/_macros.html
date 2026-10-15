@@ -1,0 +1,167 @@
+{#- Connection cards (routes/connections.py → Card). Import WITH CONTEXT (csrf_token, brand time zone). -#}
+{% import "components/ui.html" as ui with context %}
+
+{% macro copy_field(value, label="URI de redirección", id=None) -%}
+<div class="copy-field">
+  <code class="copy-field__value"{% if id %} id="{{ id }}"{% endif %}>{{ value }}</code>
+  <button type="button" class="btn btn--secondary btn--sm" data-copy="{{ value }}" data-copy-message="URI copiada" title="Copiar {{ label|lower }}">
+    {{- icon("copy", 15) }}<span>Copiar</span></button>
+</div>
+{%- endmacro %}
+
+{% macro csrf() -%}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{%- endmacro %}
+
+{% macro youtube_block(c) -%}
+{% set yt = c.youtube %}
+<section class="conn-yt" aria-label="Publicación en YouTube">
+  <div class="conn-yt__head">
+    <span class="conn-yt__label">{{ icon("shield-check", 16) }}Subidas por API</span>
+    {{ ui.tag(yt.lock_label, yt.lock_tone, dot=True) }}
+  </div>
+  {% if yt.test_running %}
+  <div class="alert alert--info alert--compact conn-yt__running" role="status">
+    {{ ui.spinner(label="Prueba en curso") }}
+    <div class="alert__body"><div class="alert__title">Probando…</div>
+      Subimos un vídeo de 2 segundos como «oculto», comprobamos la visibilidad que le deja YouTube y lo borramos. Puede tardar unos minutos.</div>
+  </div>
+  {% elif yt.test_message %}
+  {% set tone = {"unlocked": "success", "locked": "danger"}.get(yt.test_result, "warning") %}
+  {% call ui.info_alert(tone=tone, compact=True) %}
+    {{ yt.test_message }}
+    {% if yt.test_finished_at %}<span class="conn-yt__when"> · {{ ui.reltime(yt.test_finished_at) }}</span>{% endif %}
+  {% endcall %}
+  {% elif yt.test_interrupted %}
+  {{ ui.info_alert("La prueba anterior se interrumpió (¿se cerró la aplicación?). Vuelve a lanzarla.", tone="warning", compact=True) }}
+  {% else %}
+  <p class="conn-yt__help">Si tu proyecto de Google no ha pasado la auditoría de YouTube, los vídeos subidos con la API pueden quedarse
+    en privado. La <strong>prueba de bloqueo</strong> lo comprueba con un clip de 2 segundos que luego se borra.</p>
+  {% endif %}
+
+  <form class="conn-yt__mode" method="post" action="/conexiones/{{ c.account.id }}/youtube/modo"
+        hx-post="/conexiones/{{ c.account.id }}/youtube/modo" hx-trigger="change" hx-target="#conn-youtube" hx-swap="outerHTML">
+    {{ csrf() }}
+    <fieldset>
+      <legend class="conn-yt__legend">Cómo se publican los vídeos</legend>
+      <div class="segmented w-full" role="radiogroup" aria-label="Modo de publicación de YouTube">
+        <label><input type="radio" name="modo" value="assisted"{% if yt.mode == "assisted" %} checked{% endif %}>{{ icon("hand", 14) }}<span>Asistida</span></label>
+        <label><input type="radio" name="modo" value="api"{% if yt.mode == "api" %} checked{% endif %}>{{ icon("zap", 14) }}<span>Automática (API)</span></label>
+      </div>
+    </fieldset>
+    {{ ui.check("auditado", "Mi proyecto de Google ha superado la auditoría de YouTube", checked=yt.audited, id="ck-yt-audited-" ~ c.account.id) }}
+    <noscript><button type="submit" class="btn btn--secondary btn--sm">Guardar</button></noscript>
+  </form>
+
+  <div class="conn-yt__actions">
+    <form method="post" action="/conexiones/{{ c.account.id }}/youtube/prueba-bloqueo"
+          hx-post="/conexiones/{{ c.account.id }}/youtube/prueba-bloqueo" hx-target="#conn-youtube" hx-swap="outerHTML">
+      {{ csrf() }}
+      <button type="submit" class="btn btn--secondary btn--sm"{% if yt.test_running %} disabled{% endif %}>
+        {{- icon("flask-conical", 15) }}<span>{{ "Repetir prueba de bloqueo" if yt.lock_status != "unknown" else "Prueba de bloqueo" }}</span></button>
+    </form>
+    <a class="btn btn--ghost btn--sm" href="{{ yt.studio_url }}" target="_blank" rel="noopener noreferrer">{{ icon("external-link", 15) }}<span>YouTube Studio</span></a>
+  </div>
+</section>
+{%- endmacro %}
+
+{% macro card(c) -%}
+{% set acc = c.account %}
+<article class="card conn-card conn-card--{{ c.network }} is-{{ c.status }}" id="conn-{{ c.network }}" aria-labelledby="conn-{{ c.network }}-title"
+  {%- if c.polling %} hx-get="/conexiones/tarjeta/{{ c.network }}" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+  <header class="conn-card__head">
+    {{ net_icon(c.network, 40, title=False) }}
+    <div class="conn-card__titles">
+      <h2 class="conn-card__title" id="conn-{{ c.network }}-title">{{ c.label }}</h2>
+      <p class="conn-card__kind">{{ c.type_label if acc else ("Red de prueba" if c.network == "demo" else "Sin cuenta conectada") }}</p>
+    </div>
+    <span class="badge tone-{{ c.status_tone }} badge--dot conn-card__status">{{ c.status_label }}</span>
+  </header>
+
+  <div class="conn-card__body">
+    {% if acc %}
+    <div class="conn-account">
+      {{ ui.avatar(acc.name, "#8a91a3", src=c.avatar_url, size=52) }}
+      <div class="conn-account__text">
+        <div class="conn-account__name truncate" title="{{ acc.name }}">{{ acc.name }}</div>
+        {% if acc.username %}<div class="conn-account__user truncate">@{{ acc.username|replace("@", "", 1) }}</div>{% endif %}
+      </div>
+      {% if c.pending_targets %}
+      <span class="conn-account__pending" title="Publicaciones programadas para esta cuenta">{{ icon("clock", 14) }}{{ c.pending_targets }} pendiente{{ "s" if c.pending_targets != 1 }}</span>
+      {% endif %}
+    </div>
+
+    <dl class="conn-kv">
+      {% if c.expiry_text %}
+      <dt>Autorización</dt>
+      <dd><span class="conn-expiry conn-expiry--{{ c.expiry_tone }}">{{ c.expiry_text }}</span>
+        {%- if c.expiry_when %}<span class="conn-kv__date"> · {{ c.expiry_when|dt_es(fmt="short") }}</span>{% endif %}</dd>
+      {% endif %}
+      {% for label, value in c.details %}
+      <dt>{{ label }}</dt>
+      <dd>{% if value is string %}{{ value }}{% else %}<time datetime="{{ value|iso_utc }}" title="{{ value|dt_es }}">{{ value|date_es(fmt="short") }}</time> <span class="muted">· {{ ui.reltime(value) }}</span>{% endif %}</dd>
+      {% endfor %}
+    </dl>
+
+    {% if acc.last_error %}
+    {% call ui.info_alert(tone="danger", title="Último error", compact=True) %}{{ acc.last_error }}{% endcall %}
+    {% endif %}
+    {% for w in c.warnings %}{{ ui.info_alert(w, tone="warning", compact=True) }}{% endfor %}
+    {% if c.youtube %}{{ youtube_block(c) }}{% endif %}
+    {% else %}
+    <p class="conn-card__desc">{{ c.description }}</p>
+    {% if c.missing_message %}
+    {% call ui.info_alert(tone="warning", compact=True, cls="conn-card__missing") %}
+      {{ c.missing_message }} <a href="{{ c.settings_url }}">Configurar ahora</a>
+    {% endcall %}
+    {% endif %}
+    {% endif %}
+  </div>
+
+  <footer class="conn-card__foot">
+    {% if c.network == "demo" %}
+      {% if acc %}
+      <form method="post" action="/conexiones/{{ acc.id }}/desconectar" data-confirm="¿Desconectar la cuenta Demo?" data-confirm-ok="Desconectar" data-confirm-danger>
+        {{ csrf() }}<button type="submit" class="btn btn--danger-ghost btn--sm">{{ icon("unplug", 15) }}<span>Desconectar</span></button>
+      </form>
+      {% else %}
+      <form method="post" action="/conexiones/demo/conectar">
+        {{ csrf() }}<button type="submit" class="btn btn--primary btn--sm">{{ icon("plug", 15) }}<span>Conectar cuenta Demo</span></button>
+      </form>
+      {% endif %}
+    {% elif not acc %}
+      {% if c.configured %}
+      <a class="btn btn--primary btn--sm" href="{{ c.connect_url }}">{{ icon("plug", 15) }}<span>Conectar {{ c.label }}</span></a>
+      {% else %}
+      <a class="btn btn--primary btn--sm" href="{{ c.settings_url }}">{{ icon("settings", 15) }}<span>Ir a Ajustes</span></a>
+      <button type="button" class="btn btn--secondary btn--sm" disabled title="Configura primero las credenciales">{{ icon("plug", 15) }}<span>Conectar</span></button>
+      {% endif %}
+    {% else %}
+      {% if c.status == "needs_reconnect" %}
+      <a class="btn btn--primary btn--sm" href="{{ c.connect_url if c.configured else c.settings_url }}">{{ icon("refresh-cw", 15) }}<span>Reconectar</span></a>
+      {% else %}
+      <a class="btn btn--secondary btn--sm" href="{{ c.connect_url if c.configured else c.settings_url }}">{{ icon("refresh-cw", 15) }}<span>Reconectar</span></a>
+      <form method="post" action="/conexiones/{{ acc.id }}/comprobar">
+        {{ csrf() }}<button type="submit" class="btn btn--ghost btn--sm" title="Comprobar que el acceso sigue funcionando">{{ icon("activity", 15) }}<span>Comprobar</span></button>
+      </form>
+      {% endif %}
+      {% set confirm_msg = "¿Desconectar " ~ c.label ~ " (" ~ acc.display_name ~ ")? Se borrarán los tokens guardados." ~ (" Tiene " ~ c.pending_targets ~ " publicaci" ~ ("ón pendiente que no saldrá" if c.pending_targets == 1 else "ones pendientes que no saldrán") ~ " hasta que la vuelvas a conectar." if c.pending_targets else "") %}
+      <form class="conn-card__end" method="post" action="/conexiones/{{ acc.id }}/desconectar" data-confirm="{{ confirm_msg }}" data-confirm-title="Desconectar cuenta" data-confirm-ok="Desconectar" data-confirm-danger>
+        {{ csrf() }}<button type="submit" class="btn btn--danger-ghost btn--sm">{{ icon("unplug", 15) }}<span>Desconectar</span></button>
+      </form>
+    {% endif %}
+  </footer>
+
+  {% if c.redirect_uri %}
+  <details class="conn-dev">
+    <summary>{{ icon("code-xml", 15) }}<span>Datos para tu app de desarrollador</span>{{ icon("chevron-down", 15, cls="conn-dev__chev") }}</summary>
+    <div class="conn-dev__body">
+      <p class="conn-dev__label">URI de redirección que debes registrar{% if c.network in ("facebook", "instagram") %} (Facebook Login → URI de redireccionamiento de OAuth válidos){% elif c.network == "tiktok" %} (Login Kit → Redirect URI){% elif c.network == "youtube" %} (cliente OAuth de tipo «Aplicación web»){% endif %}:</p>
+      {{ copy_field(c.redirect_uri) }}
+      <div class="conn-dev__links">
+        {% if c.guide_url %}<a href="{{ c.guide_url }}">{{ icon("book-open", 15) }}<span>Guía paso a paso</span></a>{% endif %}
+        {% if c.settings_url %}<a href="{{ c.settings_url }}">{{ icon("key-round", 15) }}<span>Credenciales en Ajustes</span></a>{% endif %}
+      </div>
+    </div>
+  </details>
+  {% endif %}
+</article>
+{%- endmacro %}

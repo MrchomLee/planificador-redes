@@ -1,0 +1,42 @@
+{#- Ajustes helpers. Import WITH CONTEXT (csrf_token, errors, values). -#}
+{% import "components/ui.html" as ui with context %}
+
+{% macro csrf() -%}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{%- endmacro %}
+
+{% macro section_head(title, subtitle=None, icon_name=None, aside=None) -%}
+<header class="settings-section__head">
+  {% if icon_name %}<span class="settings-section__icon" aria-hidden="true">{{ icon(icon_name, 20) }}</span>{% endif %}
+  <div class="settings-section__titles">
+    <h2 class="settings-section__title">{{ title }}</h2>
+    {% if subtitle %}<p class="settings-section__subtitle">{{ subtitle }}</p>{% endif %}
+  </div>
+  {% if aside %}<div class="settings-section__aside">{{ aside }}</div>{% endif %}
+</header>
+{%- endmacro %}
+
+{#- Write-only secret input: never rendered back; "•••• guardado" placeholder + optional "borrar". -#}
+{% macro secret_field(name, label, is_set, error=None, help=None, id=None, clear_name="clear_secret") -%}
+{%- set fid = id or ("f-" ~ name) -%}
+<div class="form-field secret-field" x-data="{ show: false }">
+  <label class="form-field__label" for="{{ fid }}">{{ label }}
+    {%- if is_set %} {{ ui.tag("Guardado", "success", icon_name="lock", size="sm") }}{% endif %}</label>
+  <div class="secret-field__row">
+    <input class="input" id="{{ fid }}" name="{{ name }}" :type="show ? 'text' : 'password'" type="password" value=""
+           autocomplete="new-password" spellcheck="false" autocapitalize="off"
+           placeholder="{{ '•••••••• guardado' if is_set else 'Pega aquí el secreto' }}"
+           {%- if error %} aria-invalid="true" aria-describedby="{{ fid }}-error"{% endif %}>
+    <button type="button" class="icon-btn" @click="show = !show" :aria-pressed="show ? 'true' : 'false'"
+            :title="show ? 'Ocultar' : 'Mostrar lo que escribes'" aria-label="Mostrar u ocultar lo que escribes">
+      <span x-show="!show">{{ icon("eye", 17) }}</span><span x-show="show" x-cloak>{{ icon("eye-off", 17) }}</span></button>
+  </div>
+  {% if help or is_set %}<p class="form-field__help">{% if is_set %}Déjalo vacío para mantener el guardado. {% endif %}{{ help or "" }}</p>{% endif %}
+  {% if is_set %}
+  <label class="check secret-field__clear"><input type="checkbox" name="{{ clear_name }}" value="1"><span class="check__label">Borrar el secreto guardado</span></label>
+  {% endif %}
+  {% if error %}<p class="form-field__error" id="{{ fid }}-error">{{ icon("circle-alert", 14) }}<span>{{ error }}</span></p>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro save_button(label="Guardar") -%}
+<button type="submit" class="btn btn--primary">{{ icon("check", 16) }}<span>{{ label }}</span></button>
+{%- endmacro %}

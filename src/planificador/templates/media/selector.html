@@ -1,0 +1,47 @@
+{#- Media picker modal (GET /biblioteca/selector?multiple=1&kind=image|video|any), swapped into #modal-root.
+    On "Añadir" it dispatches window CustomEvent "media:selected" with
+    detail = {items: [{id, kind, name, thumb_url, url, width, height, duration_s}]} and closes.
+    Self-contained: loads media.css/media.js itself when the page did not. Context: views, total, page,
+    has_more, q, kind, multiple, fixed_kind, picker_kind. -#}
+{% import "components/ui.html" as ui with context %}
+{% import "media/_macros.html" as mm with context %}
+{% set what = {"image": "fotos", "video": "vídeos"}.get(fixed_kind, "fotos y vídeos") %}
+{% set footer %}
+<span class="picker__count" data-picker-count>Ningún archivo seleccionado</span>
+<span class="spacer"></span>
+<button type="button" class="btn btn--secondary" data-close>Cancelar</button>
+<button type="button" class="btn btn--primary" data-picker-confirm disabled>{{ icon("check", 18) }}<span>Añadir</span></button>
+{% endset %}
+{% call ui.modal("Biblioteca de medios", subtitle=("Elige " ~ ("uno o varios" if multiple else "un archivo") ~ " de tus " ~ what ~ " o sube uno nuevo."), size="xl", id="media-picker", footer=footer, body_cls="picker__body") %}
+<link rel="stylesheet" href="{{ static_url('css/media.css') }}">
+<div class="picker" data-media-picker data-event="media:selected" data-multiple="{{ 1 if multiple else 0 }}" data-kind="{{ picker_kind }}"
+     data-upload-url="/biblioteca/subir" data-max-bytes="{{ MAX_UPLOAD_BYTES }}">
+  <form class="picker__toolbar" role="search" hx-get="/biblioteca/selector" hx-target="#picker-results" hx-swap="innerHTML"
+        hx-trigger="input changed delay:300ms from:find [name=q], change from:find [name=tipo], submit">
+    <input type="hidden" name="multiple" value="{{ 1 if multiple else 0 }}">
+    <input type="hidden" name="kind" value="{{ picker_kind }}">
+    <label class="input-group picker__search">
+      {{ icon("search", 18) }}
+      <input class="input" type="search" name="q" value="{{ q }}" placeholder="Buscar por nombre" aria-label="Buscar en la biblioteca" autocomplete="off">
+    </label>
+    {% if not fixed_kind %}{{ mm.kind_filter(kind) }}{% endif %}
+    <span class="spacer"></span>
+    <button type="button" class="btn btn--secondary" data-upload-trigger>{{ icon("upload", 18) }}<span>Subir</span></button>
+    <input type="file" {% if multiple %}multiple {% endif %}hidden data-upload-input tabindex="-1" aria-hidden="true"
+           accept="{{ 'image/*,.heic,.heif' if fixed_kind == 'image' else ('video/mp4,video/quicktime,video/x-m4v,video/webm,.mp4,.mov,.m4v,.webm' if fixed_kind == 'video' else ACCEPT_TYPES) }}">
+  </form>
+  <div class="upload-tray upload-tray--compact" data-upload-tray hidden aria-live="polite"></div>
+  <div id="picker-results" class="picker__results" data-drop-zone>{% include "media/_picker_results.html" %}</div>
+</div>
+<script>
+  (function () {
+    var root = document.getElementById("media-picker");
+    function go() { if (window.MediaLib && root) window.MediaLib.initPicker(root); }
+    if (window.MediaLib) { go(); return; }
+    var s = document.createElement("script");
+    s.src = "{{ static_url('js/media.js') }}";
+    s.onload = go;
+    document.head.appendChild(s);
+  })();
+</script>
+{% endcall %}

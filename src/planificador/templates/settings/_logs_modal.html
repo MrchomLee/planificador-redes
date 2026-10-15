@@ -1,0 +1,15 @@
+{#- Last lines of logs/app.log (htmx modal). Context: log_lines, log_file. -#}
+{% import "components/ui.html" as ui with context %}
+{% set footer %}
+  <span class="text-xs muted grow truncate" title="{{ log_file }}">{{ log_file }}</span>
+  <button type="button" class="btn btn--secondary" data-copy-target="#log-view" data-copy-message="Registros copiados">{{ icon("copy", 16) }}<span>Copiar</span></button>
+  <button type="button" class="btn btn--primary" data-close>Cerrar</button>
+{% endset %}
+{% call ui.modal("Registros", subtitle="Últimas " ~ log_lines|length ~ " líneas. Los tokens y secretos se ocultan automáticamente.", size="xl", id="logs-modal", footer=footer, body_cls="modal__body--flush") %}
+  {% if log_lines %}
+  <pre class="log-view" id="log-view" tabindex="0">{% for line in log_lines %}<span class="log-line{% if ' ERROR ' in line or ' CRITICAL ' in line %} log-line--error{% elif ' WARNING ' in line %} log-line--warning{% endif %}">{{ line }}</span>
+{% endfor %}</pre>
+  {% else %}
+  {{ ui.empty_state("El registro está vacío", "Todavía no se ha escrito nada en el registro.", icon_name="scroll-text", compact=True) }}
+  {% endif %}
+{% endcall %}

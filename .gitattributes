@@ -1,0 +1,4 @@
+# Keep Windows launchers with CRLF line endings whatever the checkout platform.
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.sh text eol=lf

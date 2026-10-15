@@ -1,0 +1,402 @@
+{#- Composer UI (doc 05 §3 + §5b): header, editor card (left) and preview card (right).
+    Alpine component "composer" (static/js/composer.js). `layer` is "overlay" (inside #modal-root) or "page".
+    Per-account markup is rendered here with Jinja (logos, sections, previews) and bound by account key. -#}
+{% import "components/ui.html" as ui with context %}
+{% set FMT_ICONS = {"post": "layout-grid", "reel": "clapperboard", "story": "circle-dashed", "video": "play", "short": "zap", "photo": "image"} %}
+<div class="composer composer--{{ layer }}" x-data="composer" x-effect="track()" @keydown="onRootKeydown($event)"
+     @media:selected.window="onMediaSelected($event)" :class="{'is-readonly': ro, 'is-ready': ready}"
+     style="{% if layer == 'overlay' %}visibility:hidden;{% endif %}--pv-brand:{{ brand.color|css_color }}"
+     {%- if layer == "overlay" %} role="dialog" aria-modal="true" aria-labelledby="composer-title" tabindex="-1"{% endif %}>
+  {% if layer == "overlay" %}<link rel="stylesheet" href="{{ static_url('css/composer.css') }}">{% endif %}
+  <script type="application/json" data-composer-state>{{ state|tojson }}</script>
+
+  {# ------------------------------------------------------------------ header #}
+  <header class="composer__head">
+    <div class="composer__titles">
+      <h1 class="composer__title" id="composer-title">{{ composer_title }}</h1>
+      <span class="composer__brand" title="Marca: {{ brand.name }}">{{ ui.brand_avatar(brand, 26) }}<span class="truncate">{{ brand.name }}</span></span>
+      {% if post is not none %}{{ ui.badge(post.display_status) }}{% endif %}
+      <span class="composer__dirty" x-show="dirty && !savedOK" x-cloak title="Hay cambios sin guardar">{{ icon("circle-dot", 12) }}<span>Sin guardar</span></span>
+    </div>
+    <button type="button" class="btn btn--ghost composer__close" @click="requestClose()" title="Cerrar (Esc)">{{ icon("x", 20) }}<span>Cerrar</span></button>
+  </header>
+
+  <div class="composer__body">
+    {# ================================================================== editor card #}
+    <section class="composer__card composer__editor" aria-label="Editor de la publicación">
+      <div class="cmp-scroll" x-ref="scroll">
+        {% if readonly_reason %}
+        {% call ui.callout(tone="warning", title="Solo lectura", icon_name="lock", cls="cmp-readonly") %}
+          <p>{{ readonly_reason }}</p>
+          {% if state.urls.detail %}<p class="mt-2"><a href="{{ state.urls.detail }}">{{ icon("external-link", 14) }} Ver la ficha de la publicación</a></p>{% endif %}
+        {% endcall %}
+        {% endif %}
+
+        {% if post is not none and not readonly_reason %}
+        {% set failed = post.targets|selectattr("status", "in", ["error", "missed"])|list %}
+        {% if failed %}
+        {% call ui.callout(tone="danger", title="Hubo un problema al publicar", cls="cmp-readonly") %}
+          <ul class="list-plain">
+          {% for t in failed %}
+            <li class="row gap-2">{{ net_glyph(t.network, 15) }}<span><strong>{{ network_label(t.network) }}:</strong> {{ t.last_error or status_label(t.status) }}</span></li>
+          {% endfor %}
+          </ul>
+          <p class="mt-2 text-xs muted">Corrige lo necesario y vuelve a programarla.</p>
+        {% endcall %}
+        {% endif %}
+        {% endif %}
+
+        {# ---------------------------------------------------------- network row #}
+        <div class="cmp-nets" x-ref="nets" role="group" aria-label="Redes sociales">
+          {% for account, info in accounts %}
+          {% set K = info.key %}
+          <div class="cmp-net cmp-net--{{ info.network }}" :class="{'is-on': isSel('{{ K }}')}">
+            <button type="button" class="cmp-net__logo" @click="toggleNet('{{ K }}')" :aria-pressed="isSel('{{ K }}') ? 'true' : 'false'"
+                    :disabled="ro" title="{{ info.network_label }} · {{ info.display }}{% if info.status == 'needs_reconnect' %} (requiere reconexión){% endif %}">
+              {{ net_glyph(info.network, 34) }}
+              <span class="visually-hidden">{{ info.network_label }} · {{ info.display }}</span>
+              {% for f in info.formats %}
+              <span class="cmp-net__badge" x-show="isSel('{{ K }}') && fmt('{{ K }}') === '{{ f.key }}'" x-cloak>{{ icon(FMT_ICONS.get(f.key, "layout-grid"), 11, stroke=2.4) }}</span>
+              {% endfor %}
+              {% if info.status == "needs_reconnect" %}<span class="cmp-net__alert" aria-hidden="true">!</span>{% endif %}
+            </button>
+            {% if info.formats|length > 1 %}
+            <div class="dropdown cmp-fmt" x-data="dropdown" @keydown="onKeydown($event)" @click.outside="close()" x-show="isSel('{{ K }}')" x-cloak>
+              <button type="button" class="cmp-fmt__btn" x-ref="button" @click="toggle()" :aria-expanded="open ? 'true' : 'false'" aria-haspopup="menu"
+                      :disabled="ro" aria-label="Formato para {{ info.network_label }}">
+                <span x-text="formatLabel('{{ K }}')"></span>{{ icon("chevron-down", 14) }}
+              </button>
+              <div class="dropdown__menu cmp-fmt__menu" x-ref="menu" role="menu" x-show="open" x-cloak x-transition:enter.duration.120ms>
+                <div class="dropdown__label">Formato en {{ info.network_label }}</div>
+                {% for f in info.formats %}
+                <button type="button" class="dropdown__item" role="menuitemradio" :aria-checked="fmt('{{ K }}') === '{{ f.key }}' ? 'true' : 'false'"
+                        @click="setFormat('{{ K }}', '{{ f.key }}'); close()"{% if f.disabled %} aria-disabled="true" title="{{ f.disabled }}"{% endif %}>
+                  {{ icon(FMT_ICONS.get(f.key, "layout-grid"), 16) }}<span>{{ f.label }}</span>
+                  {% if f.disabled %}<span class="trail">No disponible</span>{% else %}<span class="trail" x-show="fmt('{{ K }}') === '{{ f.key }}'">{{ icon("check", 15) }}</span>{% endif %}
+                </button>
+                {% endfor %}
+              </div>
+            </div>
+            {% endif %}
+          </div>
+          {% endfor %}
+          <a class="cmp-net__add" href="{{ state.urls.connections }}" title="Conectar otra cuenta" aria-label="Conectar otra cuenta">{{ icon("plus", 22) }}</a>
+          <span class="cmp-nets__spacer"></span>
+          <button type="button" class="btn btn--sm cmp-notes-btn" :class="showNotes ? 'btn--soft' : 'btn--secondary'" @click="showNotes = !showNotes" :aria-expanded="showNotes ? 'true' : 'false'">
+            {{ icon("sticky-note", 16) }}<span>Notas</span><span class="cmp-notes-btn__dot" x-show="notes && !showNotes" x-cloak></span>
+          </button>
+        </div>
+        {% if not accounts %}
+        {% call ui.callout(tone="info", title="No hay cuentas conectadas en esta marca", cls="cmp-noaccounts") %}
+          Conecta Facebook, Instagram, TikTok o YouTube en <a href="{{ state.urls.connections }}">Cuentas conectadas</a>. Mientras tanto puedes guardar el texto como borrador o idea.
+        {% endcall %}
+        {% endif %}
+
+        <div class="cmp-notes" x-show="showNotes" x-cloak>
+          <label class="form-field__label" for="cmp-notes">{{ icon("sticky-note", 15) }} Notas internas <span class="optional">(no se publican)</span></label>
+          <textarea id="cmp-notes" class="textarea" rows="2" x-model="notes" placeholder="Ideas, enlaces de referencia, recordatorios…" :disabled="ro"></textarea>
+        </div>
+
+        {# ---------------------------------------------------------- per-network editing #}
+        <div class="cmp-pernet" x-show="selected.length >= 2" x-cloak>
+          <button type="button" class="btn btn--sm cmp-pernet__btn" x-show="!perNetwork" @click="startPerNetwork()" :disabled="ro">
+            {{ icon("square-pen", 16) }}<span>Editar por red social</span>
+          </button>
+          <div class="cmp-tabs" role="tablist" aria-label="Texto por red social" x-show="perNetwork">
+            <button type="button" role="tab" class="cmp-tab" :aria-selected="tab === 'common' ? 'true' : 'false'" @click="selectTab('common')">
+              {{ icon("layers", 15) }}<span>Común</span>
+            </button>
+            {% for account, info in accounts %}
+            {% set K = info.key %}
+            <button type="button" role="tab" class="cmp-tab" x-show="isSel('{{ K }}')" :aria-selected="tab === '{{ K }}' ? 'true' : 'false'"
+                    @click="selectTab('{{ K }}')" :class="{'has-error': sectionHasError('{{ K }}')}">
+              {{ net_glyph(info.network, 16) }}<span>{{ info.network_label }}</span>
+              <span class="cmp-tab__dot" x-show="hasOverride('{{ K }}')" title="Texto o archivos propios para {{ info.network_label }}"></span>
+            </button>
+            {% endfor %}
+            <button type="button" class="cmp-tabs__close" @click="stopPerNetwork()" title="Volver a la vista común">{{ icon("x", 15) }}</button>
+          </div>
+        </div>
+
+        {# ---------------------------------------------------------- text box #}
+        <div class="cmp-box" :class="{'is-drop': dropping, 'is-override': tab !== 'common'}"
+             @dragover="onBoxDragOver($event)" @dragleave.self="dropping = false" @drop="onBoxDrop($event)">
+          <div class="cmp-box__override" x-show="tab !== 'common'" x-cloak>
+            <span x-show="!hasOverride(tab)">{{ icon("info", 15) }} Lo que cambies aquí solo se usará en <strong x-text="(acc[tab] || {}).network_label"></strong>.</span>
+            <span x-show="hasOverride(tab)">{{ icon("info", 15) }} Texto y archivos propios para <strong x-text="(acc[tab] || {}).network_label"></strong>: los cambios en «Común» ya no se aplican a esta red.</span>
+            <button type="button" class="btn btn--link btn--sm" x-show="hasOverride(tab)" @click="resetOverride(tab)" :disabled="ro">{{ icon("rotate-ccw", 14) }} Volver al texto común</button>
+          </div>
+          <label class="visually-hidden" for="cmp-text">Texto de la publicación</label>
+          <textarea id="cmp-text" class="cmp-text" x-ref="text" x-model="editorText" @input="autosize()" @blur="rememberCaret()" @click="rememberCaret()" @keyup="rememberCaret()"
+                    :disabled="ro" placeholder="Escribe aquí el texto de tu publicación…" spellcheck="true"></textarea>
+
+          <div class="cmp-first" x-show="firstCommentOpen && firstCommentKeys().length" x-cloak>
+            <label class="cmp-first__label" for="cmp-first">{{ icon("message-circle", 15) }} Primer comentario
+              <span class="cmp-first__nets">
+                {% for account, info in accounts %}<span x-show="isSel('{{ info.key }}') && firstCommentFor('{{ info.key }}')">{{ net_glyph(info.network, 14) }}</span>{% endfor %}
+              </span>
+            </label>
+            <textarea id="cmp-first" class="textarea" rows="2" x-model="commonFirstComment" :disabled="ro"
+                      :placeholder="firstCommentMixed() ? 'Cada red tiene su propio primer comentario (ver configuración)' : 'Se publica como comentario justo después de la publicación'"></textarea>
+          </div>
+
+          <div class="cmp-media" x-show="editorMedia.length || uploads.length" x-cloak>
+            <template x-for="(m, i) in editorMedia" :key="m.id">
+              <div class="cmp-thumb" :class="{'is-video': m.kind === 'video'}" draggable="true"
+                   @dragstart="onThumbDragStart($event, i)" @dragover.prevent @drop="onThumbDrop($event, i)" @dragend="dragFrom = null">
+                <img :src="m.thumb_url" alt="" loading="lazy" draggable="false" @error="$event.target.classList.add('is-broken')">
+                <span class="cmp-thumb__play" x-show="m.kind === 'video'">{{ icon("play", 18, stroke=2.4) }}</span>
+                <span class="cmp-thumb__dur" x-show="m.duration_s" x-text="duration(m.duration_s)"></span>
+                <div class="dropdown cmp-thumb__menu" x-data="dropdown" @click.outside="close()" @keydown="onKeydown($event)">
+                  <button type="button" class="cmp-thumb__more" x-ref="button" @click="toggle()" :aria-expanded="open ? 'true' : 'false'" aria-label="Opciones del archivo" :disabled="ro">{{ icon("ellipsis", 16) }}</button>
+                  <div class="dropdown__menu" x-ref="menu" role="menu" x-show="open" x-cloak @click="if ($event.target.closest('a, button')) close()">
+                    <a class="dropdown__item" role="menuitem" :href="m.url" target="_blank" rel="noopener">{{ icon("eye", 16) }}<span>Ver</span></a>
+                    <button type="button" class="dropdown__item" role="menuitem" @click="moveMedia(i, i - 1)" x-show="i > 0">{{ icon("arrow-left", 16) }}<span>Mover a la izquierda</span></button>
+                    <button type="button" class="dropdown__item" role="menuitem" @click="moveMedia(i, i + 1)" x-show="i < editorMedia.length - 1">{{ icon("arrow-right", 16) }}<span>Mover a la derecha</span></button>
+                    <button type="button" class="dropdown__item dropdown__item--danger" role="menuitem" @click="removeMedia(i)">{{ icon("x", 16) }}<span>Quitar</span></button>
+                  </div>
+                </div>
+                <span class="visually-hidden" x-text="m.name"></span>
+              </div>
+            </template>
+            <template x-for="u in uploads" :key="u.id">
+              <div class="cmp-thumb cmp-thumb--upload" x-show="u.tab === tab" :title="u.name">
+                <span class="spinner"></span>
+                <span class="cmp-thumb__progress"><span :style="'width:' + u.progress + '%'"></span></span>
+              </div>
+            </template>
+            <button type="button" class="cmp-thumb cmp-thumb--add" @click="openPicker('media')" :disabled="ro" title="Añadir fotos o vídeos">{{ icon("plus", 22) }}</button>
+          </div>
+          <div class="cmp-drop" x-show="dropping" x-cloak>{{ icon("upload", 22) }}<span>Suelta los archivos para subirlos</span></div>
+
+          {# toolbar #}
+          <div class="cmp-toolbar" role="toolbar" aria-label="Herramientas del texto">
+            <button type="button" class="cmp-tool" @click="openPicker('media')" :disabled="ro" title="Añadir fotos o vídeos de la biblioteca" aria-label="Añadir fotos o vídeos">{{ icon("image", 20) }}</button>
+            <button type="button" class="cmp-tool" @click="pickFiles()" :disabled="ro" title="Subir archivos desde el ordenador" aria-label="Subir archivos">{{ icon("upload", 20) }}</button>
+            <input type="file" x-ref="file" multiple hidden tabindex="-1" aria-hidden="true" accept="image/*,video/mp4,video/quicktime,video/x-m4v,video/webm,.heic,.heif,.mp4,.mov,.m4v,.webm" @change="onFileInput($event)">
+
+            <div class="cmp-popwrap">
+              <button type="button" class="cmp-tool" :class="{'is-active': pop === 'emoji'}" @click="togglePop('emoji')" :disabled="ro" title="Emojis" aria-label="Emojis" :aria-expanded="pop === 'emoji' ? 'true' : 'false'">{{ icon("face-slightly-smiling", 20) }}</button>
+              <div class="cmp-pop cmp-pop--emoji" x-show="pop === 'emoji'" x-cloak @click.outside="closePop('emoji')" role="dialog" aria-label="Emojis">
+                <div class="cmp-emoji__cats" role="tablist">
+                  <template x-for="(cat, ci) in window.Composer.EMOJI" :key="cat.name">
+                    <button type="button" role="tab" class="cmp-emoji__cat" :aria-selected="emojiCat === ci ? 'true' : 'false'" @click="emojiCat = ci" x-text="cat.items[0]" :title="cat.name"></button>
+                  </template>
+                </div>
+                <div class="cmp-emoji__grid">
+                  <template x-for="e in window.Composer.EMOJI[emojiCat].items" :key="e">
+                    <button type="button" class="cmp-emoji__item" @click="emoji(e)" x-text="e"></button>
+                  </template>
+                </div>
+              </div>
+            </div>
+
+            <div class="cmp-popwrap">
+              <button type="button" class="cmp-tool" :class="{'is-active': pop === 'hash'}" @click="cfg.recent_hashtags.length ? togglePop('hash') : hashtag()" :disabled="ro" title="Hashtags" aria-label="Hashtags">{{ icon("hash", 20) }}</button>
+              <div class="cmp-pop cmp-pop--hash" x-show="pop === 'hash'" x-cloak @click.outside="closePop('hash')" role="dialog" aria-label="Hashtags">
+                <div class="cmp-pop__title">Hashtags que más usas</div>
+                <div class="cmp-hash__list">
+                  <template x-for="h in cfg.recent_hashtags" :key="h"><button type="button" class="chip" @click="hashtag(h)" x-text="h"></button></template>
+                </div>
+                <button type="button" class="btn btn--soft btn--sm mt-3" @click="hashtag(); pop = null">{{ icon("hash", 15) }}<span>Escribir uno nuevo</span></button>
+              </div>
+            </div>
+
+            <button type="button" class="cmp-tool" :class="{'is-active': firstCommentOpen}" x-show="firstCommentKeys().length" x-cloak
+                    @click="firstCommentOpen = !firstCommentOpen; $nextTick(() => firstCommentOpen && document.getElementById('cmp-first').focus())" :disabled="ro"
+                    title="Primer comentario (Instagram, YouTube)" aria-label="Primer comentario">{{ icon("message-circle", 20) }}</button>
+
+            <div class="cmp-popwrap" x-show="locationKey()" x-cloak>
+              <button type="button" class="cmp-tool" :class="{'is-active': pop === 'loc' || (locationKey() && targets[locationKey()].options.location_id)}" @click="togglePop('loc')" :disabled="ro" title="Ubicación (Instagram)" aria-label="Ubicación">{{ icon("map-pin", 20) }}</button>
+              <div class="cmp-pop cmp-pop--form" x-show="pop === 'loc'" x-cloak @click.outside="closePop('loc')" role="dialog" aria-label="Ubicación">
+                <template x-if="locationKey()">
+                  <div>
+                    <label class="form-field__label" for="cmp-loc">ID de ubicación de Instagram</label>
+                    <input id="cmp-loc" class="input mt-2" inputmode="numeric" x-model.trim="targets[locationKey()].options.location_id" placeholder="Por ejemplo 106347736054587" @keydown.enter.prevent="pop = null">
+                    <p class="form-field__help mt-2">Es el identificador de la página de Facebook del lugar. Déjalo vacío para no indicar ubicación.</p>
+                  </div>
+                </template>
+              </div>
+            </div>
+
+            <div class="cmp-popwrap">
+              <button type="button" class="cmp-tool" :class="{'is-active': pop === 'link' || (fbPostKey() && targets[fbPostKey()].options.link)}" @click="togglePop('link')" :disabled="ro" title="Enlace" aria-label="Enlace">{{ icon("link", 20) }}</button>
+              <div class="cmp-pop cmp-pop--form" x-show="pop === 'link'" x-cloak @click.outside="closePop('link')" role="dialog" aria-label="Enlace">
+                <label class="form-field__label" for="cmp-link">Enlace</label>
+                <input id="cmp-link" class="input mt-2" type="url" x-ref="linkInput" x-model.trim="linkUrl" placeholder="https://" @keydown.enter.prevent="applyLink(false)">
+                <div class="row row--wrap mt-3">
+                  <button type="button" class="btn btn--secondary btn--sm" @click="applyLink(false)">{{ icon("text-cursor-input", 15) }}<span>Insertar en el texto</span></button>
+                  <button type="button" class="btn btn--soft btn--sm" x-show="fbPostKey()" @click="applyLink(true)" title="Facebook mostrará la vista previa del enlace (solo publicaciones sin fotos ni vídeo)">{{ net_glyph("facebook", 15) }}<span>Vista previa en Facebook</span></button>
+                </div>
+                <p class="form-field__help mt-2" x-show="fbPostKey() && targets[fbPostKey()].options.link">Facebook: <span x-text="fbPostKey() && targets[fbPostKey()].options.link"></span> <button type="button" class="btn btn--link btn--sm" @click="clearFbLink()">Quitar</button></p>
+              </div>
+            </div>
+
+            <button type="button" class="cmp-tool" @click="save('idea')" :disabled="ro || saving" title="Guardar como idea" aria-label="Guardar como idea">{{ icon("bookmark", 20) }}</button>
+
+            <span class="cmp-toolbar__spacer"></span>
+            <span class="cmp-counter" x-show="igKey()" x-cloak :class="{'is-over': igHashtags() > cfg.limits.ig_hashtags}" title="Hashtags en Instagram (máximo 30)">
+              <span x-text="igHashtags() + ' / ' + cfg.limits.ig_hashtags"></span>{{ icon("hash", 14, stroke=2.4) }}
+            </span>
+            <span class="cmp-counter" :class="counterTone()" :title="counterTitle()">
+              <span x-text="counterText()">0</span>
+              {% for account, info in accounts %}<span class="cmp-counter__net" x-show="counter().key === '{{ info.key }}'" x-cloak>{{ net_glyph(info.network, 18) }}</span>{% endfor %}
+            </span>
+          </div>
+        </div>
+
+        {# ---------------------------------------------------------- global configuration #}
+        <section class="cmp-sec" :class="{'is-open': secOpen.global}" data-section="global">
+          <header class="cmp-sec__head">
+            <button type="button" class="cmp-sec__toggle" @click="secOpen.global = !secOpen.global" :aria-expanded="secOpen.global ? 'true' : 'false'">
+              {{ icon("settings", 20) }}<span>Configuración global</span>
+            </button>
+            <label class="switch cmp-auto" x-show="selected.length" x-cloak title="Si lo desactivas, a la hora indicada te avisaremos para que publiques tú (Publicación asistida).">
+              <input type="checkbox" role="switch" :checked="allAuto()" :indeterminate="mixedAuto()" @change="setAllAuto($event.target.checked)" :disabled="ro">
+              <span class="switch__track" aria-hidden="true"></span>
+              <span class="switch__text"><span class="switch__label">Autopublicar</span></span>
+              <span class="cmp-help" aria-hidden="true">{{ icon("circle-question-mark", 16) }}</span>
+            </label>
+            <button type="button" class="cmp-sec__chev" @click="secOpen.global = !secOpen.global" :aria-label="secOpen.global ? 'Plegar' : 'Desplegar'">{{ icon("chevron-down", 20) }}</button>
+          </header>
+          <div class="cmp-sec__body" x-show="secOpen.global" x-cloak>
+            <p class="cmp-sec__intro">Con <strong>Autopublicar</strong> la app publica sola a la hora indicada (tiene que estar abierta). Sin él, recibirás un aviso para publicarlo tú con todo preparado (<em>Publicación asistida</em>).</p>
+            <div class="cmp-autolist" x-show="selected.length">
+              {% for account, info in accounts %}
+              {% set K = info.key %}
+              <div class="cmp-autorow" x-show="isSel('{{ K }}')">
+                {{ net_glyph(info.network, 20) }}
+                <div class="grow">
+                  <div class="fw-600">{{ info.network_label }} <span class="muted fw-500">· {{ info.display }}</span></div>
+                  <div class="text-xs muted" x-text="autoHelp('{{ K }}')"></div>
+                </div>
+                <label class="switch" title="Publicar automáticamente">
+                  <input type="checkbox" role="switch" x-model="targets['{{ K }}'].auto_publish" :disabled="ro{% if info.network == 'tiktok' %} || targets['{{ K }}'].options.mode === 'inbox'{% endif %}">
+                  <span class="switch__track" aria-hidden="true"></span>
+                  <span class="switch__text"><span class="switch__label" x-text="targets['{{ K }}'].auto_publish ? 'Automática' : 'Asistida'"></span></span>
+                </label>
+              </div>
+              {% endfor %}
+            </div>
+            <p class="text-xs muted mt-3">{{ icon("globe", 13) }} Las fechas y horas se indican en la zona horaria de la marca: <strong>{{ tz }}</strong>.</p>
+          </div>
+        </section>
+
+        {# ---------------------------------------------------------- per-network configuration #}
+        {% for account, info in accounts %}
+        {% set K = info.key %}
+        {% set T = "targets['" ~ K ~ "']" %}
+        {% set O = T ~ ".options" %}
+        {% if info.network in ("facebook", "instagram", "tiktok", "youtube", "demo") %}
+        <section class="cmp-sec cmp-sec--net cmp-sec--{{ info.network }}" x-show="isSel('{{ K }}')" x-cloak data-section="{{ K }}"
+                 :class="{'is-open': secOpen['{{ K }}'], 'has-error': sectionHasError('{{ K }}')}">
+          <header class="cmp-sec__head">
+            <button type="button" class="cmp-sec__toggle" @click="secOpen['{{ K }}'] = !secOpen['{{ K }}']" :aria-expanded="secOpen['{{ K }}'] ? 'true' : 'false'">
+              {{ net_glyph(info.network, 20) }}<span>Configuración de {{ info.network_label }}</span>
+              <span class="cmp-sec__fmt" x-text="formatLabel('{{ K }}')"></span>
+              <span class="cmp-sec__err" x-show="sectionHasError('{{ K }}')" title="Hay errores en esta sección">{{ icon("circle-alert", 16) }}</span>
+            </button>
+            <button type="button" class="cmp-sec__chev" @click="secOpen['{{ K }}'] = !secOpen['{{ K }}']" :aria-label="secOpen['{{ K }}'] ? 'Plegar' : 'Desplegar'">{{ icon("chevron-down", 20) }}</button>
+          </header>
+          <div class="cmp-sec__body" x-show="secOpen['{{ K }}']">
+            {% include "composer/_net_" ~ info.network ~ ".html" %}
+          </div>
+        </section>
+        {% endif %}
+        {% endfor %}
+      </div>
+
+      {# ---------------------------------------------------------- issues + footer (fixed at the bottom) #}
+      <div class="cmp-bottom">
+        <div class="cmp-issues cmp-issues--error" x-show="errors().length && !ro" x-cloak role="alert">
+          <button type="button" class="cmp-issues__head" @click="issuesOpen.error = !issuesOpen.error" :aria-expanded="issuesOpen.error ? 'true' : 'false'">
+            {{ icon("triangle-alert", 20) }}<span x-text="issuesTitle('error')"></span>
+            <span class="cmp-issues__chev" :class="{'is-open': issuesOpen.error}">{{ icon("chevron-down", 18) }}</span>
+          </button>
+          <ul class="cmp-issues__list" x-show="issuesOpen.error">
+            <template x-for="(it, i) in errors()" :key="'e' + i + it.code">
+              <li><button type="button" class="cmp-issue" @click="focusIssue(it)">
+                {{ icon("info", 17) }}<span class="cmp-issue__net" x-show="it.network" x-html="netIcon(it.network)"></span><span x-text="it.message"></span>
+              </button></li>
+            </template>
+          </ul>
+        </div>
+        <div class="cmp-issues cmp-issues--warning" x-show="warnings().length && !ro" x-cloak>
+          <button type="button" class="cmp-issues__head" @click="issuesOpen.warning = !issuesOpen.warning" :aria-expanded="issuesOpen.warning ? 'true' : 'false'">
+            {{ icon("info", 20) }}<span x-text="issuesTitle('warning')"></span>
+            <span class="cmp-issues__chev" :class="{'is-open': issuesOpen.warning}">{{ icon("chevron-down", 18) }}</span>
+          </button>
+          <ul class="cmp-issues__list" x-show="issuesOpen.warning">
+            <template x-for="(it, i) in warnings()" :key="'w' + i + it.code">
+              <li><button type="button" class="cmp-issue" @click="focusIssue(it)">
+                {{ icon("info", 17) }}<span class="cmp-issue__net" x-show="it.network" x-html="netIcon(it.network)"></span><span x-text="it.message"></span>
+              </button></li>
+            </template>
+          </ul>
+        </div>
+
+        <footer class="cmp-footer">
+          <button type="button" class="btn btn--ghost cmp-cancel" @click="requestClose()">{{ "Cerrar" if readonly_reason else "Cancelar" }}</button>
+          <span class="cmp-footer__status" aria-live="polite">
+            <span x-show="validating" x-cloak class="spinner" title="Comprobando…"></span>
+            <span x-show="validateFailed && !validating" x-cloak class="text-xs text-warning">No se ha podido comprobar</span>
+          </span>
+          {% if not readonly_reason %}
+          <label class="cmp-stage" x-show="cfg.primary === 'idea'" x-cloak title="Columna del tablero de Ideas">
+            <span class="visually-hidden">Etapa de la idea</span>
+            {{ icon("lightbulb", 16) }}
+            <select class="select select--sm" :value="ideaStage || 'idea'" @change="ideaStage = $event.target.value">
+              <option value="idea">Idea</option>
+              <option value="en_progreso">En progreso</option>
+              <option value="lista">Lista</option>
+            </select>
+          </label>
+          <div class="cmp-popwrap cmp-date">
+            <button type="button" class="btn cmp-date__btn" :class="{'is-past': isPast() && cfg.primary !== 'idea', 'is-empty': !hasDate()}" @click="togglePop('date')" :aria-expanded="pop === 'date' ? 'true' : 'false'" title="Fecha y hora de publicación ({{ tz }})">
+              {{ icon("calendar", 18) }}<span x-text="dateLabel()">{{ "Sin fecha" }}</span>
+            </button>
+            <div class="cmp-pop cmp-pop--date" x-show="pop === 'date'" x-cloak @click.outside="closePop('date')" role="dialog" aria-label="Fecha y hora de publicación">
+              <div class="cmp-pop__title">Fecha y hora de publicación</div>
+              <div class="cmp-date__grid">
+                <label class="form-field"><span class="form-field__label">Día</span><input type="date" class="input" x-model="date" :min="todayWall()"></label>
+                <label class="form-field"><span class="form-field__label">Hora</span><input type="time" class="input" x-model="time" step="60"></label>
+              </div>
+              <div class="chip-group mt-3">
+                <button type="button" class="chip" @click="quickDate('hour')">Dentro de 1 hora</button>
+                <button type="button" class="chip" @click="quickDate('morning')">Mañana 9:00</button>
+                <button type="button" class="chip" @click="quickDate('evening')">Mañana 18:00</button>
+              </div>
+              <p class="form-field__help mt-3">{{ icon("globe", 13) }} Hora de <strong>{{ tz }}</strong><span x-show="isPast()" class="text-danger"> · Esta hora ya ha pasado.</span></p>
+              <div class="row row--between mt-3">
+                <button type="button" class="btn btn--ghost btn--sm" @click="clearDate()" x-show="hasDate()">Quitar fecha</button>
+                <span></span>
+                <button type="button" class="btn btn--primary btn--sm" @click="pop = null">Listo</button>
+              </div>
+            </div>
+          </div>
+          <div class="cmp-split" :class="{'is-disabled': !canPrimary()}">
+            <button type="button" class="btn btn--primary cmp-split__main" :class="{'is-loading': saving === cfg.primary}" :disabled="!canPrimary()" @click="save(cfg.primary)" :title="primaryTitle()">
+              <span x-text="primaryLabel()">{{ "Guardar como idea" if is_idea else "Programar" }}</span>
+            </button>
+            <div class="dropdown" x-data="dropdown" @keydown="onKeydown($event)" @click.outside="close()">
+              <button type="button" class="btn btn--primary cmp-split__caret" x-ref="button" @click="toggle()" :aria-expanded="open ? 'true' : 'false'" aria-haspopup="menu" aria-label="Más acciones" :disabled="!!saving">{{ icon("chevron-down", 18) }}</button>
+              <div class="dropdown__menu dropdown__menu--end cmp-split__menu" x-ref="menu" role="menu" x-show="open" x-cloak x-transition:enter.duration.120ms
+                   @click="if ($event.target.closest('button')) close()">
+                <button type="button" class="dropdown__item" role="menuitem" x-show="cfg.primary === 'idea'" @click="save('schedule')" :disabled="!canSchedule()">{{ icon("calendar-clock", 16) }}<span>Programar</span></button>
+                <button type="button" class="dropdown__item" role="menuitem" @click="save('publish_now')" :disabled="!canPublishNow()" :title="canPublishNow() ? '' : 'Corrige los errores para publicar'">{{ icon("send", 16) }}<span>Publicar ahora</span></button>
+                <button type="button" class="dropdown__item" role="menuitem" @click="save('draft')">{{ icon("file-pen-line", 16) }}<span>Guardar borrador</span></button>
+                <button type="button" class="dropdown__item" role="menuitem" x-show="cfg.primary !== 'idea'" @click="save('idea')">{{ icon("bookmark", 16) }}<span>Guardar como idea</span></button>
+              </div>
+            </div>
+          </div>
+          {% endif %}
+        </footer>
+      </div>
+    </section>
+
+    {# ================================================================== preview card #}
+    {% include "composer/_preview.html" %}
+  </div>
+
+  <div class="composer__picker" x-ref="pickerHost" id="composer-picker"></div>
+</div>

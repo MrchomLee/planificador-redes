@@ -1,0 +1,97 @@
+{#- Detail side panel of one media file (swapped into #media-detail). Context: detail (asset view + usage,
+    pending), public_media_off. -#}
+{% import "components/ui.html" as ui with context %}
+{% set d = detail %}
+{% set compat_icons = {"ok": "circle-check", "warning": "triangle-alert", "error": "circle-x"} %}
+<div class="media-detail" data-media-detail data-media-id="{{ d.id }}">
+  <header class="media-detail__header">
+    <div class="media-detail__titles">
+      <span class="media-detail__eyebrow">{{ icon("video" if d.kind == "video" else "image", 14) }}{{ d.kind_label }} · {{ d.format }}</span>
+      <form class="media-detail__rename" hx-post="/medios/{{ d.id }}/renombrar" hx-target="#media-detail" hx-swap="innerHTML">
+        <input class="media-detail__name" name="name" value="{{ d.name }}" maxlength="200" required
+               aria-label="Nombre del archivo" title="Haz clic para cambiar el nombre" spellcheck="false" data-rename-input>
+      </form>
+    </div>
+    <button type="button" class="icon-btn" data-detail-close aria-label="Cerrar el detalle" title="Cerrar (Esc)">{{ icon("x", 18) }}</button>
+  </header>
+
+  <div class="media-detail__preview{% if d.kind == 'video' %} is-video{% endif %}">
+    {% if d.kind == "video" %}
+    <video src="{{ d.file_url }}" poster="{{ d.thumb_url }}" controls preload="metadata" playsinline data-preview-video></video>
+    <div class="media-detail__fallback" data-preview-fallback hidden>
+      <img src="{{ d.thumb_url }}" alt="{{ d.name }}">
+      <span>{{ icon("eye-off", 14) }}Este navegador no puede reproducir el vídeo{% if d.asset.video_codec == "hevc" %} (HEVC){% endif %}. Descárgalo para verlo.</span>
+    </div>
+    {% elif d.asset.mime in ("image/jpeg", "image/png", "image/webp", "image/gif") %}
+    <img src="{{ d.file_url }}" alt="{{ d.name }}" decoding="async">
+    {% else %}
+    <img src="{{ d.thumb_url }}" alt="{{ d.name }}" decoding="async">
+    {% endif %}
+  </div>
+
+  <div class="media-detail__actions">
+    <a class="btn btn--secondary btn--sm" href="{{ d.download_url }}" download>{{ icon("download", 16) }}<span>Descargar</span></a>
+    <a class="btn btn--ghost btn--sm" href="{{ d.file_url }}" target="_blank" rel="noopener">{{ icon("external-link", 16) }}<span>Abrir original</span></a>
+    <span class="spacer"></span>
+    {% if d.pending %}
+    <button type="button" class="btn btn--danger-ghost btn--sm" disabled aria-disabled="true"
+            title="Se usa en {{ d.pending }} {{ 'publicación pendiente' if d.pending == 1 else 'publicaciones pendientes' }}">{{ icon("trash", 16) }}<span>Borrar</span></button>
+    {% else %}
+    <button type="button" class="btn btn--danger-ghost btn--sm" hx-post="/medios/{{ d.id }}/borrar" hx-target="#media-detail" hx-swap="innerHTML"
+            hx-confirm="Se quitará «{{ d.name }}» de la biblioteca. Las publicaciones ya hechas no cambian."
+            data-confirm-title="¿Borrar este archivo?" data-confirm-ok="Sí, borrar" data-confirm-danger>{{ icon("trash", 16) }}<span>Borrar</span></button>
+    {% endif %}
+  </div>
+  {% if d.pending %}
+  <p class="media-detail__note">{{ icon("lock", 14) }}<span>Se usa en {{ d.pending }} {{ "publicación pendiente" if d.pending == 1 else "publicaciones pendientes" }}: quítalo de ellas para poder borrarlo.</span></p>
+  {% endif %}
+
+  <section class="media-detail__section" aria-labelledby="compat-title-{{ d.id }}">
+    <h3 class="media-detail__h" id="compat-title-{{ d.id }}">Compatibilidad por red</h3>
+    <ul class="compat-list">
+      {% for net, info in d.compat.items() %}
+      <li class="compat-row compat-row--{{ info.status }}" x-data="{ open: {{ 'true' if info.status == 'error' else 'false' }} }">
+        <button type="button" class="compat-row__head" @click="open = !open" :aria-expanded="open ? 'true' : 'false'"
+                {%- if not info.issues %} disabled{% endif %}>
+          {{ net_icon(net, 24, title=False) }}
+          <span class="compat-row__net">{{ info.label }}</span>
+          <span class="compat-badge compat-badge--{{ info.status }}">{{ icon(compat_icons[info.status], 14) }}<span>{{ STATUS_LABELS_MEDIA[info.status] }}</span></span>
+          {% if info.issues %}<span class="compat-row__chev">{{ icon("chevron-down", 16) }}</span>{% endif %}
+        </button>
+        <div class="compat-row__formats">
+          {% for fmt, f in info.formats.items() %}
+          <span class="fmt-chip fmt-chip--{{ f.status }}" title="{{ f.label }}: {{ STATUS_LABELS_MEDIA[f.status] }}">{{ icon(compat_icons[f.status], 12) }}{{ f.label }}</span>
+          {% endfor %}
+        </div>
+        {% if info.issues %}
+        <ul class="compat-row__issues" x-show="open" x-cloak>
+          {% for i in info.issues %}<li class="is-{{ i.level }}">{{ i.message }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% if public_media_off and d.kind == "image" %}
+    {% call ui.callout(tone="info", cls="media-detail__callout") %}
+      Para publicar fotos en Instagram activa la URL pública en <a href="/ajustes">Ajustes</a>.
+    {% endcall %}
+    {% endif %}
+  </section>
+
+  <section class="media-detail__section" aria-labelledby="meta-title-{{ d.id }}">
+    <h3 class="media-detail__h" id="meta-title-{{ d.id }}">Detalles</h3>
+    <dl class="kv media-detail__kv">
+      {% if d.dims %}<dt>Dimensiones</dt><dd>{{ d.dims }} px{% if d.ratio %} <span class="muted">· {{ d.ratio }} · {{ d.orientation }}</span>{% endif %}</dd>{% endif %}
+      {% if d.duration %}<dt>Duración</dt><dd>{{ d.duration }}</dd>{% endif %}
+      {% if d.fps %}<dt>Fotogramas</dt><dd>{{ d.fps }}</dd>{% endif %}
+      {% if d.codecs %}<dt>Códecs</dt><dd>{{ d.codecs }}</dd>{% endif %}
+      {% if d.bitrate %}<dt>Tasa de bits</dt><dd>{{ d.bitrate }}</dd>{% endif %}
+      {% if d.kind == "video" %}<dt>Rango dinámico</dt><dd>{{ "HDR" if d.hdr else "SDR (estándar)" }}</dd>{% endif %}
+      {% if d.rotation %}<dt>Rotación</dt><dd>{{ d.rotation }}° <span class="muted">(se muestra girado)</span></dd>{% endif %}
+      <dt>Tamaño</dt><dd>{{ d.size }}</dd>
+      <dt>Formato</dt><dd>{{ d.format }} <span class="muted">({{ d.asset.mime }})</span></dd>
+      <dt>Subido</dt><dd>{{ d.created_at|dt_es }}</dd>
+      <dt>Usado en</dt><dd>{% if d.usage %}{{ d.usage }} {{ "publicación" if d.usage == 1 else "publicaciones" }}{% else %}<span class="muted">Ninguna publicación</span>{% endif %}</dd>
+    </dl>
+  </section>
+</div>

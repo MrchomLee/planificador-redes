@@ -1,0 +1,226 @@
+{#- Estadísticas › one network: COMUNIDAD · CUENTA · POSTS (doc 05 §4). -#}
+{% extends "analytics/_layout.html" %}
+
+{% block an_header %}
+<h1 class="visually-hidden">Estadísticas de {{ network_name }}</h1>
+{% if account %}
+{% call ui.subtabs(tabs, active=tab, label="Secciones de " ~ network_name, caps=True, cls="an-tabs") %}
+  {{ am.period_pickers("/estadisticas/" ~ network) }}
+{% endcall %}
+{% else %}
+<div class="an-head">
+  <div class="an-head__title">{{ net_icon(network, 30) }}<span>{{ network_name }}</span></div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block an_content %}
+{% if not account %}
+<section class="card an-empty">
+  {% call ui.empty_state("Conecta tu cuenta de " ~ network_name, "Las estadísticas empiezan a acumularse desde el día en que conectas la cuenta: guardamos una foto diaria de tus seguidores y métricas.", icon_name="chart-column") %}
+    <a class="btn btn--primary" href="/conexiones">{{ icon("plus", 16) }}<span>Conectar {{ network_name }}</span></a>
+  {% endcall %}
+</section>
+{% else %}
+
+<div class="an-alerts">{{ am.alerts(alerts) }}</div>
+
+{% if not has_data %}
+<section class="card an-empty">
+  {% call ui.empty_state("Aún no hay datos de " ~ network_name, "Pulsa «Actualizar ahora» para tomar la primera foto de tus estadísticas. A partir de hoy se guardará una cada día automáticamente.", icon_name="chart-no-axes-column") %}
+    <button type="button" class="btn btn--primary" data-an-refresh>{{ icon("refresh-cw", 16) }}<span>Actualizar ahora</span></button>
+  {% endcall %}
+</section>
+{% else %}
+
+{# ------------------------------------------------------------------ COMUNIDAD #}
+{% if tab == "comunidad" %}
+<div class="an-section-head">
+  <h2 class="an-section-title">Comunidad</h2>
+  <div class="an-section-aside">
+    {{ am.refresh_controls(last_update, refresh_running) }}
+    {{ am.account_chip(account) }}
+  </div>
+</div>
+
+<section class="card an-card" aria-labelledby="an-growth-title">
+  <header class="an-card__head">
+    <div>
+      <h3 class="an-card__title" id="an-growth-title">Crecimiento</h3>
+      <p class="an-card__sub">{{ followers_label }} y publicaciones · {{ period_label }}{% if compare %} · comparado con {{ previous_label }}{% endif %}</p>
+    </div>
+    <div class="kpi-tiles an-tiles">
+      {% for t in growth_tiles %}{{ am.tile(t, compare) }}{% endfor %}
+    </div>
+  </header>
+  <div class="an-plot-label">{{ followers_label }}</div>
+  {{ am.chart("followers", "Evolución de " ~ followers_label|lower, "lg") }}
+  <div class="an-plot-label">Posts por día</div>
+  {{ am.chart("posts", "Posts publicados cada día", "sm") }}
+  <details class="an-tableview">
+    <summary>{{ icon("table", 15) }}<span>Ver datos en tabla</span></summary>
+    <div class="table-wrap an-tablewrap">
+      <table class="table table--compact an-datatable">
+        <thead><tr><th scope="col">Día</th><th scope="col" class="num">{{ followers_label }}</th><th scope="col" class="num">{% if balance.native %}Ganados{% else %}Balance{% endif %}</th>{% if balance.native %}<th scope="col" class="num">Perdidos</th>{% endif %}<th scope="col" class="num">Posts</th></tr></thead>
+        <tbody>
+          {% for r in community_table|reverse %}
+          <tr><td>{{ r.day|date_es(fmt="weekday") }} · {{ r.day|date_es(fmt="short") }}</td><td class="num">{{ am.value(r.followers) }}</td>
+            {% if balance.native %}<td class="num">{{ am.value(r.gained) }}</td><td class="num">{{ am.value(r.lost) }}</td>{% else %}<td class="num">{{ am.value(r.net, signed=True) }}</td>{% endif %}
+            <td class="num">{{ r.posts }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+</section>
+
+<section class="card an-card" aria-labelledby="an-balance-title">
+  <header class="an-card__head">
+    <div>
+      <h3 class="an-card__title" id="an-balance-title">{% if balance.native %}Suscriptores ganados y perdidos{% else %}Balance de seguidores{% endif %}</h3>
+      <p class="an-card__sub">{% if balance.native %}Datos nativos de YouTube Analytics por día.{% else %}Diferencia diaria entre fotos consecutivas: los días sin foto se acumulan en el siguiente.{% endif %}</p>
+    </div>
+    <dl class="an-stats">
+      {% if balance.native %}
+      <div><dt>Ganados</dt><dd>{{ am.value(balance.gained) }}</dd></div>
+      <div><dt>Perdidos</dt><dd>{{ am.value(balance.lost) }}</dd></div>
+      {% else %}
+      <div><dt>Ganados</dt><dd>{{ am.value(balance.gained) }}</dd></div>
+      <div><dt>Perdidos</dt><dd>{{ am.value(balance.lost) }}</dd></div>
+      <div><dt>Neto</dt><dd>{{ am.value(balance.net, signed=True) }}</dd></div>
+      {% endif %}
+      {% if following and following.value is not none %}<div><dt>Seguidos</dt><dd>{{ am.value(following.value) }}</dd></div>{% endif %}
+    </dl>
+  </header>
+  {% if balance.native %}{{ am.legend(chart_data.charts.balance.series, "bar") }}
+  {% else %}{{ am.legend([{"label": "Días con más seguidores", "color": "chart-1"}, {"label": "Días con menos seguidores", "color": "chart-8"}], "bar") }}{% endif %}
+  {{ am.chart("balance", "Balance diario de seguidores", "md") }}
+</section>
+{% endif %}
+
+{# ------------------------------------------------------------------ CUENTA #}
+{% if tab == "cuenta" %}
+<div class="an-section-head">
+  <h2 class="an-section-title">Cuenta</h2>
+  <div class="an-section-aside">
+    {{ am.refresh_controls(last_update, refresh_running) }}
+    {{ am.account_chip(account) }}
+  </div>
+</div>
+{% if not metric_cards %}
+<section class="card an-empty">
+  {{ ui.empty_state("Sin métricas de cuenta en este periodo", "Esta red todavía no ha devuelto visualizaciones, alcance ni interacciones para estas fechas. Prueba con un periodo más largo.", icon_name="chart-no-axes-column") }}
+</section>
+{% else %}
+<section class="card an-card an-card--tiles" aria-label="Resumen de la cuenta">
+  <div class="kpi-tiles an-tiles an-tiles--row">
+    {% for m in metric_cards %}{{ am.tile(m.tile, compare) }}{% endfor %}
+  </div>
+</section>
+<div class="an-grid">
+  {% for m in metric_cards %}
+  <section class="card an-card an-card--metric" aria-labelledby="an-m-{{ m.key }}">
+    <header class="an-card__head an-card__head--compact">
+      <div>
+        <h3 class="an-card__title" id="an-m-{{ m.key }}">{{ m.label }}
+          {%- if m.help %} <span class="an-help" tabindex="0" title="{{ m.help }}">{{ icon("info", 15, label=m.help) }}</span>{% endif %}</h3>
+        <p class="an-card__sub">{% if m.stock %}Valor de cada día{% else %}Por día · total del periodo a la derecha{% endif %}</p>
+      </div>
+      <div class="an-metric-total">
+        <strong>{{ am.value(m.tile.value) }}</strong>
+        {{ am.delta_chip({"change_pct": m.tile.delta}) if compare else "" }}
+      </div>
+    </header>
+    {% if m.has_prev %}{{ am.legend(chart_data.charts[m.chart].series, "line") }}{% endif %}
+    {{ am.chart(m.chart, m.label ~ " por día", "md") }}
+    <details class="an-tableview">
+      <summary>{{ icon("table", 15) }}<span>Ver datos en tabla</span></summary>
+      <div class="table-wrap an-tablewrap">
+        <table class="table table--compact an-datatable">
+          <thead><tr><th scope="col">Día</th><th scope="col" class="num">{{ m.label }}</th>{% if m.has_prev %}<th scope="col" class="num">Periodo anterior</th>{% endif %}</tr></thead>
+          <tbody>
+            {% for r in m.rows|reverse %}<tr><td>{{ r.day|date_es(fmt="weekday") }} · {{ r.day|date_es(fmt="short") }}</td><td class="num">{{ am.value(r.value) }}</td>{% if m.has_prev %}<td class="num">{{ am.value(r.prev) }}</td>{% endif %}</tr>{% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  </section>
+  {% endfor %}
+</div>
+{% endif %}
+{% endif %}
+
+{# ------------------------------------------------------------------ POSTS #}
+{% if tab == "posts" %}
+<div class="an-section-head">
+  <h2 class="an-section-title">Posts</h2>
+  <div class="an-section-aside">
+    {{ am.refresh_controls(last_update, refresh_running) }}
+    {{ am.account_chip(account) }}
+  </div>
+</div>
+<section class="card an-card an-card--tiles" aria-label="Resumen de publicaciones">
+  <div class="kpi-tiles an-tiles an-tiles--row">
+    {% for t in post_tiles %}{{ am.tile(t, compare) }}{% endfor %}
+  </div>
+</section>
+
+<section class="card an-card an-card--flush" aria-labelledby="an-posts-title" data-an-sort-root>
+  <header class="an-card__head an-card__head--pad">
+    <div>
+      <h3 class="an-card__title" id="an-posts-title">Publicaciones</h3>
+      <p class="an-card__sub">{{ post_rows|length }} {{ "publicación" if post_rows|length == 1 else "publicaciones" }} · {{ period_label }}{% if network == "youtube" %} · métricas nativas de YouTube{% endif %}</p>
+    </div>
+    <a class="btn btn--secondary" href="{{ csv_url }}" download>{{ icon("download", 16) }}<span>Descargar CSV</span></a>
+  </header>
+  {% if not post_rows %}
+  {{ ui.empty_state("No hay publicaciones en este periodo", "Aquí aparecerán las publicaciones de la cuenta (también las que no se hicieron desde esta app) con sus métricas.", icon_name="images", compact=True) }}
+  {% else %}
+  <div class="an-tablescroll">
+    <table class="table an-posts" data-an-sortable>
+      <thead>
+        <tr>
+          <th scope="col" class="an-posts__media">Publicación</th>
+          <th scope="col" aria-sort="descending" data-sort-key="date"><button type="button">Fecha <span class="an-sorticon" aria-hidden="true"></span></button></th>
+          {% for key, label in post_columns %}
+          <th scope="col" class="num" aria-sort="none" data-sort-key="{{ key }}"><button type="button">{{ label }} <span class="an-sorticon" aria-hidden="true"></span></button></th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in post_rows %}
+        <tr data-date="{{ r.published_at|iso_utc }}" data-type="{{ r.media_type_label }}"{% for key, label in post_columns %} data-{{ key|replace('_', '-') }}="{{ r[key] if r[key] is not none else '' }}"{% endfor %}>
+          <td class="an-posts__media">
+            <div class="an-post">
+              <span class="an-thumb">
+                {% if r.thumb %}<img src="{{ r.thumb }}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
+                {{ icon("video" if (r.media_type or "")|upper in ("VIDEO", "REEL", "REELS", "SHORT") else ("layout-grid" if "CAROUSEL" in (r.media_type or "")|upper else ("file-text" if (r.media_type or "")|upper in ("TEXT", "LINK") else "image")), 18) }}
+              </span>
+              <span class="an-post__body">
+                <span class="an-post__text">{{ r.caption or "Sin texto" }}</span>
+                <span class="an-post__meta">
+                  <span class="an-type">{{ r.media_type_label }}</span>
+                  {% if r.ours %}<a class="badge tone-primary badge--sm" href="/objetivos/{{ r.target_id }}" hx-get="/objetivos/{{ r.target_id }}" hx-target="#drawer-root">{{ icon("calendar-check", 12) }}<span>Desde la app</span></a>{% endif %}
+                  {% if r.permalink %}<a class="an-post__link" href="{{ r.permalink }}" target="_blank" rel="noopener noreferrer">Ver{{ icon("external-link", 12) }}<span class="visually-hidden"> en {{ network_name }}</span></a>{% endif %}
+                </span>
+              </span>
+            </div>
+          </td>
+          <td class="an-posts__date"><time datetime="{{ r.published_at|iso_utc }}">{{ r.local|date_es(fmt="short") }}</time><small>{{ r.local|time_es }}</small></td>
+          {% for key, label in post_columns %}
+          <td class="num">{{ am.value(r[key], fmt="pct" if key == "engagement" else "number") }}</td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+
+{{ am.heatmap(heat, "Mejores horas para publicar en " ~ network_name) }}
+{% endif %}
+
+{% endif %}
+{% endif %}
+{% endblock %}

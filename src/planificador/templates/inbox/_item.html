@@ -1,0 +1,37 @@
+{#- One conversation in the list: avatar initial (+ network logo), author, excerpt, time ago, post thumbnail.
+    `t` is an inbox.Thread; `oob` → out-of-band replacement (after opening it). -#}
+{% import "components/ui.html" as ui with context %}
+{% set item_q = link(c=t.id) %}
+{% set last = t.last_other or t.root %}
+<li class="ib-item{% if t.is_unread %} is-unread{% endif %}{% if t.id == selected_id %} is-active{% endif %}" id="inbox-item-{{ t.id }}"
+    {%- if oob %} hx-swap-oob="outerHTML"{% endif %}>
+  <a class="ib-item__link" href="/comentarios?{{ item_q }}" data-thread-id="{{ t.id }}"
+     hx-get="/comentarios/{{ t.id }}{{ '?' ~ link(c=None) if link(c=None) }}" hx-target="#inbox-thread" hx-swap="innerHTML"
+     hx-push-url="/comentarios?{{ item_q }}"{% if t.id == selected_id %} aria-current="true"{% endif %}>
+    <span class="ib-item__avatar">
+      {{ ui.avatar(t.author[:1]|upper, avatar_color(t.author), size=40, title=t.author) }}
+      {{ net_icon(t.network, 18, title=False, cls="ib-item__net") }}
+    </span>
+    <span class="ib-item__main">
+      <span class="ib-item__top">
+        <span class="ib-item__author truncate">{{ t.author }}</span>
+        <span class="ib-item__time">{{ ui.reltime(t.last_activity) }}</span>
+      </span>
+      <span class="ib-item__text clamp-2">
+        {%- if last.id != t.root.id and last.author_name != t.author %}<b>{{ last.author_name or "Usuario" }}:</b> {% endif -%}
+        {{ t.excerpt or "(sin texto)" }}</span>
+      <span class="ib-item__meta">
+        {% if t.is_resolved %}<span class="ib-flag ib-flag--done">{{ icon("circle-check", 13) }}Resuelto</span>
+        {% elif t.is_answered %}<span class="ib-flag ib-flag--answered">{{ icon("reply", 13) }}Respondido</span>
+        {% elif tab != "sin_responder" %}<span class="ib-flag ib-flag--pending">{{ icon("message-circle", 13) }}Sin responder</span>{% endif %}
+        {% if t.replies %}<span class="ib-item__count">{{ t.replies|length }} {{ "respuesta" if t.replies|length == 1 else "respuestas" }}</span>{% endif %}
+        {% if t.unread_count > 1 %}<span class="ib-item__count">{{ t.unread_count }} nuevos</span>{% endif %}
+      </span>
+    </span>
+    <span class="ib-item__thumb" aria-hidden="true">
+      {% if t.context.thumb_url %}<img src="{{ t.context.thumb_url }}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">{% endif %}
+      {{ icon("image", 16, cls="ib-item__thumb-ph") }}
+    </span>
+    {% if t.is_unread %}<span class="ib-item__dot" title="No leído"><span class="visually-hidden">No leído</span></span>{% endif %}
+  </a>
+</li>

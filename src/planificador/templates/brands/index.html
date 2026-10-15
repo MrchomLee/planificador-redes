@@ -1,0 +1,108 @@
+{#- Marcas. Context: active_brands, archived_brands, current, networks {brand_id: [Account]}, pending {brand_id: n},
+    post_counts, now, offset_label(zone). -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% block head %}<link rel="stylesheet" href="{{ static_url('css/settings.css') }}">{% endblock %}
+{% block scripts %}<script src="{{ static_url('js/settings.js') }}" defer></script>{% endblock %}
+{% block body_class %}page-brands{% endblock %}
+{% block content %}
+{% call ui.page_header("Marcas", subtitle="Cada marca agrupa sus cuentas conectadas, sus publicaciones y sus estadísticas. Cambia de marca desde el selector de la barra superior.") %}
+  <a class="btn btn--primary" href="/marcas/nueva" hx-get="/marcas/nueva" hx-target="#modal-root" hx-swap="innerHTML" hx-push-url="false">
+    {{- icon("plus", 18, stroke=2.25) }}<span>Nueva marca</span></a>
+{% endcall %}
+
+<div class="brand-grid">
+  {% for b in active_brands %}
+  {% set is_current = current is not none and current.id == b.id %}
+  {% set accs = networks.get(b.id, []) %}
+  {% set n_pending = pending.get(b.id, 0) %}
+  <article class="card brand-card{% if is_current %} is-current{% endif %}" style="--brand: {{ b.color|css_color }}" aria-labelledby="brand-{{ b.id }}-name">
+    <div class="brand-card__band" aria-hidden="true"></div>
+    <header class="brand-card__head">
+      {{ ui.brand_avatar(b, 48) }}
+      <div class="brand-card__titles">
+        <h2 class="brand-card__name" id="brand-{{ b.id }}-name" title="{{ b.name }}">{{ b.name }}</h2>
+        <p class="brand-card__tz">{{ icon("clock", 14) }}<span>{{ now|time_es(tz=b.timezone) }} · {{ b.timezone|replace("_", " ") }}</span><span class="muted">({{ offset_label(b.timezone) }})</span></p>
+      </div>
+      {% if is_current %}{{ ui.tag("Activa", "primary", icon_name="check") }}{% endif %}
+    </header>
+    <div class="brand-card__body">
+      <div class="brand-card__nets">
+        {% if accs %}
+          {% for a in accs %}
+          <span class="brand-card__net{% if a.status == 'needs_reconnect' %} is-warning{% endif %}" title="{{ network_label(a.network) }}: {{ a.display_name }}{% if a.status == 'needs_reconnect' %} (reconexión necesaria){% endif %}">
+            {{- net_icon(a.network, 26, title=False) }}{% if a.status == 'needs_reconnect' %}<span class="brand-card__net-alert" aria-hidden="true">!</span>{% endif %}</span>
+          {% endfor %}
+        {% else %}
+          <span class="brand-card__nonets">{{ icon("plug", 15) }}Sin redes conectadas</span>
+        {% endif %}
+      </div>
+      <dl class="brand-card__stats">
+        <div><dt>Pendientes</dt><dd>{{ n_pending }}</dd></div>
+        <div><dt>Publicaciones</dt><dd>{{ post_counts.get(b.id, 0) }}</dd></div>
+        <div><dt>Creada</dt><dd>{{ b.created_at|date_es(tz=b.timezone, fmt="short") }}</dd></div>
+      </dl>
+    </div>
+    <footer class="brand-card__foot">
+      {% if is_current %}
+      <a class="btn btn--secondary btn--sm" href="/conexiones">{{ icon("plug", 15) }}<span>Cuentas conectadas</span></a>
+      {% else %}
+      <form method="post" action="/marcas/{{ b.id }}/activar">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="next" value="/planificacion">
+        <button type="submit" class="btn btn--secondary btn--sm">{{ icon("arrow-left-right", 15) }}<span>Usar esta marca</span></button>
+      </form>
+      {% endif %}
+      <a class="btn btn--ghost btn--sm" href="/marcas/{{ b.id }}/editar" hx-get="/marcas/{{ b.id }}/editar" hx-target="#modal-root" hx-swap="innerHTML" hx-push-url="false">{{ icon("pencil", 15) }}<span>Editar</span></a>
+      <span class="grow"></span>
+      {% if active_brands|length > 1 %}
+      <form method="post" action="/marcas/{{ b.id }}/archivar"
+            data-confirm="¿Archivar «{{ b.name }}»? Dejará de aparecer en el selector de marcas; sus cuentas y publicaciones se conservan y podrás restaurarla cuando quieras."
+            data-confirm-title="Archivar marca" data-confirm-ok="Archivar">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn btn--ghost btn--sm btn--icon" title="Archivar" aria-label="Archivar «{{ b.name }}»"{% if n_pending %} disabled{% endif %}>{{ icon("archive", 16) }}</button>
+      </form>
+      {% endif %}
+    </footer>
+    {% if n_pending and active_brands|length > 1 %}<p class="brand-card__hint">{{ icon("info", 13) }}Para archivarla no puede tener publicaciones pendientes.</p>{% endif %}
+  </article>
+  {% endfor %}
+  <a class="brand-add" href="/marcas/nueva" hx-get="/marcas/nueva" hx-target="#modal-root" hx-swap="innerHTML" hx-push-url="false">
+    <span class="brand-add__icon">{{ icon("plus", 22) }}</span>
+    <span class="brand-add__title">Nueva marca</span>
+    <span class="brand-add__text">Para otro negocio, cliente o proyecto</span>
+  </a>
+</div>
+
+{% if archived_brands %}
+<section class="brand-archived" aria-labelledby="archived-title">
+  <h2 class="brand-archived__title" id="archived-title">{{ icon("archive", 18) }}Archivadas <span class="count-pill">{{ archived_brands|length }}</span></h2>
+  <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th>Marca</th><th>Zona horaria</th><th>Archivada</th><th class="num">Publicaciones</th><th><span class="visually-hidden">Acciones</span></th></tr></thead>
+      <tbody>
+        {% for b in archived_brands %}
+        <tr>
+          <td><span class="brand-row">{{ ui.brand_avatar(b, 26) }}<span>{{ b.name }}</span></span></td>
+          <td>{{ b.timezone|replace("_", " ") }}</td>
+          <td>{{ b.archived_at|date_es(fmt="short") }}</td>
+          <td class="num">{{ post_counts.get(b.id, 0) }}</td>
+          <td class="brand-row__actions">
+            <form method="post" action="/marcas/{{ b.id }}/restaurar">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button type="submit" class="btn btn--secondary btn--sm">{{ icon("archive-restore", 15) }}<span>Restaurar</span></button>
+            </form>
+            {% if not post_counts.get(b.id, 0) %}
+            <form method="post" action="/marcas/{{ b.id }}/eliminar" data-confirm="¿Eliminar «{{ b.name }}» definitivamente? Se borrarán también sus cuentas conectadas y sus estadísticas. No se puede deshacer." data-confirm-title="Eliminar marca" data-confirm-ok="Eliminar" data-confirm-danger>
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button type="submit" class="btn btn--danger-ghost btn--sm">{{ icon("trash-2", 15) }}<span>Eliminar</span></button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+{% endblock %}

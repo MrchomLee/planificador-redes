@@ -1,13 +1,13 @@
 [project]
 name = "planificador-redes"
 version = "0.1.0"
-description = "Planificador local de publicaciones para Facebook, Instagram y TikTok (app web de un solo usuario)."
+description = "Planificador local de publicaciones para Facebook, Instagram, TikTok y YouTube (app web de un solo usuario)."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "MrchomLee" }]
-keywords = ["social media", "scheduler", "facebook", "instagram", "tiktok", "planner"]
+keywords = ["social media", "scheduler", "facebook", "instagram", "tiktok", "youtube", "planner"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Web Environment",
@@ -58,6 +58,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/planificador"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# User guides shown in the app at /ayuda/<name> (routes/connections.py looks in planificador/docs first).
+"docs/guia-meta.md" = "planificador/docs/guia-meta.md"
+"docs/guia-tiktok.md" = "planificador/docs/guia-tiktok.md"
+"docs/guia-youtube.md" = "planificador/docs/guia-youtube.md"
+"docs/guia-uso.md" = "planificador/docs/guia-uso.md"
 
 [tool.hatch.build.targets.sdist]
 include = ["src/planificador", "tests", "docs", "scripts", "LICENSE", "README.md", "iniciar.bat", "iniciar.sh"]

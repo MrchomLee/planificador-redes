@@ -1,0 +1,146 @@
+{#- Post detail macros (drawer, page, assisted modal). Import WITH CONTEXT (uses tz, csrf, globals). -#}
+{% import "components/ui.html" as ui with context %}
+
+{# One action button of a target card (Action dataclass from routes/posts.py). #}
+{% macro action_button(a, mode="drawer") -%}
+{%- set cls = "btn btn--sm btn--" ~ a.variant -%}
+{%- if a.kind == "modal" -%}
+<button type="button" class="{{ cls }}" hx-get="{{ a.url }}" hx-target="#modal-root" hx-swap="innerHTML" hx-push-url="false">
+  {{- icon(a.icon, 16) }}<span>{{ a.label }}</span></button>
+{%- elif a.kind == "mark_done" -%}
+<button type="button" class="{{ cls }}" @click="markOpen = !markOpen; if (markOpen) $nextTick(() => $refs.markUrl && $refs.markUrl.focus())"
+        :aria-expanded="markOpen ? 'true' : 'false'">{{ icon(a.icon, 16) }}<span>{{ a.label }}</span></button>
+{%- else -%}
+<button type="button" class="{{ cls }}" hx-post="{{ a.url }}" hx-swap="none"
+  {%- if a.vals %} hx-vals='{{ a.vals|tojson }}'{% endif %}
+  {%- if a.confirm %} hx-confirm="{{ a.confirm }}"{% if a.confirm_title %} data-confirm-title="{{ a.confirm_title }}"{% endif %}{% if a.confirm_ok %} data-confirm-ok="{{ a.confirm_ok }}"{% endif %}{% if a.danger %} data-confirm-danger{% endif %}{% endif %}>
+  {{- icon(a.icon, 16) }}<span>{{ a.label }}</span></button>
+{%- endif -%}
+{%- endmacro %}
+
+{# Square media thumbnails (library ids). #}
+{% macro media_grid(assets, size="md") -%}
+<ul class="pd-media pd-media--{{ size }}" role="list">
+  {% for a in assets %}
+  <li>
+    <a class="pd-thumb" href="/medios/{{ a.id }}/archivo" target="_blank" rel="noopener" title="{{ a.original_name }}">
+      <img class="js-pd-thumb" src="/medios/{{ a.id }}/miniatura" alt="{{ a.original_name }}" loading="lazy">
+      <span class="pd-thumb__fallback" aria-hidden="true">{{ icon("video" if a.is_video else "image", 22) }}</span>
+      {% if a.is_video %}<span class="pd-thumb__play" aria-hidden="true">{{ icon("play", 14, stroke=2.5) }}</span>{% endif %}
+      {% if a.is_video and a.duration_s %}<span class="media-thumb__badge">{{ (a.duration_s // 60)|int }}:{{ "%02d"|format((a.duration_s % 60)|int) }}</span>{% endif %}
+      <span class="visually-hidden">Abrir {{ a.original_name }}</span>
+    </a>
+  </li>
+  {% endfor %}
+</ul>
+{%- endmacro %}
+
+{# Audit trail (post_events), newest first. #}
+{% macro timeline(events) -%}
+{% if events %}
+<ol class="timeline" role="list">
+  {% for e in events %}
+  {% set lvl = e.level|string %}
+  <li class="timeline__item timeline__item--{{ lvl }}">
+    <span class="timeline__dot" aria-hidden="true"></span>
+    <div class="timeline__body">
+      <p class="timeline__msg">{{ e.message or e.event }}</p>
+      <time class="timeline__time" datetime="{{ e.ts|iso_utc }}" title="{{ e.ts|dt_es(tz, 'full') }}">{{ e.ts|dt_es(tz, "short") }}</time>
+    </div>
+  </li>
+  {% endfor %}
+</ol>
+{% else %}
+<p class="text-sm muted">Todavía no hay actividad registrada.</p>
+{% endif %}
+{%- endmacro %}
+
+{# Card of one network target in the post detail. tv: TargetView (routes/posts.py). #}
+{% macro target_card(tv, mode="drawer") -%}
+{% set t = tv.target %}
+<article class="ptarget st-{{ tv.status }}{% if tv.focus %} is-focus{% endif %}" id="ptarget-{{ t.id }}" x-data="{ markOpen: false }"
+         aria-label="{{ tv.network_label }} · {{ tv.account_name }}">
+  <header class="ptarget__head">
+    {{ net_icon(tv.network, 34) }}
+    <div class="ptarget__who">
+      <div class="ptarget__account">
+        <span class="truncate">{{ tv.account_name }}</span>
+        {% if tv.account_needs_reconnect %}<a class="badge tone-warning" href="/conexiones" title="La conexión con {{ tv.network_label }} necesita renovarse">{{ icon("plug-zap", 13) }}<span>Reconectar</span></a>{% endif %}
+      </div>
+      <div class="ptarget__meta">
+        <span>{{ tv.network_label }}</span>
+        <span class="ptarget__fmt">{{ tv.format_label }}</span>
+        {% if tv.assisted %}<span class="ptarget__flag" title="Autopublicar desactivado: te avisaremos para que la publiques tú">{{ icon("hand", 13) }}Asistida</span>{% endif %}
+      </div>
+    </div>
+    {{ ui.badge(tv.status) }}
+  </header>
+
+  {% if tv.when_label or tv.external_url %}
+  <div class="ptarget__row">
+    {% if tv.when_label %}<span class="ptarget__when">{{ icon("calendar-clock", 15) }}{{ tv.when_label }}</span>{% endif %}
+    {% if tv.external_url %}<a class="ptarget__link" href="{{ tv.external_url }}" target="_blank" rel="noopener noreferrer">{{ icon("external-link", 15) }}<span>{{ tv.external_label }}</span></a>{% endif %}
+  </div>
+  {% endif %}
+
+  {% set show_error = t.last_error and tv.status in ("error", "unknown", "missed", "scheduled", "publishing") %}
+  {% if tv.note and not (show_error and tv.note_tone == "danger") %}{{ ui.info_alert(tv.note, tone=tv.note_tone, compact=True, cls="ptarget__note") }}{% endif %}
+
+  {% if show_error %}
+  <div class="ptarget__error" role="alert">
+    {{ icon("circle-alert", 17) }}
+    <div class="grow">
+      <p class="ptarget__error-msg">{{ t.last_error }}</p>
+      {% if tv.note and tv.note_tone == "danger" %}<p class="ptarget__error-hint">{{ tv.note }}</p>{% endif %}
+      {% if t.attempts and tv.status in ("scheduled", "publishing") %}<p class="text-xs muted">Intento {{ t.attempts }} fallido; se volverá a intentar automáticamente.</p>{% endif %}
+      {% if tv.error_detail %}
+      <details class="ptarget__tech">
+        <summary>Detalles técnicos</summary>
+        <dl class="kv">
+          {% for k, v in tv.error_detail|dictsort %}<dt>{{ k }}</dt><dd><code>{{ v if v is string else v|tojson }}</code></dd>{% endfor %}
+        </dl>
+      </details>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if tv.options_summary %}
+  <dl class="kv ptarget__opts">
+    {% for label, value in tv.options_summary %}<dt>{{ label }}</dt><dd>{{ value }}</dd>{% endfor %}
+  </dl>
+  {% endif %}
+
+  {% if tv.has_text_override or tv.has_media_override %}
+  <details class="ptarget__override">
+    <summary>{{ icon("pencil-line", 14) }}Contenido propio para {{ tv.network_label }}</summary>
+    {% if tv.has_text_override %}<p class="pre-line ptarget__override-text">{{ tv.text or "(sin texto)" }}</p>{% endif %}
+    {% if tv.has_media_override %}{% if tv.media %}{{ media_grid(tv.media, "sm") }}{% else %}<p class="text-sm muted">Sin medios para esta red.</p>{% endif %}{% endif %}
+  </details>
+  {% endif %}
+
+  {% if tv.actions %}
+  <div class="ptarget__actions">
+    {% for a in tv.actions %}{{ action_button(a, mode) }}{% endfor %}
+  </div>
+  {% set mark = tv.actions|selectattr("kind", "equalto", "mark_done")|first %}
+  {% if mark %}
+  <form class="ptarget__markdone" x-show="markOpen" x-cloak hx-post="{{ mark.url }}" hx-swap="none"
+        @htmx:after-request="if ($event.detail.successful) markOpen = false">
+    <label class="form-field__label" for="md-url-{{ t.id }}">Enlace a la publicación <span class="optional">(opcional)</span></label>
+    <div class="ptarget__markdone-row">
+      <input class="input input--sm" type="url" name="url" id="md-url-{{ t.id }}" x-ref="markUrl" inputmode="url"
+             placeholder="https://…" value="{{ t.external_url or '' }}" autocomplete="off">
+      <button type="submit" class="btn btn--primary btn--sm">{{ icon("check", 16) }}<span>{{ "Guardar" if tv.status == "manual_done" else "Marcar como publicado" }}</span></button>
+    </div>
+    <p class="form-field__help">Quedará como «Hecho a mano». Con el enlace podrás abrirla desde aquí.</p>
+  </form>
+  {% endif %}
+  {% endif %}
+
+  <details class="ptarget__history"{% if tv.focus %} open{% endif %}>
+    <summary>{{ icon("activity", 15) }}<span>Historial</span>{% if tv.events %}<span class="count-pill">{{ tv.events|length }}</span>{% endif %}{{ icon("chevron-down", 15, cls="ptarget__chev") }}</summary>
+    {{ timeline(tv.events) }}
+  </details>
+</article>
+{%- endmacro %}

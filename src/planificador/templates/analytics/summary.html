@@ -1,0 +1,122 @@
+{#- Estadísticas › Resumen: every network of the brand together. -#}
+{% extends "analytics/_layout.html" %}
+
+{% block an_header %}
+<div class="an-head">
+  <div class="an-head__title"><h1>Resumen</h1></div>
+  {% if has_accounts %}{{ am.period_pickers("/estadisticas") }}{% endif %}
+</div>
+{% endblock %}
+
+{% block an_content %}
+{% if not has_accounts %}
+<section class="card an-empty">
+  {% call ui.empty_state("Conecta tus redes para ver estadísticas", "Cuando conectes Facebook, Instagram, TikTok o YouTube guardaremos cada día una foto de tus seguidores y métricas, y aquí verás la evolución de todas juntas.", icon_name="chart-column") %}
+    <a class="btn btn--primary" href="/conexiones">{{ icon("plug", 16) }}<span>Conectar cuentas</span></a>
+  {% endcall %}
+</section>
+{% else %}
+
+{{ ui.info_alert("Las estadísticas se guardan una vez al día desde que conectas cada red, así que el histórico empieza ese día. Las cifras de cada red siguen sus propias definiciones." ~ (" YouTube aporta solo métricas nativas: no se incluye en interacciones ni engagement." if has_youtube else ""), cls="an-alert") }}
+
+<div class="an-section-head">
+  <h2 class="an-section-title">Visión general</h2>
+  <div class="an-section-aside">{{ am.refresh_controls(last_update, refresh_running) }}</div>
+</div>
+
+<section class="card an-card an-card--tiles" aria-label="Totales de la marca">
+  <div class="kpi-tiles an-tiles an-tiles--row">
+    {% for t in summary_tiles %}{{ am.tile(t, compare) }}{% endfor %}
+  </div>
+</section>
+
+<section class="card an-card an-card--flush" aria-labelledby="an-nets-title">
+  <header class="an-card__head an-card__head--pad">
+    <div>
+      <h3 class="an-card__title" id="an-nets-title">Por red</h3>
+      <p class="an-card__sub">{{ period_label }}{% if compare %} · variación respecto a {{ previous_label }}{% endif %}</p>
+    </div>
+  </header>
+  <div class="an-tablescroll">
+    <table class="table an-nets">
+      <thead>
+        <tr>
+          <th scope="col">Red</th>
+          <th scope="col" class="num">Seguidores</th>
+          <th scope="col" class="num">Balance</th>
+          <th scope="col" class="num">Posts</th>
+          <th scope="col" class="num">Visualizaciones</th>
+          <th scope="col" class="num">Interacciones</th>
+          <th scope="col" class="num">Engagement</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in summary_rows %}
+        <tr>
+          <th scope="row">
+            <a class="an-netcell" href="{{ r.href }}">
+              <span class="an-key an-key--bar" style="--key:var(--{{ r.color }})" aria-hidden="true"></span>
+              {{ net_icon(r.network, 26, title=False) }}
+              <span class="an-netcell__text"><strong>{{ r.label }}</strong><small>{{ r.account.display_name }}</small></span>
+              {% if r.error %}<span class="badge tone-danger badge--sm" title="{{ r.error.message }}">{{ icon("circle-alert", 12) }}<span>Error</span></span>{% endif %}
+            </a>
+          </th>
+          <td class="num"><span class="an-cellv">{% if r.network == "youtube" and r.followers and r.followers.value is not none %}≈{% endif %}{{ am.value(r.followers.value if r.followers else None) }}</span>{{ am.delta_chip(r.followers) if compare }}</td>
+          <td class="num"><span class="an-cellv">{{ am.value(r.net.value if r.net else None, signed=True) }}</span></td>
+          <td class="num"><span class="an-cellv">{{ am.value(r.posts.value if r.posts else None) }}</span>{{ am.delta_chip(r.posts) if compare }}</td>
+          <td class="num"><span class="an-cellv">{{ am.value(r.views.value if r.views else None) }}</span>{{ am.delta_chip(r.views) if compare }}</td>
+          <td class="num">{% if r.native %}<span class="an-muted" title="YouTube: solo métricas nativas">n/d</span>{% else %}<span class="an-cellv">{{ am.value(r.interactions.value if r.interactions else None) }}</span>{{ am.delta_chip(r.interactions) if compare }}{% endif %}</td>
+          <td class="num">{% if r.native %}<span class="an-muted" title="YouTube: solo métricas nativas">n/d</span>{% else %}<span class="an-cellv">{{ am.value(r.engagement.value if r.engagement else None, fmt="pct") }}</span>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="an-grid">
+  <section class="card an-card" aria-labelledby="an-sp-title">
+    <header class="an-card__head an-card__head--compact">
+      <div><h3 class="an-card__title" id="an-sp-title">Posts por día</h3><p class="an-card__sub">Publicaciones de cada red</p></div>
+    </header>
+    {% if posts_series %}
+    {{ am.legend(posts_series, "bar") }}
+    {{ am.chart("summary-posts", "Posts por día y red", "md") }}
+    <details class="an-tableview">
+      <summary>{{ icon("table", 15) }}<span>Ver datos en tabla</span></summary>
+      <div class="table-wrap an-tablewrap">
+        <table class="table table--compact an-datatable">
+          <thead><tr><th scope="col">Día</th>{% for s in posts_series %}<th scope="col" class="num">{{ s.label }}</th>{% endfor %}</tr></thead>
+          <tbody>{% for r in posts_table|reverse %}<tr><td>{{ r.day|date_es(fmt="weekday") }} · {{ r.day|date_es(fmt="short") }}</td>{% for v in r["values"] %}<td class="num">{{ am.value(v) }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+        </table>
+      </div>
+    </details>
+    {% else %}
+    {{ ui.empty_state("Sin publicaciones en este periodo", icon_name="images", compact=True) }}
+    {% endif %}
+  </section>
+  <section class="card an-card" aria-labelledby="an-sv-title">
+    <header class="an-card__head an-card__head--compact">
+      <div><h3 class="an-card__title" id="an-sv-title">Visualizaciones por día</h3><p class="an-card__sub">Según los datos diarios de cada red</p></div>
+    </header>
+    {% if views_series %}
+    {% if views_series|length > 1 %}{{ am.legend(views_series, "line") }}{% endif %}
+    {{ am.chart("summary-views", "Visualizaciones por día y red", "md") }}
+    <details class="an-tableview">
+      <summary>{{ icon("table", 15) }}<span>Ver datos en tabla</span></summary>
+      <div class="table-wrap an-tablewrap">
+        <table class="table table--compact an-datatable">
+          <thead><tr><th scope="col">Día</th>{% for s in views_series %}<th scope="col" class="num">{{ s.label }}</th>{% endfor %}</tr></thead>
+          <tbody>{% for r in views_table|reverse %}<tr><td>{{ r.day|date_es(fmt="weekday") }} · {{ r.day|date_es(fmt="short") }}</td>{% for v in r["values"] %}<td class="num">{{ am.value(v) }}</td>{% endfor %}</tr>{% endfor %}</tbody>
+        </table>
+      </div>
+    </details>
+    {% else %}
+    {{ ui.empty_state("Sin visualizaciones diarias", "Facebook, Instagram y YouTube informan de las visualizaciones diarias; TikTok solo da totales.", icon_name="eye", compact=True) }}
+    {% endif %}
+  </section>
+</div>
+
+{{ am.heatmap(heat) }}
+{% endif %}
+{% endblock %}

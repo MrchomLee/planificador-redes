@@ -1,0 +1,41 @@
+{#- Conversation list body (#inbox-list). With `parte=cuerpo` the counters are refreshed out of band. -#}
+{% import "components/ui.html" as ui with context %}
+{% for err in poll_errors %}
+<div class="ib-poll-error" role="status">
+  {{ net_icon(err.network, 18, title=False) }}
+  <span><strong>{{ err.label }}:</strong> {{ err.message }}</span>
+</div>
+{% endfor %}
+
+{% if not has_accounts %}
+<div class="ib-empty">
+  <div class="ib-empty__icon">{{ icon("plug", 26, stroke=1.75) }}</div>
+  <h3 class="ib-empty__title">Conecta tus redes para ver los comentarios</h3>
+  <p class="ib-empty__text">Aquí aparecerán los comentarios de tu página de Facebook, tu cuenta de Instagram y tu canal de YouTube.</p>
+  <a class="btn btn--primary btn--sm" href="/conexiones">{{ icon("plug", 16) }}<span>Ir a Cuentas conectadas</span></a>
+</div>
+{% elif not threads %}
+<div class="ib-empty">
+  <div class="ib-empty__icon">{{ icon("inbox", 26, stroke=1.75) }}</div>
+  {% if q and not q_short %}
+  <h3 class="ib-empty__title">Sin resultados para «{{ q }}»</h3>
+  <p class="ib-empty__text">Prueba con otra palabra o busca en «Todos».</p>
+  {% elif tab == "sin_responder" %}
+  <h3 class="ib-empty__title">¡Todo al día!</h3>
+  <p class="ib-empty__text">No tienes comentarios pendientes de respuesta{% if red %} en {{ network_label(red) }}{% endif %}.</p>
+  {% elif tab == "no_leidos" %}
+  <h3 class="ib-empty__title">No hay comentarios sin leer</h3>
+  <p class="ib-empty__text">Cuando lleguen comentarios nuevos aparecerán aquí.</p>
+  {% else %}
+  <h3 class="ib-empty__title">No hemos encontrado conversaciones recientes</h3>
+  <p class="ib-empty__text">Se muestran los comentarios de las publicaciones de los últimos 30 días{% if red %} de {{ network_label(red) }}{% endif %}. Asegúrate de que el filtro no esté ocultando conversaciones.</p>
+  {% endif %}
+</div>
+{% else %}
+{% if q_short %}<p class="ib-hint">{{ icon("info", 14) }}<span>Escribe al menos {{ search_min }} caracteres para buscar.</span></p>{% endif %}
+<ul class="ib-items" role="list">
+  {% for t in threads %}{% include "inbox/_item.html" %}{% endfor %}
+</ul>
+{% if truncated %}<p class="ib-hint">Se muestran las {{ threads|length }} conversaciones más recientes. Usa la búsqueda para encontrar otras.</p>{% endif %}
+{% endif %}
+{% if oob_counts %}{% with oob=True %}{% include "inbox/_counts.html" %}{% endwith %}{% endif %}

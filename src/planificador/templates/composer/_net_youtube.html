@@ -1,0 +1,136 @@
+{#- "Configuración de YouTube" (research 06 §13.2). Vars: K, T, O, info. -#}
+<div class="cmp-fields">
+  <div class="callout tone-warning cmp-callout" x-show="{{ T }}.auto_publish && !acc['{{ K }}'].youtube_unlocked">
+    {{ icon("triangle-alert", 16) }}
+    <div>Tu proyecto de Google no está verificado por YouTube: los vídeos subidos automáticamente pueden quedar <strong>privados y bloqueados</strong>. Te recomendamos la <em>Publicación asistida</em> (desactiva «Autopublicar») o hacer la «Prueba de bloqueo» en <a :href="cfg.urls.connections">Cuentas conectadas</a>.</div>
+  </div>
+  <div class="callout tone-info cmp-callout" x-show="!{{ T }}.auto_publish">
+    {{ icon("hand", 16) }}<div>Publicación asistida: a la hora indicada te avisaremos con el título, la descripción y las etiquetas listos para copiar en YouTube Studio.</div>
+  </div>
+
+  <div class="cmp-field" data-field="title">
+    <div class="row row--between"><label class="cmp-label" for="yt-title-{{ K }}">Título <span class="req" aria-hidden="true">*</span></label>
+      <span class="char-counter" :class="{'is-over': ({{ O }}.title || '').length > cfg.limits.yt_title}" x-text="({{ O }}.title || '').length + ' / ' + cfg.limits.yt_title"></span></div>
+    <input id="yt-title-{{ K }}" class="input" x-model="{{ O }}.title" @input="ytTitleTouched['{{ K }}'] = true" :disabled="ro"
+           :placeholder="'Por defecto, la primera línea del texto'" :aria-invalid="fieldError('{{ K }}', 'title') ? 'true' : 'false'">
+    <p class="cmp-error" x-show="fieldError('{{ K }}', 'title')" x-text="fieldError('{{ K }}', 'title')"></p>
+    <p class="cmp-help">La descripción del vídeo es el texto de la publicación (máximo 5.000 bytes, sin &lt; ni &gt;).</p>
+  </div>
+
+  <div class="cmp-field" data-field="privacy_status">
+    <span class="cmp-label">Visibilidad</span>
+    <div class="segmented cmp-seg" role="radiogroup" aria-label="Visibilidad">
+      {% for value, label in yt_privacy %}
+      <label :class="{'is-active': ({{ O }}.privacy_status || 'public') === '{{ value }}'}"><input type="radio" name="yt-privacy-{{ K }}" value="{{ value }}" x-model="{{ O }}.privacy_status" :disabled="ro">{{ label }}</label>
+      {% endfor %}
+    </div>
+  </div>
+
+  <fieldset class="cmp-field" data-field="made_for_kids">
+    <legend class="cmp-label">Audiencia: ¿es contenido creado para niños? <span class="req" aria-hidden="true">*</span></legend>
+    <div class="cmp-radios">
+      <label class="check"><input type="radio" name="yt-kids-{{ K }}" :checked="{{ O }}.made_for_kids === true" @change="setKids('{{ K }}', true)" :disabled="ro"><span class="check__label">Sí, es contenido creado para niños</span></label>
+      <label class="check"><input type="radio" name="yt-kids-{{ K }}" :checked="{{ O }}.made_for_kids === false" @change="setKids('{{ K }}', false)" :disabled="ro"><span class="check__label">No, no es contenido creado para niños</span></label>
+    </div>
+    <p class="cmp-error" x-show="fieldError('{{ K }}', 'made_for_kids')" x-text="fieldError('{{ K }}', 'made_for_kids')"></p>
+    <p class="cmp-help">Obligatorio por ley (COPPA). En los vídeos para niños se desactivan los comentarios y otras funciones.</p>
+  </fieldset>
+
+  <fieldset class="cmp-field" data-field="synthetic_media">
+    <legend class="cmp-label">Contenido alterado o sintético: ¿incluye contenido realista generado o modificado con IA?</legend>
+    <div class="cmp-radios cmp-radios--inline">
+      <label class="check"><input type="radio" name="yt-synth-{{ K }}" :checked="{{ O }}.synthetic_media === true" @change="{{ O }}.synthetic_media = true" :disabled="ro"><span class="check__label">Sí</span></label>
+      <label class="check"><input type="radio" name="yt-synth-{{ K }}" :checked="!{{ O }}.synthetic_media" @change="{{ O }}.synthetic_media = false" :disabled="ro"><span class="check__label">No</span></label>
+    </div>
+  </fieldset>
+
+  <div class="cmp-grid2">
+    <div class="cmp-field" data-field="category_id">
+      <label class="cmp-label" for="yt-cat-{{ K }}">Categoría</label>
+      <select id="yt-cat-{{ K }}" class="select" @change="{{ O }}.category_id = $event.target.value" :disabled="ro">
+        <template x-for="c in ytCategoryChoices('{{ K }}')" :key="c.id">
+          <option :value="c.id" x-text="c.title" :selected="String({{ O }}.category_id) === String(c.id)"></option>
+        </template>
+      </select>
+    </div>
+    <div class="cmp-field" data-field="playlist_id">
+      <label class="cmp-label" for="yt-pl-{{ K }}">Lista de reproducción</label>
+      <select id="yt-pl-{{ K }}" class="select" @change="{{ O }}.playlist_id = $event.target.value || null" :disabled="ro">
+        <option value="" :selected="!{{ O }}.playlist_id">Ninguna</option>
+        <template x-for="p in (ytLists['{{ K }}'] && ytLists['{{ K }}'].items) || []" :key="p.id">
+          <option :value="p.id" x-text="p.title" :selected="{{ O }}.playlist_id === p.id"></option>
+        </template>
+      </select>
+      <p class="cmp-help" x-show="ytLists['{{ K }}'] && ytLists['{{ K }}'].error" x-text="ytLists['{{ K }}'] && ytLists['{{ K }}'].error"></p>
+    </div>
+  </div>
+
+  <div class="cmp-field" data-field="tags">
+    <div class="row row--between"><span class="cmp-label">Etiquetas</span>
+      <span class="char-counter" :class="{'is-over': tagsLength('{{ K }}') > cfg.limits.yt_tags}" x-text="tagsLength('{{ K }}') + ' / ' + cfg.limits.yt_tags"></span></div>
+    <div class="cmp-chips cmp-chips--box">
+      <template x-for="(t, ti) in {{ O }}.tags" :key="t + ti">
+        <span class="chip cmp-chip"><span x-text="t"></span>
+          <button type="button" class="cmp-chip__x" @click="removeChip('{{ K }}', 'tags', ti)" :disabled="ro" :aria-label="'Quitar ' + t">{{ icon("x", 13) }}</button></span>
+      </template>
+      <input type="text" class="cmp-chips__input" x-model="drafts['{{ K }}tags']" placeholder="Escribe y pulsa Intro" :disabled="ro"
+             @keydown="chipKey($event, '{{ K }}', 'tags', 0)" @blur="addChip('{{ K }}', 'tags', 0)" aria-label="Nueva etiqueta" autocomplete="off">
+    </div>
+  </div>
+
+  <div class="cmp-field" data-field="thumbnail_media_id" x-show="fmt('{{ K }}') === 'video'">
+    <span class="cmp-label">Miniatura personalizada <span class="optional">(opcional)</span></span>
+    <div class="cmp-ytthumb">
+      <template x-if="{{ O }}.thumbnail_media_id">
+        <img class="cmp-ytthumb__img" :src="thumbFor({{ O }}.thumbnail_media_id)" alt="Miniatura elegida">
+      </template>
+      <button type="button" class="btn btn--secondary btn--sm" @click="openPicker('yt-thumb:{{ K }}', 'image', false)" :disabled="ro">{{ icon("image", 16) }}<span x-text="{{ O }}.thumbnail_media_id ? 'Cambiar imagen' : 'Elegir imagen'"></span></button>
+      <button type="button" class="btn btn--ghost btn--sm" x-show="{{ O }}.thumbnail_media_id" @click="{{ O }}.thumbnail_media_id = null" :disabled="ro">Quitar</button>
+    </div>
+    <p class="cmp-help">Requiere un canal verificado. JPG o PNG, recomendado 1280×720.</p>
+  </div>
+
+  <div class="cmp-field" data-field="first_comment">
+    <label class="cmp-label" for="yt-fc-{{ K }}">Primer comentario <span class="optional">(opcional)</span></label>
+    <textarea id="yt-fc-{{ K }}" class="textarea" rows="2" x-model="{{ O }}.first_comment" :disabled="ro || {{ O }}.made_for_kids === true"
+              :placeholder="{{ O }}.made_for_kids === true ? 'Los vídeos para niños no admiten comentarios' : 'Se publica como comentario fijado del canal'"></textarea>
+  </div>
+
+  <div class="cmp-switches">
+    <label class="switch" data-field="notify_subscribers">
+      <input type="checkbox" role="switch" x-model="{{ O }}.notify_subscribers" :disabled="ro">
+      <span class="switch__track" aria-hidden="true"></span><span class="switch__text"><span class="switch__label">Notificar a los suscriptores</span></span>
+    </label>
+    <label class="switch" data-field="paid_promotion">
+      <input type="checkbox" role="switch" x-model="{{ O }}.paid_promotion" :disabled="ro">
+      <span class="switch__track" aria-hidden="true"></span><span class="switch__text"><span class="switch__label">Incluye promoción pagada</span><span class="switch__help">Product placement, patrocinio o recomendación pagada.</span></span>
+    </label>
+    <label class="switch" data-field="native_schedule">
+      <input type="checkbox" role="switch" x-model="{{ O }}.native_schedule" :disabled="ro">
+      <span class="switch__track" aria-hidden="true"></span><span class="switch__text"><span class="switch__label">Programar en YouTube</span><span class="switch__help">Se sube ahora como privado y YouTube lo hace público a la hora indicada, aunque el ordenador esté apagado (solo visibilidad Pública).</span></span>
+    </label>
+  </div>
+
+  <details class="cmp-advanced">
+    <summary>{{ icon("sliders-horizontal", 15) }} Opciones avanzadas</summary>
+    <div class="cmp-grid2 mt-3">
+      <div class="cmp-field" data-field="language">
+        <label class="cmp-label" for="yt-lang-{{ K }}">Idioma del vídeo</label>
+        <select id="yt-lang-{{ K }}" class="select" @change="{{ O }}.language = $event.target.value || null" :disabled="ro">
+          {% for value, label in languages %}<option value="{{ value }}" :selected="({{ O }}.language || '') === '{{ value }}'">{{ label }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="cmp-field" data-field="license">
+        <label class="cmp-label" for="yt-lic-{{ K }}">Licencia</label>
+        <select id="yt-lic-{{ K }}" class="select" x-model="{{ O }}.license" :disabled="ro">
+          <option value="youtube">Licencia estándar de YouTube</option>
+          <option value="creativeCommon">Creative Commons - Atribución</option>
+        </select>
+      </div>
+    </div>
+    <label class="switch mt-3" data-field="embeddable">
+      <input type="checkbox" role="switch" x-model="{{ O }}.embeddable" :disabled="ro">
+      <span class="switch__track" aria-hidden="true"></span><span class="switch__text"><span class="switch__label">Permitir insertar el vídeo en otras webs</span></span>
+    </label>
+  </details>
+</div>

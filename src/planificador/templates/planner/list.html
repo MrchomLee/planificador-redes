@@ -1,0 +1,126 @@
+{#- Planificación › Lista (doc 05 §5c, screenshot 7): search · date range · filters · kebab · bulk actions · CTA,
+    then the table (header on the page background, body in a white card). -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% import "planner/_macros.html" as pm with context %}
+
+{% block head %}<link rel="stylesheet" href="{{ static_url('css/planner.css') }}">{% endblock %}
+{% block scripts %}<script src="{{ static_url('js/planner.js') }}" defer></script>{% endblock %}
+{% block body_class %}page-planner{% endblock %}
+
+{% block content %}
+<h1 class="visually-hidden">Planificación · Lista</h1>
+{% include "planner/_subnav.html" %}
+
+<section class="planner-list" x-data="planList" aria-label="Lista de publicaciones">
+  <form id="list-filters" class="ptoolbar" role="search" action="/planificacion/lista" method="get"
+        hx-get="/planificacion/lista" hx-target="#plan-list" hx-swap="innerHTML" hx-push-url="true"
+        hx-trigger="change[target.name!=='q'], submit">
+    {{ pm.search(value=q, attrs={
+          "hx-get": "/planificacion/lista", "hx-trigger": "input changed delay:350ms, search",
+          "hx-target": "#plan-list", "hx-swap": "innerHTML", "hx-include": "#list-filters", "hx-push-url": "true",
+          "aria-label": "Buscar publicaciones"}) }}
+
+    {# Date range #}
+    <div class="dropdown prange" x-data="rangePicker('{{ desde }}', '{{ hasta }}', '{{ today_local.isoformat() }}')"
+         @keydown="onKeydown($event)" @click.outside="close()">
+      <button type="button" class="btn ptool prange__btn" x-ref="button" @click="toggle()" :aria-expanded="open ? 'true' : 'false'"
+              aria-haspopup="dialog" title="Rango de fechas">
+        {{ icon("calendar", 17) }}<span x-text="label">{{ range_label }}</span>
+      </button>
+      <div class="dropdown__menu prange__menu" x-ref="menu" x-show="open" x-cloak role="dialog" aria-label="Rango de fechas"
+           x-transition:enter.duration.120ms x-transition:leave.duration.80ms>
+        <div class="dropdown__label">Accesos rápidos</div>
+        <div class="prange__presets">
+          <button type="button" class="chip" @click="preset(0, 7)">Próximos 7 días</button>
+          <button type="button" class="chip" @click="preset(0, 30)">Próximos 30 días</button>
+          <button type="button" class="chip" @click="presetMonth(0)">Este mes</button>
+          <button type="button" class="chip" @click="presetMonth(1)">Mes siguiente</button>
+          <button type="button" class="chip" @click="preset(-30, 0)">Últimos 30 días</button>
+        </div>
+        <div class="prange__inputs">
+          <label class="form-field"><span class="form-field__label">Desde</span>
+            <input type="date" class="input" name="desde" x-ref="desde" x-model="desde" @change="sync()" required></label>
+          <label class="form-field"><span class="form-field__label">Hasta</span>
+            <input type="date" class="input" name="hasta" x-ref="hasta" x-model="hasta" @change="sync()" required></label>
+        </div>
+      </div>
+    </div>
+
+    <div class="ptool-group" role="group" aria-label="Filtros y opciones">
+      <div class="dropdown" x-data="dropdown" @keydown="onKeydown($event)" @click.outside="close()">
+        <button type="button" class="btn btn--icon ptool{% if filter_count %} is-on{% endif %}" x-ref="button" @click="toggle()"
+                :aria-expanded="open ? 'true' : 'false'" aria-haspopup="dialog" aria-label="Filtros" title="Filtros" data-filter-btn>
+          {{ icon("funnel", 18) }}<span class="ptool__badge" data-filter-count{% if not filter_count %} hidden{% endif %}>{{ filter_count }}</span>
+        </button>
+        <div class="dropdown__menu pfilter" x-ref="menu" x-show="open" x-cloak role="dialog" aria-label="Filtros"
+             x-transition:enter.duration.120ms x-transition:leave.duration.80ms>
+          <div class="pfilter__cols">
+            <fieldset class="pfilter__group">
+              <legend class="dropdown__label">Redes</legend>
+              {% for net in planner_networks %}
+              <label class="pfilter__opt">
+                <input type="checkbox" name="redes" value="{{ net }}"{% if net in sel_redes %} checked{% endif %}>
+                {{ net_icon(net, 20, title=False) }}<span>{{ network_label(net) }}</span>
+              </label>
+              {% endfor %}
+            </fieldset>
+            <fieldset class="pfilter__group">
+              <legend class="dropdown__label">Estado</legend>
+              {% for key, label in filter_statuses %}
+              <label class="pfilter__opt">
+                <input type="checkbox" name="estados" value="{{ key }}"{% if key in sel_estados %} checked{% endif %}>
+                <span class="dot st-{{ key }}" aria-hidden="true"></span><span>{{ label }}</span>
+              </label>
+              {% endfor %}
+            </fieldset>
+          </div>
+          <div class="pfilter__foot">
+            <button type="button" class="btn btn--ghost btn--sm" @click="clearFilters()">Quitar filtros</button>
+            <button type="button" class="btn btn--secondary btn--sm" @click="close(true)">Listo</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="dropdown" x-data="dropdown" @keydown="onKeydown($event)" @click.outside="close()">
+        <button type="button" class="btn btn--icon ptool" x-ref="button" @click="toggle()" :aria-expanded="open ? 'true' : 'false'"
+                aria-haspopup="menu" aria-label="Más opciones" title="Más opciones">{{ icon("ellipsis-vertical", 18) }}</button>
+        <div class="dropdown__menu dropdown__menu--end" x-ref="menu" x-show="open" x-cloak role="menu"
+             x-transition:enter.duration.120ms x-transition:leave.duration.80ms>
+          <a class="dropdown__item" role="menuitem" href="/planificacion">{{ icon("calendar-days", 16) }}<span>Ver en el calendario</span></a>
+          <a class="dropdown__item" role="menuitem" href="/importar">{{ icon("file-up", 16) }}<span>Importar CSV</span></a>
+        </div>
+      </div>
+    </div>
+
+    {# Bulk actions (enabled once rows are selected) #}
+    <div class="dropdown" x-data="dropdown" @keydown="onKeydown($event)" @click.outside="close()">
+      <button type="button" class="btn ptool bulk-btn" x-ref="button" @click="toggle()" :disabled="!selected"
+              :aria-expanded="open ? 'true' : 'false'" aria-haspopup="menu" disabled>
+        <span>Acciones en bloque</span><span class="count-pill" x-show="selected" x-text="selected" x-cloak></span>{{ icon("chevron-down", 16) }}
+      </button>
+      <div class="dropdown__menu dropdown__menu--end" x-ref="menu" x-show="open" x-cloak role="menu"
+           x-transition:enter.duration.120ms x-transition:leave.duration.80ms
+           @click="if ($event.target.closest('button')) close()">
+        <button type="button" class="dropdown__item" role="menuitem"
+                hx-post="/planificacion/lista/acciones" hx-vals='{"accion": "duplicar"}'
+                hx-include="#plan-list input[name=ids]:checked" hx-target="#plan-list" hx-swap="innerHTML">
+          {{- icon("copy", 16) }}<span>Duplicar</span></button>
+        <button type="button" class="dropdown__item dropdown__item--danger" role="menuitem"
+                hx-post="/planificacion/lista/acciones" hx-vals='{"accion": "papelera"}'
+                hx-include="#plan-list input[name=ids]:checked" hx-target="#plan-list" hx-swap="innerHTML"
+                hx-confirm="Las publicaciones seleccionadas se moverán a la papelera y se cancelará lo que estuviera pendiente de publicar. Podrás restaurarlas durante 45 días."
+                data-confirm-title="¿Mover a la papelera?" data-confirm-ok="Mover a la papelera" data-confirm-danger>
+          {{- icon("trash", 16) }}<span>Mover a la papelera</span></button>
+      </div>
+    </div>
+
+    {{ pm.create_button() }}
+  </form>
+
+  <div id="plan-list" class="plan-list" hx-get="/planificacion/lista" hx-trigger="planner:refresh from:body"
+       hx-include="#list-filters" hx-target="this" hx-swap="innerHTML" @change="onChange($event)">
+    {% include "planner/_list_body.html" %}
+  </div>
+</section>
+{% endblock %}

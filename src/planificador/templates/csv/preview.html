@@ -1,0 +1,136 @@
+{#- Import preview: one row per CSV line with its validation (errors → saved as draft), row checkboxes and the
+    confirmation footer (TikTok music consent when TikTok rows are present). -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+
+{% block head %}{% include "csv/_styles.html" %}{% endblock %}
+{% block body_class %}page-csv{% endblock %}
+
+{% block content %}
+<header class="cv-header">
+  <div>
+    <a class="btn btn--ghost btn--sm mb-2" href="/importar">{{ icon("arrow-left", 16) }}<span>Volver</span></a>
+    <h1 class="cv-header__title">Revisar importación</h1>
+    <p class="cv-header__sub">{{ icon("file-spreadsheet", 15) }} <strong>{{ filename }}</strong>
+      {%- if not preview.file_errors %} · {{ preview.data_rows|length }} {{ "fila" if preview.data_rows|length == 1 else "filas" }} · separador {{ preview.delimiter_label }} · {{ preview.encoding }}{% endif %}
+      · marca <strong>{{ brand.name }}</strong> ({{ brand.timezone }})</p>
+  </div>
+</header>
+
+{% if preview.file_errors %}
+{% set actions %}<a class="btn btn--secondary btn--sm" href="/importar">{{ icon("arrow-left", 16) }}<span>Subir otro archivo</span></a>{% endset %}
+{% call ui.info_alert(tone="danger", title="No se puede importar este archivo", actions=actions) %}
+  <ul class="list-plain">{% for msg in preview.file_errors %}<li>{{ msg }}</li>{% endfor %}</ul>
+{% endcall %}
+{% else %}
+
+<div class="cv-summary" role="list" aria-label="Resumen">
+  <div role="listitem">{{ ui.kpi_tile(preview.ok_count, "se programarán", color="green", title="Filas sin errores") }}</div>
+  <div role="listitem">{{ ui.kpi_tile(preview.draft_count, "se guardarán como borrador", color="amber", title="Filas con errores") }}</div>
+  {% if preview.empty_count %}<div role="listitem">{{ ui.kpi_tile(preview.empty_count, "filas vacías (se ignoran)", cls="kpi-tile--muted") }}</div>{% endif %}
+</div>
+
+{% if preview.notices %}
+<div class="cv-notices">
+  {% for msg in preview.notices %}{{ ui.info_alert(msg, compact=True) }}{% endfor %}
+</div>
+{% endif %}
+
+<form action="/importar/revisar/{{ token }}/confirmar" method="post"
+      x-data="{ n: {{ preview.data_rows|length }}, count() { this.n = this.$root.querySelectorAll('input[name=filas]:checked').length } }"
+      @change="count()">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <div class="table-wrap cv-table-wrap">
+    <table class="table cv-table">
+      <thead>
+        <tr>
+          <th scope="col" class="cv-col-check">
+            <input type="checkbox" checked aria-label="Marcar o desmarcar todas las filas"
+                   @change="$root.querySelectorAll('input[name=filas]').forEach(c => c.checked = $event.target.checked); count()">
+          </th>
+          <th scope="col" class="cv-col-line">Fila</th>
+          <th scope="col">Fecha y hora</th>
+          <th scope="col">Publicación</th>
+          <th scope="col">Redes</th>
+          <th scope="col">Resultado</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in preview.rows %}
+        {% if row.empty %}
+        <tr class="is-empty">
+          <td></td><td class="cv-col-line">{{ row.line }}</td>
+          <td colspan="4">Fila vacía: se ignora.</td>
+        </tr>
+        {% else %}
+        <tr class="{% if row.has_errors %}is-error{% endif %}" x-data="{ on: true }" :class="{ 'is-off': !on }">
+          <td><input type="checkbox" name="filas" value="{{ row.line }}" checked x-model="on" aria-label="Importar la fila {{ row.line }}"></td>
+          <td class="cv-col-line">{{ row.line }}</td>
+          <td class="cv-when">
+            {% if row.scheduled_at %}{{ row.scheduled_at|date_es(brand.timezone, "short") }}<small>{{ (row.scheduled_at|date_es(brand.timezone, "weekday")).split(" ")[0] }} · {{ row.scheduled_at|time_es(brand.timezone) }}</small>
+            {% elif row.day %}{{ row.day|date_es(brand.timezone, "short") }}<small class="text-danger">sin hora</small>
+            {% else %}<span class="muted">Sin fecha</span>{% endif %}
+          </td>
+          <td class="cv-text">
+            <p class="clamp-3">{{ row.text or "(sin texto)" }}</p>
+            {% if row.media %}
+            <div class="cv-thumbs">
+              {% for m in row.media %}<img src="/medios/{{ m.id }}/miniatura" alt="{{ m.original_name }}" title="{{ m.original_name }}" loading="lazy">{% endfor %}
+            </div>
+            {% endif %}
+          </td>
+          <td>
+            <div class="cv-nets">
+              {% for net in row.networks %}
+              <span class="cv-net">{{ net_icon(net, 20, title=False) }}<span>{{ network_label(net) }}{% if row.formats.get(net) %} · {{ row.formats[net]|upper }}{% endif %}</span></span>
+              {% else %}
+              <span class="muted text-xs">Ninguna</span>
+              {% endfor %}
+            </div>
+          </td>
+          <td>
+            {% if row.has_errors %}
+            {{ ui.tag("Borrador · " ~ row.errors|length ~ (" error" if row.errors|length == 1 else " errores"), tone="danger", icon_name="file-pen-line") }}
+            {% else %}
+            {{ ui.tag("Se programará", tone="success", icon_name="clock") }}
+            {% endif %}
+            {% if row.issues %}
+            <ul class="cv-issues">
+              {% for issue in row.issues %}
+              <li class="cv-issue cv-issue--{{ issue.level }}">
+                {% if issue.network %}{{ net_icon(issue.network, 16, title=False) }}{% else %}{{ icon("circle-alert" if issue.level == "error" else "triangle-alert", 14) }}{% endif %}
+                <span>{{ issue.message }}</span>
+              </li>
+              {% endfor %}
+            </ul>
+            {% endif %}
+          </td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="cv-footer">
+    <div class="cv-footer__consent">
+      {% if preview.has_tiktok_direct %}
+      <label class="check">
+        <input type="checkbox" name="consentimiento_tiktok" value="1">
+        <span><span class="check__label">Para las publicaciones de TikTok, acepto la
+          <a href="https://www.tiktok.com/legal/page/global/music-usage-confirmation/en" target="_blank" rel="noopener noreferrer">Confirmación de uso de música</a> de TikTok.</span>
+          <span class="check__help">Si no la aceptas, las filas con TikTok se guardarán como borrador.</span></span>
+      </label>
+      {% else %}
+      <span class="cv-note">{{ icon("info", 14) }}<span>Las filas con errores se guardan como borrador: podrás corregirlas en Planificación.</span></span>
+      {% endif %}
+    </div>
+    <div class="cv-footer__actions">
+      <a class="btn btn--secondary" href="/importar">Cancelar</a>
+      <button type="submit" class="btn btn--primary" :disabled="n === 0">{{ icon("file-check", 18) }}
+        <span x-text="n === 1 ? 'Importar 1 publicación' : 'Importar ' + n + ' publicaciones'">Importar {{ preview.data_rows|length }} publicaciones</span></button>
+    </div>
+  </div>
+</form>
+{% endif %}
+{% endblock %}

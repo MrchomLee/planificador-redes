@@ -7,6 +7,8 @@
   Macros: button, icon_button, badge, tag, status_dot, card, callout, empty_state, page_header, form_field,
   switch, check, tabs, tab_panel, modal, drawer, avatar, brand_avatar, account_avatar, net_badge, kpi_card,
   dropdown, dropdown_item, spinner, reltime, kbd.
+  Page chrome (doc 05): subtabs, toolbar, tool_button, tool_search, info_alert, error_panel, kpi_tile,
+  add_button, pill_switch, net_button.
 
   Extra HTML attributes are passed as a dict: attrs={"hx-post": "/x", "hx-target": "#y", "data-foo": "1"}.
   Macros that wrap content use {% call %}: {% call ui.card("Título") %}…{% endcall %}.
@@ -266,6 +268,8 @@
 
 {# Account avatar with the network logo overlaid. src: URL of the cached avatar (optional). #}
 {% macro account_avatar(account, src=None, size=32) -%}
+{#- Without an explicit src, the cached profile picture (routes/connections.py) is used when there is one. -#}
+{%- set src = src or (("/conexiones/avatar/" ~ account.id ~ "?v=" ~ ((account.connected_at.timestamp()|int) if account.connected_at else 0)) if account.avatar_path and account.id else None) -%}
 <span class="avatar-wrap" title="{{ account.name }} · {{ network_label(account.network) }}">
   {{ avatar(account.name, "#8a91a3", src=src, size=size) }}
   {{ net_icon(account.network, (size * 0.5)|int, title=False) }}
@@ -346,3 +350,155 @@
 {%- endmacro %}
 
 {% macro kbd(key) -%}<kbd>{{ key }}</kbd>{%- endmacro %}
+
+
+{# ================================================================ page chrome (doc 05 §2–§6) #}
+
+{# Sub-tabs row under the top bar (planner: Calendario · Lista · Ideas · Papelera; analytics: COMUNIDAD · CUENTA · POSTS).
+   items: like tabs() — dicts {key, label, href?, icon?, count?} or tuples (key, label, href[, icon]).
+   caps=True: small uppercase tabs. Content passed with {% call %} goes to the right-hand aside (e.g. time zone).
+   mode="alpine": client tabs (wrap in x-data="tabs('key')", use tab_panel()). #}
+{% macro subtabs(items, active=None, label="Secciones", caps=False, cls="", mode="link", id_prefix="tab") -%}
+<div class="subtabs{% if caps %} subtabs--caps{% endif %}{% if cls %} {{ cls }}{% endif %}">
+  {% if mode == "alpine" %}
+  <div class="subtabs__list" role="tablist" aria-label="{{ label }}" @keydown="onKeydown($event)">
+  {% else %}
+  <nav class="subtabs__list" aria-label="{{ label }}">
+  {% endif %}
+    {% for it in items %}
+    {% set key = it.key if it is mapping else it[0] %}
+    {% set text = it.label if it is mapping else it[1] %}
+    {% set href = (it.href if it.href is defined else None) if it is mapping else (it[2] if it|length > 2 else None) %}
+    {% set ic = (it.icon if it.icon is defined else None) if it is mapping else (it[3] if it|length > 3 else None) %}
+    {% set count = it.count if (it is mapping and it.count is defined) else None %}
+    {% if mode == "alpine" %}
+    <button type="button" class="subtab" role="tab" id="{{ id_prefix }}-{{ key }}" aria-controls="{{ id_prefix }}-panel-{{ key }}"
+            :aria-selected="is('{{ key }}') ? 'true' : 'false'" :tabindex="is('{{ key }}') ? 0 : -1" @click="select('{{ key }}')">
+      {%- if ic %}{{ icon(ic, 16) }}{% endif %}<span>{{ text }}</span>{% if count %}<span class="count-pill">{{ count }}</span>{% endif %}</button>
+    {% else %}
+    <a class="subtab{% if key == active %} is-active{% endif %}" href="{{ href or '#' }}"{% if key == active %} aria-current="page"{% endif %}>
+      {%- if ic %}{{ icon(ic, 16) }}{% endif %}<span>{{ text }}</span>{% if count %}<span class="count-pill">{{ count }}</span>{% endif %}</a>
+    {% endif %}
+    {% endfor %}
+  {% if mode == "alpine" %}</div>{% else %}</nav>{% endif %}
+  {% if caller is defined %}<div class="subtabs__aside">{{ caller() }}</div>{% endif %}
+</div>
+{%- endmacro %}
+
+{# One-row toolbar of 44 px controls: {% call ui.toolbar("Herramientas") %}{{ ui.tool_search(...) }}…{% endcall %}.
+   Put <span class="toolbar__spacer"></span> before right-aligned controls; group joined buttons in <div class="tool-group">. #}
+{% macro toolbar(label="Herramientas", cls="", id=None) -%}
+<div class="toolbar{% if cls %} {{ cls }}{% endif %}" role="toolbar" aria-label="{{ label }}"{% if id %} id="{{ id }}"{% endif %}>{{ caller() }}</div>
+{%- endmacro %}
+
+{# Toolbar button (44 px). variant: secondary (white, bordered) | primary (CTA) | ghost. active=True → "is-on" (e.g. filters set). #}
+{% macro tool_button(label, icon_name=None, href=None, attrs={}, icon_only=False, variant="secondary", cls="", active=False,
+                     icon_right=None, type="button", id=None, disabled=False) -%}
+{{ button(label, href=href, variant=variant, icon_name=icon_name, icon_right=icon_right, type=type, attrs=attrs,
+          cls="tool" ~ (" is-on" if active else "") ~ (" " ~ cls if cls else ""), icon_only=icon_only, id=id, disabled=disabled) }}
+{%- endmacro %}
+
+{# Wide search input with a magnifier ("Buscar"). #}
+{% macro tool_search(name="q", value=None, placeholder="Buscar", label="Buscar", attrs={}, id=None, cls="") -%}
+<label class="tool-search{% if cls %} {{ cls }}{% endif %}">
+  {{ icon("search", 18) }}
+  <span class="visually-hidden">{{ label }}</span>
+  <input class="input" type="search" name="{{ name }}"{% if id %} id="{{ id }}"{% endif %} placeholder="{{ placeholder }}" autocomplete="off"
+         {%- if value %} value="{{ value }}"{% endif %}{{ attrs|xmlattr }}>
+</label>
+{%- endmacro %}
+
+{# Light-blue info box with a blue border and ⓘ (tone: info | warning | success | danger | muted).
+   Extra content via {% call %}; actions: Markup shown on the right. #}
+{% macro info_alert(text=None, title=None, tone="info", icon_name=None, actions=None, compact=False, cls="", id=None) -%}
+{%- set default_icons = {"info": "info", "warning": "triangle-alert", "success": "circle-check", "danger": "circle-alert", "muted": "info"} -%}
+<div class="alert alert--{{ tone }}{% if compact %} alert--compact{% endif %}{% if cls %} {{ cls }}{% endif %}"{% if id %} id="{{ id }}"{% endif %} role="{{ 'alert' if tone == 'danger' else 'note' }}">
+  {{ icon(icon_name or default_icons.get(tone, "info"), 18) }}
+  <div class="alert__body">
+    {% if title %}<div class="alert__title">{{ title }}</div>{% endif %}
+    {% if text %}<div>{{ text }}</div>{% endif %}
+    {% if caller is defined %}{{ caller() }}{% endif %}
+  </div>
+  {% if actions %}<div class="alert__actions">{{ actions }}</div>{% endif %}
+</div>
+{%- endmacro %}
+
+{# Collapsible error panel (pink, red ⚠; tone="warning" → amber). issues: strings or dicts/objects with
+   message (+ optional network, field). title defaults to "1 error" / "N errores" ("1 aviso" / "N avisos"). #}
+{% macro error_panel(issues, tone="danger", title=None, open=True, id=None, cls="") -%}
+{%- set n = issues|length -%}
+{%- if tone == "warning" -%}{%- set default_title = "1 aviso" if n == 1 else n ~ " avisos" -%}
+{%- else -%}{%- set default_title = "1 error" if n == 1 else n ~ " errores" -%}{%- endif -%}
+<details class="issue-panel issue-panel--{{ tone }}{% if cls %} {{ cls }}{% endif %}"{% if id %} id="{{ id }}"{% endif %}{% if open %} open{% endif %}>
+  <summary class="issue-panel__head">
+    {{ icon("triangle-alert", 20) }}<span>{{ title or default_title }}</span>{{ icon("chevron-down", 18, cls="issue-panel__chev") }}
+  </summary>
+  <ul class="issue-panel__list">
+    {% for it in issues %}
+    {% set msg = it if it is string else (it.message if it.message is defined else it|string) %}
+    {% set net = (it.network if it.network is defined else None) if it is not string else None %}
+    <li class="issue-panel__item">{% if net %}{{ net_icon(net, 18) }}{% else %}{{ icon("info", 16) }}{% endif %}<span>{{ msg }}</span></li>
+    {% endfor %}
+  </ul>
+</details>
+{%- endmacro %}
+
+{# Filled KPI tile: big number + label. color: blue | amber | green | violet | pink | teal.
+   value: number (None → "—"), formatted Spanish style (compact=True: "12,3 mil"); delta: optional % vs previous. #}
+{% macro kpi_tile(value, label, color="blue", compact=True, decimals=0, delta=None, size=None, title=None, cls="") -%}
+<div class="kpi-tile kpi-tile--{{ color }}{% if size %} kpi-tile--{{ size }}{% endif %}{% if cls %} {{ cls }}{% endif %}"{% if title %} title="{{ title }}"{% elif value is not none %} title="{{ value|number_es(decimals) }} {{ label }}"{% endif %}>
+  <span class="kpi-tile__value">{% if value is none %}—{% else %}{{ value|number_es(decimals, compact) }}{% endif %}</span>
+  <span class="kpi-tile__label">{{ label }}</span>
+  {% if delta is not none %}<span class="kpi-tile__delta">{{ delta|pct(1, signed=True) }}</span>{% endif %}
+</div>
+{%- endmacro %}
+
+{# Dashed-border button ("Añadir colaborador", "+ Más conexiones"). href → <a>. #}
+{% macro add_button(label, icon_name="plus", href=None, attrs={}, size=None, block=False, cls="", type="button", disabled=False) -%}
+{%- set classes = "add-btn" ~ (" add-btn--" ~ size if size else "") ~ (" add-btn--block" if block else "") ~ (" " ~ cls if cls else "") -%}
+{%- if href and not disabled -%}
+<a class="{{ classes }}" href="{{ href }}"{{ attrs|xmlattr }}>{% if icon_name %}{{ icon(icon_name, 18) }}{% endif %}<span>{{ label }}</span></a>
+{%- else -%}
+<button type="{{ type }}" class="{{ classes }}"{% if disabled %} disabled{% endif %}{{ attrs|xmlattr }}>{% if icon_name %}{{ icon(icon_name, 18) }}{% endif %}<span>{{ label }}</span></button>
+{%- endif -%}
+{%- endmacro %}
+
+{# Pill switch (primary colour when on) with the label on the right and an optional (?) tooltip. #}
+{% macro pill_switch(name, label, checked=False, tip=None, help=None, value="1", attrs={}, id=None, disabled=False, off_value=None, cls="") -%}
+{%- set fid = id or ("sw-" ~ name|replace(".", "-")) -%}
+{% if off_value is not none %}<input type="hidden" name="{{ name }}" value="{{ off_value }}">{% endif %}
+<label class="switch switch--pill{% if cls %} {{ cls }}{% endif %}" for="{{ fid }}">
+  <input type="checkbox" role="switch" id="{{ fid }}" name="{{ name }}" value="{{ value }}"{% if checked %} checked{% endif %}{% if disabled %} disabled{% endif %}{{ attrs|xmlattr }}>
+  <span class="switch__track" aria-hidden="true"></span>
+  <span class="switch__text"><span class="switch__label">{{ label }}
+    {%- if tip %}<span class="switch__tip" title="{{ tip }}">{{ icon("circle-question-mark", 15, label=tip) }}</span>{% endif %}</span>
+    {%- if help %}<span class="switch__help">{{ help }}</span>{% endif %}</span>
+</label>
+{%- endmacro %}
+
+{# Network logo button with an optional format chip (composer network row).
+   selected: brand colour vs grey outline. badge_icon: small corner icon (e.g. "layout-grid" post, "play" reel).
+   formats: list of (key, label) → native <select name="{{ format_name }}"> styled as a chip (value = format);
+   or format_label (+ chip_attrs) → a chip button (e.g. to open a dropdown). attrs go on the logo button. #}
+{% macro net_button(network, selected=False, label=None, badge_icon=None, format=None, formats=None, format_name=None,
+                    format_label=None, attrs={}, chip_attrs={}, disabled=False, cls="") -%}
+{%- set name = label or network_label(network) -%}
+<span class="net-pick net-pick--{{ network }}{% if selected %} is-selected{% endif %}{% if disabled %} is-disabled{% endif %}{% if cls %} {{ cls }}{% endif %}">
+  <button type="button" class="net-pick__logo" aria-pressed="{{ 'true' if selected else 'false' }}" aria-label="{{ name }}" title="{{ name }}"
+          {%- if disabled %} disabled{% endif %}{{ attrs|xmlattr }}>
+    {{ net_icon(network, 38, title=False) }}
+    {% if badge_icon %}<span class="net-pick__badge" aria-hidden="true">{{ icon(badge_icon, 11, stroke=2.5) }}</span>{% endif %}
+  </button>
+  {% if formats %}
+  <select class="net-pick__chip" aria-label="Formato de {{ name }}"{% if format_name %} name="{{ format_name }}"{% endif %}{% if disabled %} disabled{% endif %}{{ chip_attrs|xmlattr }}>
+    {% for opt in formats %}
+    {% set ov = opt.key if opt.key is defined else opt[0] %}{% set ol = opt.label if opt.label is defined else opt[1] %}
+    <option value="{{ ov }}"{% if format is not none and ov|string == format|string %} selected{% endif %}>{{ ol }}</option>
+    {% endfor %}
+  </select>
+  {% elif format_label %}
+  <button type="button" class="net-pick__chip" aria-label="Formato de {{ name }}: {{ format_label }}"{% if disabled %} disabled{% endif %}{{ chip_attrs|xmlattr }}>
+    <span>{{ format_label }}</span>{{ icon("chevron-down", 14, stroke=2.5) }}</button>
+  {% endif %}
+</span>
+{%- endmacro %}

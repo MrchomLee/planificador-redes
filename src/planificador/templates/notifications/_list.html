@@ -1,0 +1,30 @@
+{#- Notification centre list (grouped by day) + "Cargar más". Context: notifications_page(). When appending
+    (?antes=…) only the groups and the next "Cargar más" are returned (they replace the old button). -#}
+{% import "components/ui.html" as ui with context %}
+{% import "notifications/_macros.html" as nm with context %}
+{% for label, rows in groups %}
+<section class="nday" aria-label="{{ label }}">
+  <h2 class="nday__title">{{ label }}</h2>
+  <div class="nday__items">
+    {% for n in rows %}{{ nm.page_item(n) }}{% endfor %}
+  </div>
+</section>
+{% else %}
+{% if not appending %}
+{% if filtro == "no-leidas" %}
+{% call ui.empty_state("Lo tienes todo al día", "No hay notificaciones sin leer.", icon_name="bell-off") %}
+  {{ ui.button("Ver todas", href="/notificaciones?filtro=todas" ~ ("&tipo=" ~ tipo if tipo else ""), variant="secondary") }}
+{% endcall %}
+{% else %}
+{{ ui.empty_state("No hay notificaciones",
+    "Aquí verás los avisos de publicación asistida, los errores al publicar y las conexiones que hay que renovar.",
+    icon_name="bell") }}
+{% endif %}
+{% endif %}
+{% endfor %}
+{% if has_more %}
+<div class="nmore" id="notif-more">
+  <button type="button" class="btn btn--secondary" hx-get="/notificaciones?filtro={{ filtro }}&amp;tipo={{ tipo }}&amp;antes={{ next_before }}"
+          hx-target="#notif-more" hx-swap="outerHTML">{{ icon("chevrons-down", 16) }}<span>Cargar más</span></button>
+</div>
+{% endif %}

@@ -1,0 +1,58 @@
+{#- Preview card (doc 05 §3.2): round network tabs, eye / mobile / desktop toggles, realistic mock, disclaimer. -#}
+{% import "composer/_pv_macros.html" as pv with context %}
+<section class="composer__card composer__preview" aria-label="Vista previa">
+  <header class="pv-head">
+    <div class="pv-tabs" role="tablist" aria-label="Vista previa por red social">
+      {% for account, info in accounts %}
+      {% set K = info.key %}
+      <button type="button" role="tab" class="pv-tab pv-tab--{{ info.network }}" x-show="isSel('{{ K }}')" x-cloak
+              :aria-selected="pvKey === '{{ K }}' ? 'true' : 'false'" @click="pvKey = '{{ K }}'; pvExpanded = false"
+              title="Vista previa en {{ info.network_label }}">{{ net_glyph(info.network, 22) }}<span class="visually-hidden">{{ info.network_label }}</span></button>
+      {% endfor %}
+    </div>
+    <div class="pv-tools" role="group" aria-label="Opciones de la vista previa">
+      <button type="button" class="pv-tool" :aria-pressed="pvVisible ? 'false' : 'true'" @click="pvVisible = !pvVisible" :title="pvVisible ? 'Ocultar vista previa' : 'Mostrar vista previa'">
+        <span x-show="pvVisible">{{ icon("eye", 18) }}</span><span x-show="!pvVisible" x-cloak>{{ icon("eye-off", 18) }}</span></button>
+      <span class="pv-seg">
+        <button type="button" class="pv-tool" :aria-pressed="pvDevice === 'mobile' ? 'true' : 'false'" @click="pvDevice = 'mobile'" title="Móvil">{{ icon("smartphone", 18) }}</button>
+        <button type="button" class="pv-tool" :aria-pressed="pvDevice === 'desktop' ? 'true' : 'false'" @click="pvDevice = 'desktop'" title="Ordenador">{{ icon("monitor", 18) }}</button>
+      </span>
+    </div>
+  </header>
+
+  <div class="pv-stage" :class="'is-' + pvDevice">
+    <div class="pv-empty" x-show="!selected.length || !pvKey">
+      <span class="pv-empty__icon">{{ icon("eye", 26, stroke=1.75) }}</span>
+      <strong>Vista previa</strong>
+      <span>Elige una red social arriba para ver cómo quedará la publicación.</span>
+    </div>
+    <div class="pv-empty" x-show="selected.length && pvKey && !pvVisible" x-cloak>
+      <span class="pv-empty__icon">{{ icon("eye-off", 26, stroke=1.75) }}</span>
+      <span>Vista previa oculta.</span>
+    </div>
+    {% for account, info in accounts %}
+    {% set K = info.key %}
+    <div class="pv-net" x-show="pvVisible && pvKey === '{{ K }}'" x-cloak>
+      {% if info.network == "facebook" %}
+      <template x-if="pvKind('{{ K }}') === 'fb'">{{ pv.fb_card(K) }}</template>
+      <template x-if="pvKind('{{ K }}') === 'phone'">{{ pv.phone(K, "facebook") }}</template>
+      {% elif info.network == "instagram" %}
+      <template x-if="pvKind('{{ K }}') === 'ig'">{{ pv.ig_card(K) }}</template>
+      <template x-if="pvKind('{{ K }}') === 'phone'">{{ pv.phone(K, "instagram") }}</template>
+      {% elif info.network == "tiktok" %}
+      {{ pv.phone(K, "tiktok") }}
+      {% elif info.network == "youtube" %}
+      <template x-if="pvKind('{{ K }}') === 'yt'">{{ pv.yt_video(K) }}</template>
+      <template x-if="pvKind('{{ K }}') === 'phone'">{{ pv.phone(K, "youtube") }}</template>
+      {% else %}
+      {{ pv.demo_card(K) }}
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+
+  <div class="callout tone-info pv-note" role="note">
+    {{ icon("info", 18) }}
+    <div>Las previsualizaciones son una aproximación de cómo se verá la publicación. El resultado final puede ser diferente.</div>
+  </div>
+</section>

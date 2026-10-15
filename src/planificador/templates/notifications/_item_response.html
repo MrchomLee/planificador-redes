@@ -1,0 +1,3 @@
+{#- Response of POST /notificaciones/{id}/leer|no-leida (htmx swaps it over #notif-{id}). -#}
+{% import "notifications/_macros.html" as nm with context %}
+{{ nm.page_item(n) }}

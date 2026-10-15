@@ -779,14 +779,15 @@ def test_scheduler_start_hook(app_settings, monkeypatch: pytest.MonkeyPatch) -> 
     from planificador.app import create_app
 
     calls: list[str] = []
-    monkeypatch.setattr(scheduler, "start", lambda state: calls.append(f"start:{state.settings.port}"))
-    monkeypatch.setattr(scheduler, "stop", lambda: calls.append("stop"))
+    # The lifespan hands the FastAPI app itself to the scheduler (it accepts the app or its state).
+    monkeypatch.setattr(scheduler, "start", lambda app: calls.append(f"start:{app.state.settings.port}"))
+    monkeypatch.setattr(scheduler, "stop", lambda app=None: calls.append("stop"))
     application = create_app(dataclasses.replace(app_settings, scheduler_enabled=True))
     with TestClient(application, base_url=BASE_URL) as c:
         assert c.get("/healthz").status_code == 200
     assert calls == ["start:8765", "stop"]
 
-    def not_ready(state: Any) -> None:
+    def not_ready(app: Any) -> None:
         raise NotImplementedError
 
     monkeypatch.setattr(scheduler, "start", not_ready)

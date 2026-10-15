@@ -1,7 +1,8 @@
 """Fixtures for the Playwright end-to-end tests (marker ``e2e``; run with ``uv run pytest -m e2e``).
 
 - ``live_server``: the real app (fresh data dir, scheduler off) served by Uvicorn on 127.0.0.1 in a background
-  thread; yields an object with ``url`` (``http://localhost:<port>``) and ``app``.
+  thread; yields an object with ``url`` (``http://localhost:<port>``) and ``app``. ``live_server_sched`` is
+  the same with the real scheduler running (tests/e2e/test_flows.py).
 - Browser: pytest-playwright's ``browser`` fixture (Chromium). Set ``PLAYWRIGHT_CHROMIUM_EXECUTABLE`` to use
   an already installed Chromium instead of ``playwright install chromium``.
 - ``PLANIFICADOR_E2E_SHOTS=<dir>`` saves screenshots there (light + dark).
@@ -58,11 +59,21 @@ class LiveServer:
 
 @pytest.fixture
 def live_server(data_dir: Path) -> Iterator[LiveServer]:
+    yield from _serve(data_dir, scheduler=False)
+
+
+@pytest.fixture
+def live_server_sched(data_dir: Path) -> Iterator[LiveServer]:
+    """Like ``live_server`` but with the real background scheduler running (publishing engine + jobs)."""
+    yield from _serve(data_dir, scheduler=True)
+
+
+def _serve(data_dir: Path, *, scheduler: bool) -> Iterator[LiveServer]:
     from planificador.app import create_app
     from planificador.config import load_app_settings
 
     port = _free_port()
-    app = create_app(load_app_settings(data_dir=data_dir, port=port, scheduler_enabled=False))
+    app = create_app(load_app_settings(data_dir=data_dir, port=port, scheduler_enabled=scheduler))
     server = uvicorn.Server(
         uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", lifespan="on")
     )

@@ -1,0 +1,17 @@
+{#- Brand create/edit modal (htmx into #modal-root). Context: form, brand, colors, tz_groups. -#}
+{% import "components/ui.html" as ui with context %}
+{% import "brands/_macros.html" as bm with context %}
+{% set url = "/marcas/" ~ brand.id if brand else "/marcas" %}
+{% set footer %}
+  <button type="button" class="btn btn--ghost" data-close>Cancelar</button>
+  <button type="submit" class="btn btn--primary">{{ icon("check", 16) }}<span>{{ "Guardar cambios" if brand else "Crear marca" }}</span></button>
+{% endset %}
+{% call ui.modal("Editar marca" if brand else "Nueva marca", subtitle=("Cambia el nombre, el color o la zona horaria de «" ~ brand.name ~ "».") if brand else "Agrupa las cuentas y publicaciones de un negocio o proyecto.",
+                 size="md", id="brand-modal", footer=footer,
+                 form={"method": "post", "action": url, "hx-post": url, "hx-target": "#modal-root", "hx-swap": "innerHTML", "class": "brand-modal-form"}) %}
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  {{ bm.brand_fields(form, colors, tz_groups, brand) }}
+  {% if not brand %}
+  {{ ui.check("activar", "Cambiar a esta marca al crearla", checked=True, id="ck-brand-activate") }}
+  {% endif %}
+{% endcall %}

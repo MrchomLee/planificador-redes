@@ -1,0 +1,123 @@
+{#- Post detail block (#post-detail): header + body + footer. Used inside the drawer (mode "drawer") and the full
+    page (mode "pagina"); re-fetched with ?parcial=1 whenever "posts:changed" / "post:saved" reach <body>.
+    Context: detail_context() in routes/posts.py. -#}
+{% import "components/ui.html" as ui with context %}
+{% import "posts/_macros.html" as pm with context %}
+{% set p = post %}
+{% set refresh_url = "/publicaciones/" ~ p.id ~ "?parcial=1&modo=" ~ mode ~ ("&objetivo=" ~ focus_target if focus_target else "") %}
+<div id="post-detail" class="post-detail post-detail--{{ mode }}" data-post-id="{{ p.id }}">
+  <span hidden hx-get="{{ refresh_url }}" hx-trigger="posts:changed from:body, post:saved from:body{% if in_flight %}, every 4s{% endif %}"
+        hx-target="#post-detail" hx-swap="outerHTML" data-silent-errors></span>
+
+  <header class="drawer__header pd-header">
+    <div class="pd-header__main">
+      <span class="pd-header__nets" aria-hidden="true">
+        {% for tv in targets %}{{ net_icon(tv.network, 30, title=False) }}{% else %}<span class="avatar avatar--empty" style="--avatar-size:30px">{{ icon("file-text", 16) }}</span>{% endfor %}
+      </span>
+      <div class="pd-header__titles">
+        <p class="pd-header__eyebrow">{{ "Idea" if p.is_idea else "Publicación" }} · {{ p.brand.name if p.brand else "" }}</p>
+        <h2 class="drawer__title pd-header__title" id="post-detail-title" tabindex="-1"{% if mode == "drawer" %} autofocus{% endif %}>{{ post_title }}</h2>
+        <div class="pd-header__meta">
+          {{ ui.badge(derived_status) }}
+          {% if p.scheduled_at %}
+          <span class="pd-header__when">{{ icon("calendar", 15) }}<span>{{ p.scheduled_at|dt_es(tz) }}</span></span>
+          {% elif p.is_idea %}
+          <span class="pd-header__when">{{ icon("lightbulb", 15) }}<span>Sin fecha ({{ {"idea": "Idea", "en_progreso": "En progreso", "lista": "Lista"}.get(p.idea_stage|string, "Idea") }})</span></span>
+          {% else %}
+          <span class="pd-header__when">{{ icon("calendar-x", 15) }}<span>Sin fecha</span></span>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+    {% if mode == "drawer" %}
+    <div class="pd-header__tools">
+      <a class="icon-btn" href="/publicaciones/{{ p.id }}" title="Abrir en página completa" aria-label="Abrir en página completa">{{ icon("maximize-2", 17) }}</a>
+      <button type="button" class="icon-btn" data-close aria-label="Cerrar" title="Cerrar (Esc)">{{ icon("x", 18) }}</button>
+    </div>
+    {% endif %}
+  </header>
+
+  <div class="drawer__body pd-body">
+    {% if deleted %}
+    {% set restore %}<button type="button" class="btn btn--primary btn--sm" hx-post="/publicaciones/{{ p.id }}/restaurar" hx-swap="none">{{ icon("undo-2", 16) }}<span>Restaurar</span></button>{% endset %}
+    {{ ui.info_alert("Está en la papelera desde el " ~ (p.deleted_at|dt_es(tz)) ~ ". Se borrará definitivamente a los 45 días.", title="En la papelera", tone="warning", icon_name="trash-2", actions=restore) }}
+    {% elif error_count %}
+    {{ ui.info_alert("Revisa abajo qué ha pasado en cada red y elige qué hacer.", title=("1 red necesita tu atención" if error_count == 1 else error_count ~ " redes necesitan tu atención"), tone="danger", icon_name="circle-alert") }}
+    {% endif %}
+
+    {% if p.scheduled_at %}
+    <section class="pd-section pd-when" aria-label="Fecha de publicación">
+      <div class="pd-when__date">
+        <span class="pd-when__day">{{ p.scheduled_at|date_es(tz, "long")|capitalize }}</span>
+        <span class="pd-when__time num">{{ p.scheduled_at|time_es(tz) }}</span>
+      </div>
+      <span class="pd-when__tz" title="Zona horaria de la marca">{{ icon("globe", 14) }}{{ tz }}</span>
+    </section>
+    {% endif %}
+
+    <section class="pd-section">
+      <div class="pd-section__head">
+        <h3 class="pd-section__title">Texto</h3>
+        {% if p.text %}<button type="button" class="btn btn--ghost btn--sm" data-copy-target="#pd-text-{{ p.id }}" data-copy-message="Texto copiado">{{ icon("copy", 15) }}<span>Copiar</span></button>{% endif %}
+      </div>
+      {% if p.text %}
+      <div class="pd-text pre-line" id="pd-text-{{ p.id }}">{{ p.text }}</div>
+      {% else %}
+      <p class="pd-empty">Sin texto común.</p>
+      {% endif %}
+    </section>
+
+    {% if media %}
+    <section class="pd-section">
+      <div class="pd-section__head"><h3 class="pd-section__title">Medios <span class="count-pill">{{ media|length }}</span></h3></div>
+      {{ pm.media_grid(media) }}
+    </section>
+    {% endif %}
+
+    {% if p.notes %}
+    <section class="pd-section">
+      <div class="pd-section__head"><h3 class="pd-section__title">Notas internas</h3></div>
+      <div class="pd-notes pre-line">{{ p.notes }}</div>
+    </section>
+    {% endif %}
+
+    <section class="pd-section">
+      <div class="pd-section__head"><h3 class="pd-section__title">Redes <span class="count-pill">{{ targets|length }}</span></h3></div>
+      {% if targets %}
+      <div class="pd-targets">
+        {% for tv in targets %}{{ pm.target_card(tv, mode) }}{% endfor %}
+      </div>
+      {% else %}
+      <p class="pd-empty">Esta publicación todavía no tiene redes. Ábrela en el editor para elegirlas.</p>
+      {% endif %}
+    </section>
+  </div>
+
+  <footer class="drawer__footer pd-footer">
+    {% if not deleted %}
+    <button type="button" class="btn btn--danger-ghost btn--sm" hx-post="/publicaciones/{{ p.id }}/papelera" hx-swap="none"
+            hx-vals='{"modo": "{{ mode }}"}'
+            hx-confirm="Se moverá a la papelera y se cancelará lo que esté pendiente de publicar. Podrás restaurarla durante 45 días."
+            data-confirm-title="¿Mover a la papelera?" data-confirm-ok="Mover a la papelera" data-confirm-danger>
+      {{- icon("trash-2", 16) }}<span>Mover a la papelera</span></button>
+    {% endif %}
+    <span class="spacer"></span>
+    <button type="button" class="btn btn--secondary btn--sm" hx-post="/publicaciones/{{ p.id }}/duplicar" hx-swap="none" hx-vals='{"modo": "{{ mode }}"}'>
+      {{- icon("copy-plus", 16) }}<span>Duplicar</span></button>
+    {% if edit_lock %}
+    <span class="pd-footer__locked" tabindex="0" title="{{ edit_lock }}">
+      <button type="button" class="btn btn--secondary btn--sm" disabled>{{ icon("pencil", 16) }}<span>Editar</span></button>
+    </span>
+    {% else %}
+    <a class="btn btn--secondary btn--sm" href="/publicaciones/{{ p.id }}/editar" hx-get="/publicaciones/{{ p.id }}/editar" hx-target="#modal-root" hx-swap="innerHTML" hx-push-url="false">
+      {{- icon("pencil", 16) }}<span>Editar</span></a>
+    {% endif %}
+    {% if can_publish_now %}
+    <button type="button" class="btn btn--primary btn--sm" hx-post="/publicaciones/{{ p.id }}/publicar-ahora" hx-swap="none"
+            hx-confirm="Se enviará ahora a las redes que aún no se han publicado. Las que tienen la publicación asistida te avisarán para que las publiques tú."
+            data-confirm-title="¿Publicar ahora?" data-confirm-ok="Publicar ahora">
+      {{- icon("send", 16) }}<span>Publicar ahora</span></button>
+    {% endif %}
+  </footer>
+  {% if edit_lock and not deleted %}<p class="pd-footer__hint">{{ icon("lock", 13) }}{{ edit_lock }}</p>{% endif %}
+</div>

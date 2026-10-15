@@ -1,0 +1,9 @@
+{#- Composer as a full page (direct navigation to /publicaciones/nueva or /publicaciones/{id}/editar). -#}
+{% extends "base.html" %}
+{% block head %}<link rel="stylesheet" href="{{ static_url('css/composer.css') }}">{% endblock %}
+{% block body_class %}page-composer{% endblock %}
+{% block main_class %}app-main--flush{% endblock %}
+{% block content %}
+{% set layer = "page" %}
+{% include "composer/_composer.html" %}
+{% endblock %}

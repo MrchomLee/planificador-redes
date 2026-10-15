@@ -1,0 +1,103 @@
+{#- Meta page chooser (after Facebook Login). Context: pending, pages (dicts from _page_view), preselect, focus,
+    missing_scopes, target_brand, current {facebook, instagram}. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% block head %}<link rel="stylesheet" href="{{ static_url('css/settings.css') }}">{% endblock %}
+{% block scripts %}<script src="{{ static_url('js/settings.js') }}" defer></script>{% endblock %}
+{% block body_class %}page-connections page-chooser{% endblock %}
+{% block content %}
+<div class="chooser">
+  <a class="chooser__back" href="/conexiones">{{ icon("arrow-left", 16) }}<span>Cuentas conectadas</span></a>
+  {% call ui.page_header("Elige tu página de Facebook", subtitle="Instagram se conecta a través de la página de Facebook a la que está vinculada tu cuenta profesional.") %}
+    {% if target_brand %}<span class="conn-brand conn-brand--static">{{ ui.brand_avatar(target_brand, 28) }}<span class="conn-brand__text"><span class="conn-brand__eyebrow">Marca</span><span class="conn-brand__name truncate">{{ target_brand.name }}</span></span></span>{% endif %}
+  {% endcall %}
+
+  {% if missing_scopes %}
+  {% set retry %}<a class="btn btn--secondary btn--sm" href="/conexiones/meta/iniciar">Volver a intentarlo</a>{% endset %}
+  {% call ui.info_alert(tone="warning", title="Faltan permisos", actions=retry) %}
+    No concediste: {{ missing_scopes|join(", ") }}. Puedes continuar, pero algunas funciones (publicar, estadísticas o
+    comentarios) fallarán. Para concederlos, vuelve a intentarlo y acepta todo en el diálogo de Facebook.
+  {% endcall %}
+  {% endif %}
+
+  {% if not pages %}
+  <div class="card">
+    {% call ui.empty_state("No hemos encontrado ninguna página", "Facebook no nos ha dado acceso a ninguna página. En el diálogo de Facebook marca las páginas que quieres usar (pulsa «Editar acceso» si no te lo pregunta) y comprueba que tienes un rol en ellas.", icon_name="file-search") %}
+      <a class="btn btn--primary" href="/conexiones/meta/iniciar">{{ icon("refresh-cw", 16) }}<span>Volver a intentarlo</span></a>
+      <a class="btn btn--secondary" href="/ayuda/meta">{{ icon("book-open", 16) }}<span>Ver la guía</span></a>
+    {% endcall %}
+  </div>
+  {% else %}
+  {% set ig_map = {} %}
+  {% for p in pages %}{% do ig_map.update({p.id: p.instagram is not none}) %}{% endfor %}
+  <form class="chooser__form" method="post" action="/conexiones/meta/seleccionar"
+        x-data='metaChooser({{ {"page": preselect, "ig": ig_map, "focus": focus}|tojson }})'>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="pendiente" value="{{ pending }}">
+
+    <fieldset class="chooser__list" role="radiogroup" aria-label="Páginas de Facebook">
+      <legend class="chooser__legend">{{ pages|length }} página{{ "s" if pages|length != 1 }} disponible{{ "s" if pages|length != 1 }}</legend>
+      {% for p in pages %}
+      <label class="chooser-item{% if not p.can_publish %} is-disabled{% endif %}" for="page-{{ p.id }}">
+        <input type="radio" id="page-{{ p.id }}" name="page_id" value="{{ p.id }}" x-model="page"
+               {%- if p.id == preselect %} checked{% endif %}{% if not p.can_publish %} disabled{% endif %}>
+        <span class="chooser-item__radio" aria-hidden="true"></span>
+        <span class="chooser-item__main">
+          <span class="chooser-item__who">
+            <span class="avatar-wrap">{{ ui.avatar(p.name, "#8a91a3", src=p.picture_url, size=44) }}{{ net_icon("facebook", 18, title=False) }}</span>
+            <span class="chooser-item__names">
+              <span class="chooser-item__name">{{ p.name }}
+                {%- if current.facebook and current.facebook.external_id == p.id %} {{ ui.tag("Conectada ahora", "success", size="sm") }}{% endif %}</span>
+              <span class="chooser-item__meta">{{ p.category or "Página de Facebook" }}{% if p.followers is not none %} · {{ p.followers|number_es(compact=True) }} seguidores{% endif %}</span>
+            </span>
+          </span>
+          <span class="chooser-item__ig">
+            {% if p.instagram %}
+            <span class="avatar-wrap">{{ ui.avatar(p.instagram.username or p.instagram.name, "#8a91a3", src=p.instagram.picture_url, size=30) }}{{ net_icon("instagram", 14, title=False) }}</span>
+            <span><span class="chooser-item__name">@{{ p.instagram.username or p.instagram.id }}</span>
+              <span class="chooser-item__meta">Instagram vinculado{% if p.instagram.followers is not none %} · {{ p.instagram.followers|number_es(compact=True) }} seguidores{% endif %}</span></span>
+            {% else %}
+            <span class="chooser-item__noig" title="Vincula una cuenta profesional de Instagram desde la configuración de la página para publicar también en Instagram.">{{ icon("link-2-off", 15) }}Sin Instagram vinculado</span>
+            {% endif %}
+          </span>
+          {% if p.warnings %}
+          <ul class="chooser-item__warnings">
+            {% for w in p.warnings %}<li>{{ icon("triangle-alert", 14) }}<span>{{ w }}</span></li>{% endfor %}
+          </ul>
+          {% endif %}
+        </span>
+      </label>
+      {% endfor %}
+    </fieldset>
+
+    <section class="card chooser__nets" aria-labelledby="chooser-nets-title">
+      <div class="card__body">
+        <h2 class="chooser__subtitle" id="chooser-nets-title">¿Qué quieres conectar?</h2>
+        <div class="chooser__switches">
+          {{ ui.pill_switch("facebook", "Facebook: la página elegida", checked=(focus != "instagram" or current.facebook is not none), help="Publicaciones, reels e historias en la página.", id="sw-meta-fb") }}
+          <div :class="{ 'is-unavailable': !hasIg }">
+            {{ ui.pill_switch("instagram", "Instagram: su cuenta profesional vinculada", checked=True, help="Publicaciones, carruseles, reels e historias.", id="sw-meta-ig", attrs={":disabled": "!hasIg", ":checked": "hasIg && wantIg", "@change": "wantIg = $event.target.checked"}) }}
+            <p class="chooser__hint" x-show="!hasIg" x-cloak>{{ icon("info", 14) }}La página elegida no tiene una cuenta profesional de Instagram vinculada.</p>
+          </div>
+        </div>
+        <div class="chooser__igtype" x-show="hasIg && wantIg">
+          {{ ui.form_field("ig_type", "Tipo de cuenta de Instagram", type="select", value=("business" if current.instagram and current.instagram.account_type == "business" else ("creator" if current.instagram and current.instagram.account_type == "creator" else "")),
+               options=[("", "No lo sé"), ("business", "Empresa"), ("creator", "Creador")],
+               help="Instagram solo permite programar historias con cuentas de empresa. Si tu cuenta es de creador, las historias se publicarán a mano (te avisaremos).") }}
+        </div>
+        {% if current.facebook or current.instagram %}
+        <p class="chooser__replace">{{ icon("info", 14) }}
+          <span>Esta marca ya tiene conectad{{ "as" if current.facebook and current.instagram else "a" }}
+          {% if current.facebook %}la página «{{ current.facebook.name }}»{% endif %}{% if current.facebook and current.instagram %} y {% endif %}{% if current.instagram %}la cuenta {{ current.instagram.display_name }}{% endif %}.
+          Si eliges otra, se sustituirá y las publicaciones programadas saldrán en la nueva.</span></p>
+        {% endif %}
+      </div>
+      <footer class="card__footer">
+        <a class="btn btn--ghost" href="/conexiones">Cancelar</a>
+        <button type="submit" class="btn btn--primary">{{ icon("plug", 16) }}<span>Conectar</span></button>
+      </footer>
+    </section>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

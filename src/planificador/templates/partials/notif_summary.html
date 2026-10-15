@@ -1,29 +1,30 @@
 {#- Response of GET /api/notificaciones/resumen (polled by the bell every 30 s).
     Context: unread (int), items (latest notifications, newest first; ORM rows or dicts with
-    id, kind, title, body, created_at, read_at, target_id, optional url).
+    id, kind, title, body, created_at, read_at, target_id, optional url / target).
     Main content -> the badge; #notif-list is updated out of band; data-notify-items feeds the
-    browser Notification helper in app.js (only ids newer than the last seen one are announced). -#}
+    browser Notification helper in app.js (only ids newer than the last seen one are announced) and
+    data-unread the "(N)" prefix of the tab title. Deep links: notifications/_macros.html. -#}
+{% import "notifications/_macros.html" as nm with context %}
+{% set _count = unread if unread is defined else unread_notifications %}
 {% set payload = [] %}
 {% for n in items or [] %}
-{% set kind = n.kind|string %}
-{% set url = n.url if (n.url is defined and n.url) else ("/conexiones" if kind == "reconnect" else "/notificaciones") %}
-{% do payload.append({"id": n.id, "kind": kind, "title": n.title, "body": n.body or "", "url": url}) %}
+{% do payload.append({"id": n.id, "kind": n.kind|string, "title": n.title, "body": n.body or "", "url": nm.href(n)|trim}) %}
 {% endfor %}
 {% include "partials/notif_badge.html" %}
-<span hidden data-notify-items='{{ payload|tojson }}'></span>
+<span hidden data-notify-items='{{ payload|tojson }}' data-unread="{{ _count or 0 }}"></span>
 <div id="notif-list" hx-swap-oob="innerHTML">
   {% for n in items or [] %}
   {% set kind = n.kind|string %}
-  {% set tone = NOTIFICATION_TONES.get(kind, "info") %}
-  {% set assisted = kind == "manual_publish" and n.target_id %}
-  {% set url = n.url if (n.url is defined and n.url) else ("/conexiones" if kind == "reconnect" else "/notificaciones") %}
-  <a class="notif-item{% if not n.read_at %} is-unread{% endif %}" href="{{ url }}"
-     {%- if assisted %} hx-get="/objetivos/{{ n.target_id }}/asistida" hx-target="#modal-root" hx-swap="innerHTML" hx-push-url="false"{% endif %}>
-    <span class="notif-item__icon tone-{{ tone }}">{{ icon(NOTIFICATION_ICONS.get(kind, "info"), 16) }}</span>
+  <a class="notif-item{% if not n.read_at %} is-unread{% endif %}" href="{{ nm.href(n)|trim }}"{{ nm.hx_attrs(n) }}
+     {%- if not n.read_at %} data-notif-read="{{ n.id }}"{% endif %}>
+    {{ nm.bubble(n) }}
     <span class="notif-item__body">
       <span class="notif-item__title">{{ n.title }}</span>
       {% if n.body %}<span class="notif-item__text">{{ n.body }}</span>{% endif %}
-      {% if n.created_at %}<span class="notif-item__time"><time datetime="{{ n.created_at|iso_utc }}" data-timeago title="{{ n.created_at|dt_es }}">{{ n.created_at|timeago_es }}</time></span>{% endif %}
+      <span class="notif-item__time">
+        <span class="notif-item__kind tone-{{ NOTIFICATION_TONES.get(kind, 'info') }}">{{ nm.KIND_LABELS.get(kind, "Aviso") }}</span>
+        {% if n.created_at %}· <time datetime="{{ n.created_at|iso_utc }}" data-timeago title="{{ n.created_at|dt_es }}">{{ n.created_at|timeago_es }}</time>{% endif %}
+      </span>
     </span>
   </a>
   {% else %}

@@ -1,0 +1,39 @@
+{#- Library results (grid + "Cargar más"). Context: views, total, page, has_more, q, kind, counts (optional),
+    append (True for the "Cargar más" request: cards go out of band into #media-grid). -#}
+{% import "components/ui.html" as ui with context %}
+{% import "media/_macros.html" as mm with context %}
+{% set more_url = "/biblioteca?q=" ~ (q|urlencode) ~ "&tipo=" ~ kind ~ "&pagina=" ~ (page + 1) %}
+{% if append %}
+<div hx-swap-oob="beforeend:#media-grid">{% for v in views %}{{ mm.card(v) }}{% endfor %}</div>
+{% elif views %}
+<div class="media-grid" id="media-grid" role="list">
+  {% for v in views %}{{ mm.card(v) }}{% endfor %}
+</div>
+{% elif q or kind %}
+{% call ui.empty_state("No hay resultados", "Ningún archivo coincide con la búsqueda o el filtro. Prueba con otro nombre o muestra todos los tipos.", icon_name="search-x") %}
+  <a class="btn btn--secondary" href="/biblioteca">{{ icon("x", 16) }}<span>Quitar filtros</span></a>
+{% endcall %}
+{% else %}
+<div class="medialib__empty" data-empty-drop>
+  {% call ui.empty_state("Tu biblioteca está vacía", "Sube fotos y vídeos para usarlos en tus publicaciones de Facebook, Instagram, TikTok y YouTube. También puedes arrastrarlos a esta ventana.", icon_name="images") %}
+    <button type="button" class="btn btn--primary" data-upload-trigger>{{ icon("upload", 18) }}<span>Subir archivos</span></button>
+  {% endcall %}
+  <ul class="medialib__formats" aria-label="Formatos admitidos">
+    <li>{{ icon("image", 14) }} JPEG, PNG, WebP, GIF, HEIC</li>
+    <li>{{ icon("video", 14) }} MP4, MOV, M4V, WebM</li>
+    <li>{{ icon("hard-drive", 14) }} Hasta 4 GB por archivo</li>
+  </ul>
+</div>
+{% endif %}
+{% if has_more %}
+<div class="media-more" id="media-more">
+  <button type="button" class="btn btn--secondary" hx-get="{{ more_url }}" hx-target="#media-more" hx-swap="outerHTML" hx-push-url="false">
+    {{ icon("chevrons-down", 16) }}<span>Cargar más</span></button>
+</div>
+{% elif append %}
+<span hidden></span>
+{% endif %}
+{% if oob is defined and oob and counts %}
+<span id="media-total" class="medialib__total muted" hx-swap-oob="true">{{ mm.total_label(total, counts, q, kind) }}</span>
+{% for key in ("", "image", "video") %}<span class="count-pill" id="media-count-{{ key or 'all' }}" hx-swap-oob="true">{{ counts[key] }}</span>{% endfor %}
+{% endif %}

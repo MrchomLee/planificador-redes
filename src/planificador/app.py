@@ -162,15 +162,24 @@ def _call_service(name: str, fn: Callable[[], Any]) -> bool:
     return False
 
 
+def _start_public_media(app: FastAPI) -> None:
+    """Create the public media service (``app.state.public_media``; its ``stop`` runs at shutdown) and start
+    its server unless public media is off. The Cloudflare tunnel itself only starts on first use."""
+    from planificador import publicmedia
+
+    publicmedia.get_service(app).start()
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     state = app.state
     settings: AppSettings = state.settings
     started_scheduler = False
+    _call_service("Public media service", lambda: _start_public_media(app))
     if settings.scheduler_enabled:
         from planificador import scheduler
 
-        started_scheduler = _call_service("Scheduler start", lambda: scheduler.start(state))
+        started_scheduler = _call_service("Scheduler start", lambda: scheduler.start(app))
     else:
         log.info("Scheduler disabled")
     log.info("Planificador %s ready on %s (data: %s)", __version__, settings.base_url, settings.data_dir)
@@ -180,7 +189,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         if started_scheduler:
             from planificador import scheduler
 
-            _call_service("Scheduler stop", scheduler.stop)
+            _call_service("Scheduler stop", lambda: scheduler.stop(app))
         for callback in reversed(list(state.shutdown_callbacks)):
             _call_service(f"Shutdown callback {getattr(callback, '__name__', callback)!s}", callback)
         state.db.checkpoint()
@@ -232,7 +241,7 @@ def create_app(
     app.state.db = database
     app.state.clock = clock or SystemClock()
     app.state.shutdown_callbacks = []  # zero-arg callables run at shutdown (services register themselves)
-    app.state.public_media = None  # publicmedia.PublicMediaService (set by its owner when available)
+    app.state.public_media = None  # publicmedia.PublicMediaService (created in the lifespan / on first use)
 
     # Middleware: the last added is the outermost → Host check, then session, then CSRF/auth.
     app.add_middleware(SecurityMiddleware, allowed_origins=settings.allowed_origins)

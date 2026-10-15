@@ -1,0 +1,115 @@
+{#- "Configuración de TikTok" — TikTok's mandatory posting UX (research 03 §4.2): creator nickname, privacy select
+    with no default (unless only one option), interaction toggles greyed per creator settings, max duration,
+    AI-generated, commercial content disclosure with labels, consent sentence; inbox mode ("borrador").
+    Vars: K, T, O, info. -#}
+<div class="cmp-fields cmp-tt">
+  <div class="cmp-tt__creator">
+    <template x-if="creatorInfo('{{ K }}') && creatorInfo('{{ K }}').avatar_url">
+      <img class="cmp-tt__avatar" :src="creatorInfo('{{ K }}').avatar_url" alt="" referrerpolicy="no-referrer">
+    </template>
+    <template x-if="!(creatorInfo('{{ K }}') && creatorInfo('{{ K }}').avatar_url)">
+      <span class="cmp-tt__avatar cmp-tt__avatar--empty">{{ net_glyph("tiktok", 18) }}</span>
+    </template>
+    <div class="grow">
+      <div>Publicar como <strong x-text="displayName('{{ K }}')">{{ info.name }}</strong>
+        <span class="muted" x-show="handle('{{ K }}')" x-text="'@' + handle('{{ K }}')"></span></div>
+      <div class="text-xs muted" x-show="creator['{{ K }}'] && creator['{{ K }}'].loading">Consultando tu cuenta de TikTok…</div>
+      <div class="text-xs text-danger" x-show="creator['{{ K }}'] && creator['{{ K }}'].error" x-text="creator['{{ K }}'] && creator['{{ K }}'].error"></div>
+    </div>
+    <button type="button" class="btn btn--ghost btn--sm" @click="loadCreator('{{ K }}')" title="Volver a consultar TikTok" :disabled="creator['{{ K }}'] && creator['{{ K }}'].loading">{{ icon("refresh-cw", 15) }}</button>
+  </div>
+
+  <div class="cmp-field" data-field="mode">
+    <label class="switch">
+      <input type="checkbox" role="switch" :checked="{{ O }}.mode === 'inbox'" @change="{{ O }}.mode = $event.target.checked ? 'inbox' : 'direct'" :disabled="ro">
+      <span class="switch__track" aria-hidden="true"></span>
+      <span class="switch__text"><span class="switch__label">Enviar a la app de TikTok como borrador</span>
+        <span class="switch__help">A la hora indicada el vídeo llegará a tu bandeja de TikTok para que lo termines allí (música, efectos…). El texto no se envía: te lo copiaremos para pegarlo.</span></span>
+    </label>
+  </div>
+
+  <div x-show="{{ O }}.mode !== 'inbox'" class="cmp-fields">
+    <div class="cmp-field" data-field="privacy_level">
+      <label class="cmp-label" for="tt-privacy-{{ K }}">¿Quién puede ver la publicación? <span class="req" aria-hidden="true">*</span></label>
+      <select id="tt-privacy-{{ K }}" class="select" @change="{{ O }}.privacy_level = $event.target.value || null; notice['{{ K }}'] = ''" :disabled="ro"
+              :aria-invalid="fieldError('{{ K }}', 'privacy_level') ? 'true' : 'false'">
+        <option value="" disabled :selected="!{{ O }}.privacy_level">Selecciona quién puede verla</option>
+        <template x-for="opt in privacyChoices('{{ K }}')" :key="opt.value">
+          <option :value="opt.value" x-text="opt.label + (opt.value === 'SELF_ONLY' && {{ O }}.brand_content_toggle ? ' (no disponible con contenido de marca)' : '')"
+                  :selected="opt.value === {{ O }}.privacy_level" :disabled="opt.value === 'SELF_ONLY' && {{ O }}.brand_content_toggle"></option>
+        </template>
+      </select>
+      <p class="cmp-error" x-show="notice['{{ K }}']" x-text="notice['{{ K }}']"></p>
+      <p class="cmp-error" x-show="!notice['{{ K }}'] && fieldError('{{ K }}', 'privacy_level')" x-text="fieldError('{{ K }}', 'privacy_level')"></p>
+      <div class="callout tone-warning cmp-callout" x-show="unaudited('{{ K }}')">
+        {{ icon("triangle-alert", 16) }}<div>Tu app de TikTok no está auditada: TikTok solo permite publicar en privado («Solo yo»). Cambia la visibilidad después en la app o usa «Enviar a la app de TikTok como borrador».</div>
+      </div>
+    </div>
+
+    <div class="cmp-field cmp-tt__allow" data-field="disable_comment">
+      <label class="switch" :class="{'is-locked': creatorFlag('{{ K }}', 'comment_disabled')}" :title="creatorFlag('{{ K }}', 'comment_disabled') ? 'Desactivado en la configuración de tu cuenta de TikTok' : ''">
+        <input type="checkbox" role="switch" :checked="allow('{{ K }}', 'disable_comment')" @change="setAllow('{{ K }}', 'disable_comment', $event.target.checked)" :disabled="ro || creatorFlag('{{ K }}', 'comment_disabled')">
+        <span class="switch__track" aria-hidden="true"></span><span class="switch__text"><span class="switch__label">Permitir comentarios</span></span>
+      </label>
+      <label class="switch" x-show="fmt('{{ K }}') !== 'photo'" :class="{'is-locked': creatorFlag('{{ K }}', 'duet_disabled')}" :title="creatorFlag('{{ K }}', 'duet_disabled') ? 'Desactivado en la configuración de tu cuenta de TikTok' : ''">
+        <input type="checkbox" role="switch" :checked="allow('{{ K }}', 'disable_duet')" @change="setAllow('{{ K }}', 'disable_duet', $event.target.checked)" :disabled="ro || creatorFlag('{{ K }}', 'duet_disabled')">
+        <span class="switch__track" aria-hidden="true"></span><span class="switch__text"><span class="switch__label">Permitir dúo</span></span>
+      </label>
+      <label class="switch" x-show="fmt('{{ K }}') !== 'photo'" :class="{'is-locked': creatorFlag('{{ K }}', 'stitch_disabled')}" :title="creatorFlag('{{ K }}', 'stitch_disabled') ? 'Desactivado en la configuración de tu cuenta de TikTok' : ''">
+        <input type="checkbox" role="switch" :checked="allow('{{ K }}', 'disable_stitch')" @change="setAllow('{{ K }}', 'disable_stitch', $event.target.checked)" :disabled="ro || creatorFlag('{{ K }}', 'stitch_disabled')">
+        <span class="switch__track" aria-hidden="true"></span><span class="switch__text"><span class="switch__label">Permitir pegar</span></span>
+      </label>
+    </div>
+    <p class="cmp-help" x-show="maxDuration('{{ K }}')" :class="{'text-danger': tooLong('{{ K }}')}">
+      {{ icon("clock", 13) }} <span x-text="'Duración máxima de vídeo para esta cuenta: ' + humanSeconds(maxDuration('{{ K }}')) + (tooLong('{{ K }}') ? '. Tu vídeo es más largo.' : '.')"></span>
+    </p>
+
+    <div class="cmp-divider"></div>
+
+    <div class="cmp-field" data-field="is_aigc" x-show="fmt('{{ K }}') !== 'photo'">
+      <label class="switch">
+        <input type="checkbox" role="switch" x-model="{{ O }}.is_aigc" :disabled="ro">
+        <span class="switch__track" aria-hidden="true"></span>
+        <span class="switch__text"><span class="switch__label">Contenido generado por IA</span><span class="switch__help">Añade la etiqueta de TikTok para contenido creado o editado con IA.</span></span>
+      </label>
+    </div>
+
+    <div class="cmp-field" data-field="commercial_content">
+      <label class="switch">
+        <input type="checkbox" role="switch" :checked="{{ O }}.commercial_content" @change="setCommercial('{{ K }}', $event.target.checked)" :disabled="ro">
+        <span class="switch__track" aria-hidden="true"></span>
+        <span class="switch__text"><span class="switch__label">Contenido comercial {{ icon("info", 14) }}</span>
+          <span class="switch__help">Indica que este contenido promociona bienes o servicios a cambio de algo de valor.</span></span>
+      </label>
+      <div class="cmp-tt__commercial" x-show="{{ O }}.commercial_content" x-cloak>
+        <label class="check">
+          <input type="checkbox" x-model="{{ O }}.brand_organic_toggle" :disabled="ro">
+          <span><span class="check__label">Tu marca</span><span class="check__help">Promocionas tu propia marca o negocio. Se etiquetará como «Contenido promocional».</span></span>
+        </label>
+        <label class="check" :title="unaudited('{{ K }}') ? 'No disponible: tu app solo puede publicar en privado y el contenido de marca no puede ser privado.' : ''">
+          <input type="checkbox" :checked="{{ O }}.brand_content_toggle" @change="setBranded('{{ K }}', $event.target.checked)" :disabled="ro || unaudited('{{ K }}')">
+          <span><span class="check__label">Contenido de marca</span><span class="check__help">Promocionas a otra marca o a un tercero. Se etiquetará como «Colaboración pagada».</span></span>
+        </label>
+        <p class="cmp-tt__label" :class="{'text-danger': !{{ O }}.brand_organic_toggle && !{{ O }}.brand_content_toggle}">
+          {{ icon("tag", 14) }} <span x-text="commercialLabel('{{ K }}')"></span>
+          <span x-show="{{ O }}.brand_organic_toggle || {{ O }}.brand_content_toggle"> No se puede cambiar una vez publicado.</span>
+        </p>
+      </div>
+    </div>
+
+    <div class="cmp-field" data-field="video_cover_timestamp_ms" x-show="coverMax('{{ K }}') > 0">
+      <label class="cmp-label" for="tt-cover-{{ K }}">Fotograma de portada <span class="muted fw-500" x-text="'(segundo ' + coverLabel('{{ K }}', 'video_cover_timestamp_ms') + ')'"></span></label>
+      <input id="tt-cover-{{ K }}" type="range" class="cmp-range" min="0" :max="coverMax('{{ K }}')" step="100"
+             :value="{{ O }}.video_cover_timestamp_ms || 0" @input="{{ O }}.video_cover_timestamp_ms = Number($event.target.value)" :disabled="ro">
+    </div>
+
+    <div class="cmp-field cmp-tt__consent" data-field="consent">
+      <label class="check">
+        <input type="checkbox" x-model="{{ O }}.consent" :disabled="ro">
+        <span class="check__label">Al publicar, aceptas la <a :href="cfg.legal.music_url" target="_blank" rel="noopener noreferrer">Confirmación de uso de música</a> de TikTok<span x-show="{{ O }}.brand_content_toggle"> y la <a :href="cfg.legal.bc_url" target="_blank" rel="noopener noreferrer">Política de contenido de marca</a></span>.</span>
+      </label>
+      <p class="cmp-error" x-show="fieldError('{{ K }}', 'consent')" x-text="fieldError('{{ K }}', 'consent')"></p>
+      <p class="cmp-help">Tras publicar, TikTok puede tardar unos minutos en procesar el vídeo antes de que aparezca en tu perfil.</p>
+    </div>
+  </div>
+</div>

@@ -156,6 +156,8 @@ class AccountCreds:
     token_expires_at: datetime | None
     refresh_expires_at: datetime | None
     meta: dict
+    username: str | None = None
+    scopes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -179,6 +181,8 @@ class ProviderSettings:  # built by config.provider_settings(db)
     demo_mode: bool
     google_client_id: str | None = None  # YouTube (Google OAuth client)
     google_client_secret: str | None = None  # secret
+    meta_config_id: str | None = None  # Facebook Login for Business configuration id (optional)
+    tiktok_analytics_scopes: bool = False  # also request TikTok's analytics scopes at login
 
 
 class PublicMedia(Protocol):  # implemented by publicmedia.PublicMediaService
@@ -202,6 +206,8 @@ class PublishContext:
         [dict], None
     ]  # persist state + commit_phase=commit_sent BEFORE the irreversible call
     log: Callable[[str, str, dict | None], None]  # (event, spanish_message, data) -> post_events
+    # Optional: persist tokens refreshed mid-run (e.g. during a long upload). None = keep them in memory.
+    update_tokens: Callable[[TokenUpdate], None] | None = None
 
 
 @dataclass

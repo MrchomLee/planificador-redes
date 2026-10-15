@@ -1,0 +1,47 @@
+{#- Public media live status (publicmedia.get_service(app).status()). Context: pm, optional test_message/test_kind. -#}
+{% import "components/ui.html" as ui with context %}
+{% set st = pm.status %}
+{% set tunnel = (st.tunnel if st else {}) or {} %}
+{% set tunnel_labels = {"stopped": "En espera (se abre solo cuando Instagram necesita una foto)", "downloading": "Descargando cloudflared…", "starting": "Abriendo el túnel…", "running": "Activo", "error": "Con errores"} %}
+<div class="pm-status" id="pm-status" aria-live="polite"
+  {%- if pm.polling %} hx-get="/ajustes/url-publica/estado" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+  <div class="pm-status__head">
+    <h3 class="pm-status__title">{{ icon("activity", 16) }}Estado</h3>
+    {% if pm.mode != "off" %}
+    <button type="button" class="btn btn--secondary btn--sm" hx-post="/ajustes/url-publica/probar" hx-target="#pm-status" hx-swap="outerHTML"
+            hx-disabled-elt="this" title="Comprueba desde fuera que la dirección pública responde">{{ icon("radar", 15) }}<span>Probar ahora</span></button>
+    {% endif %}
+  </div>
+  {% if not st %}
+  <p class="muted text-sm">No se pudo leer el estado del servicio de medios públicos.</p>
+  {% else %}
+  <dl class="pm-status__list">
+    <div><dt>Modo</dt><dd>{{ st.mode_label }}</dd></div>
+    {% if pm.mode != "off" %}
+    <div><dt>Servidor de medios</dt>
+      <dd>{% if st.server.running %}<span class="dot-label dot-label--success">En marcha · 127.0.0.1:{{ st.server.port }}</span>{% else %}<span class="dot-label">Parado (arranca cuando hace falta)</span>{% endif %}</dd></div>
+    {% endif %}
+    {% if pm.mode == "tunnel" %}
+    {% set tstate = tunnel.state or "stopped" %}
+    <div><dt>Túnel</dt>
+      <dd><span class="dot-label dot-label--{{ {'running': 'success', 'error': 'danger', 'downloading': 'info', 'starting': 'info'}.get(tstate, 'muted') }}">
+        {%- if tstate in ("downloading", "starting") %}{{ ui.spinner() }}{% endif %}{{ tunnel_labels.get(tstate, tstate) }}</span>
+        {% if tunnel.url %}<code class="pm-status__url">{{ tunnel.url }}</code>{% endif %}</dd></div>
+    <div><dt>cloudflared</dt>
+      <dd>{% if tunnel.binary_present %}Descargado y verificado (versión {{ tunnel.version }}){% elif tunnel.asset %}Se descargará la versión {{ tunnel.version }} ({{ tunnel.asset }}){% else %}No disponible para este sistema{% endif %}</dd></div>
+    {% elif pm.mode == "base_url" %}
+    <div><dt>Dirección pública</dt><dd>{% if st.base_url %}<code>{{ st.base_url }}</code>{% else %}<span class="text-danger">Sin configurar</span>{% endif %}</dd></div>
+    {% endif %}
+    {% if pm.mode != "off" %}
+    <div><dt>Enlaces activos</dt><dd>{{ st.active_tokens }}</dd></div>
+    {% endif %}
+  </dl>
+  {% set last_error = st.last_error or tunnel.error %}
+  {% if last_error and pm.mode != "off" %}
+  {{ ui.info_alert(last_error, tone="danger", compact=True) }}
+  {% endif %}
+  {% endif %}
+  {% if test_message %}
+  {{ ui.info_alert(test_message, tone=("success" if test_kind == "success" else ("warning" if test_kind == "warning" else "danger")), compact=True, cls="pm-status__test") }}
+  {% endif %}
+</div>

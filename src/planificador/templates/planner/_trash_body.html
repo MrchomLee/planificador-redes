@@ -1,0 +1,75 @@
+{#- Papelera body (swapped into #trash-list). Context: rows, retention_days. -#}
+{% import "components/ui.html" as ui with context %}
+{% import "planner/_macros.html" as pm with context %}
+<div class="trash-head">
+  <div class="callout tone-info trash-head__note" role="note">
+    {{ icon("info", 18) }}
+    <div class="callout__body">
+      Las publicaciones eliminadas se guardan <strong>{{ retention_days }} días</strong> y después se borran para siempre.
+      Al restaurarlas vuelven al calendario (o a Ideas) con su fecha; revisa su estado antes de que llegue la hora.
+    </div>
+  </div>
+  {% if rows %}
+  <button type="button" class="btn btn--danger-ghost ptool" hx-post="/papelera/vaciar" hx-target="#trash-list" hx-swap="innerHTML"
+          hx-confirm="Se borrarán definitivamente {{ rows|length }} {{ 'publicación' if rows|length == 1 else 'publicaciones' }}. Esta acción no se puede deshacer."
+          data-confirm-title="¿Vaciar la papelera?" data-confirm-ok="Vaciar papelera" data-confirm-danger>
+    {{- icon("trash", 17) }}<span>Vaciar papelera</span></button>
+  {% endif %}
+</div>
+
+<table class="plan-table plan-table--trash" data-count="{{ rows|length }}">
+  <caption class="visually-hidden">Publicaciones en la papelera</caption>
+  <colgroup><col><col class="plan-table__c-nets"><col class="plan-table__c-date"><col class="plan-table__c-deleted"><col class="plan-table__c-actions"></colgroup>
+  <thead>
+    <tr>
+      <th scope="col">Contenido de la publicación</th>
+      <th scope="col">Redes</th>
+      <th scope="col">Fecha prevista</th>
+      <th scope="col">Eliminada</th>
+      <th scope="col"><span class="visually-hidden">Acciones</span></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+    <tr class="plan-row" id="trash-row-{{ row.id }}">
+      <td class="plan-row__content">
+        <div class="plan-row__static">
+          {{ pm.thumb(row, 44) }}
+          <span class="plan-row__text">
+            {%- if row.kind == "idea" %}<span class="badge tone-warning badge--sm trash-kind">{{ icon("lightbulb", 12) }}<span>Idea</span></span> {% endif -%}
+            {%- if row.excerpt %}{{ row.excerpt }}{% else %}<em class="subtle">Publicación sin texto</em>{% endif -%}
+          </span>
+        </div>
+      </td>
+      <td>{{ pm.nets(row) }}</td>
+      <td class="plan-row__date">
+        {% if row.local_dt %}
+        <span class="plan-row__day">{{ row.date_label }}</span><span class="plan-row__time">{{ row.weekday_time }}</span>
+        {% else %}<span class="plan-row__day subtle">Sin fecha</span>{% endif %}
+      </td>
+      <td class="plan-row__date">
+        <span class="plan-row__day">{{ ui.reltime(row.deleted_at) }}</span>
+        <span class="plan-row__time{% if row.purge_in_days is not none and row.purge_in_days <= 3 %} text-danger{% endif %}">
+          {%- if row.purge_in_days == 0 %}Se borrará hoy{% elif row.purge_in_days == 1 %}Se borrará mañana{% else %}Se borrará en {{ row.purge_in_days }} días{% endif -%}
+        </span>
+      </td>
+      <td class="plan-row__actions">
+        <button type="button" class="btn btn--soft btn--sm" hx-post="/papelera/{{ row.id }}/restaurar" hx-target="#trash-list" hx-swap="innerHTML">
+          {{- icon("rotate-ccw", 15) }}<span>Restaurar</span></button>
+        <button type="button" class="btn btn--danger-ghost btn--sm btn--icon" hx-post="/papelera/{{ row.id }}/eliminar" hx-target="#trash-list" hx-swap="innerHTML"
+                hx-confirm="La publicación se borrará para siempre (los medios siguen en la biblioteca). Esta acción no se puede deshacer."
+                data-confirm-title="¿Eliminar definitivamente?" data-confirm-ok="Eliminar" data-confirm-danger
+                aria-label="Eliminar definitivamente" title="Eliminar definitivamente">{{ icon("trash", 15) }}</button>
+      </td>
+    </tr>
+    {% else %}
+    <tr class="plan-row plan-row--empty">
+      <td colspan="5">
+        {{ pm.empty_card("La papelera está vacía",
+             "Las publicaciones que elimines aparecerán aquí durante " ~ retention_days ~ " días por si quieres recuperarlas.",
+             icon_name="trash") }}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>

@@ -1,0 +1,11 @@
+{#- "Actualizado hace …" line under the page title (out-of-band refreshed by "Actualizar"). -#}
+{% import "components/ui.html" as ui with context %}
+<p class="ib-header__sub" id="inbox-updated"{% if oob %} hx-swap-oob="true"{% endif %}>
+  {%- if last_poll -%}
+  {{ icon("clock", 14) }}<span>Actualizado {{ ui.reltime(last_poll) }} · se revisan cada 15 minutos las publicaciones de los últimos 30 días</span>
+  {%- elif has_accounts -%}
+  {{ icon("clock", 14) }}<span>Aún no se han buscado comentarios: pulsa «Actualizar» o espera unos minutos</span>
+  {%- else -%}
+  <span>Facebook, Instagram y YouTube</span>
+  {%- endif -%}
+</p>

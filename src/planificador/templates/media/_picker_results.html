@@ -1,0 +1,25 @@
+{#- Picker results. Context: views, total, page, has_more, q, kind, multiple, picker_kind, append. -#}
+{% import "components/ui.html" as ui with context %}
+{% import "media/_macros.html" as mm with context %}
+{% set more_url = "/biblioteca/selector?multiple=" ~ (1 if multiple else 0) ~ "&kind=" ~ picker_kind ~ "&q=" ~ (q|urlencode) ~ "&tipo=" ~ kind ~ "&pagina=" ~ (page + 1) %}
+{% if append %}
+<div hx-swap-oob="beforeend:#picker-grid">{% for v in views %}{{ mm.pick_card(v, multiple) }}{% endfor %}</div>
+{% elif views %}
+<div class="media-grid media-grid--picker" id="picker-grid" role="list">
+  {% for v in views %}{{ mm.pick_card(v, multiple) }}{% endfor %}
+</div>
+{% elif q or kind %}
+{{ ui.empty_state("No hay resultados", "Ningún archivo coincide con la búsqueda.", icon_name="search-x", compact=True) }}
+{% else %}
+{% call ui.empty_state("Todavía no hay archivos", "Sube fotos o vídeos (o arrástralos aquí) y aparecerán en tu biblioteca.", icon_name="images", compact=True) %}
+  <button type="button" class="btn btn--primary" data-upload-trigger>{{ icon("upload", 18) }}<span>Subir archivos</span></button>
+{% endcall %}
+{% endif %}
+{% if has_more %}
+<div class="media-more" id="picker-more">
+  <button type="button" class="btn btn--secondary btn--sm" hx-get="{{ more_url }}" hx-target="#picker-more" hx-swap="outerHTML">
+    {{ icon("chevrons-down", 16) }}<span>Cargar más</span></button>
+</div>
+{% elif append %}
+<span hidden></span>
+{% endif %}

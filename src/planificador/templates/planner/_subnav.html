@@ -1,0 +1,54 @@
+{#- Planner sub-tabs (Calendario · Lista · Ideas · Papelera) + brand time zone indicator/dropdown (doc 05 §2).
+    Context: planner_tabs, planner_tab, tz, tz_clock, active_brand, csrf_token. -#}
+<div class="planner-subnav">
+  <nav class="tabs planner-tabs" aria-label="Secciones de Planificación">
+    {% for t in planner_tabs %}
+    {% set on = t.key == planner_tab %}
+    <a class="tab{% if on %} is-active{% endif %}" href="{{ t.href }}"{% if on %} aria-current="page"{% endif %}>
+      {{- icon(t.icon, 16) }}<span>{{ t.label }}</span>
+      {%- if t.count %}<span class="count-pill" title="{{ t.count }}">{{ t.count }}</span>{% endif %}</a>
+    {% endfor %}
+  </nav>
+
+  <div class="dropdown tz-picker" x-data="tzPicker('{{ tz }}')" @keydown="onKeydown($event)" @click.outside="close()">
+    <button type="button" class="tz-picker__btn" x-ref="button" @click="toggle(); load()"
+            :aria-expanded="open ? 'true' : 'false'" aria-haspopup="dialog"
+            title="Zona horaria de la marca{% if active_brand %} «{{ active_brand.name }}»{% endif %}. Pulsa para cambiarla.">
+      {{ icon("clock", 16) }}
+      <span class="tz-picker__time num" data-tz-clock="{{ tz }}">{{ tz_clock }}</span>
+      <span class="tz-picker__sep" aria-hidden="true">-</span>
+      <span class="tz-picker__name">{{ tz }}</span>
+      {{ icon("chevron-down", 16) }}
+    </button>
+    <div class="dropdown__menu dropdown__menu--end tz-picker__menu" x-ref="menu" x-show="open" x-cloak role="dialog"
+         aria-label="Cambiar la zona horaria" x-transition:enter.duration.120ms x-transition:leave.duration.80ms>
+      <form method="post" action="/planificacion/zona-horaria" class="tz-picker__form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="next" value="{{ request.url.path }}">
+        <div class="tz-picker__head">
+          <strong>Zona horaria de la marca</strong>
+          <p>El calendario y las horas de publicación de «{{ active_brand.name if active_brand else 'tu marca' }}» se muestran en esta zona.</p>
+        </div>
+        <div class="tz-picker__search">
+          <label class="input-group">
+            {{ icon("search", 16) }}
+            <span class="visually-hidden">Buscar zona horaria</span>
+            <input class="input input--sm" type="search" x-model="query" x-ref="search" placeholder="Busca una ciudad o región" autocomplete="off" data-keep-open>
+          </label>
+        </div>
+        <div class="tz-picker__list" role="listbox" aria-label="Zonas horarias">
+          <template x-if="loading"><p class="dropdown__empty"><span class="spinner"></span> Cargando zonas…</p></template>
+          <template x-for="z in filtered()" :key="z.name">
+            <button type="submit" name="timezone" :value="z.name" class="dropdown__item tz-option" role="option"
+                    :aria-selected="z.name === current ? 'true' : 'false'" :class="z.name === current && 'is-active'">
+              <span class="truncate" x-text="z.label"></span>
+              <span class="trail"><span class="num" x-text="z.offset"></span>
+                <template x-if="z.name === current">{{ icon("check", 14) }}</template></span>
+            </button>
+          </template>
+          <p class="dropdown__empty" x-show="!loading && !filtered().length" x-cloak>No hay ninguna zona con ese nombre.</p>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>

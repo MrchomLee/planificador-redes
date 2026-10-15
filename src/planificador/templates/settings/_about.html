@@ -1,0 +1,52 @@
+{#- Ajustes → Acerca de. Context: about {version, data_dir, db_path, log_file, key_source, python, platform, base_url, port, scheduler}. -#}
+{% import "components/ui.html" as ui with context %}
+{% import "settings/_macros.html" as sm with context %}
+{% import "connections/_macros.html" as conn with context %}
+<section class="settings-section card" id="acerca" aria-labelledby="acerca-title">
+  <header class="settings-section__head">
+    <span class="settings-section__icon settings-section__icon--logo" aria-hidden="true">{% include "partials/logo.html" %}</span>
+    <div class="settings-section__titles">
+      <h2 class="settings-section__title" id="acerca-title">Acerca de Planificador</h2>
+      <p class="settings-section__subtitle">Versión {{ about.version }} · aplicación local de código abierto (licencia MIT). Tus datos se quedan en este ordenador.</p>
+    </div>
+  </header>
+  <div class="settings-section__body">
+    <dl class="about-list">
+      <div class="about-list__row">
+        <dt>Carpeta de datos</dt>
+        <dd>
+          {{ conn.copy_field(about.data_dir, label="Ruta") }}
+          <form method="post" action="/ajustes/abrir-carpeta" hx-post="/ajustes/abrir-carpeta" hx-swap="none">
+            {{ sm.csrf() }}<input type="hidden" name="que" value="datos">
+            <button type="submit" class="btn btn--ghost btn--sm">{{ icon("folder-open", 15) }}<span>Abrir carpeta</span></button>
+          </form>
+        </dd>
+      </div>
+      <div class="about-list__row">
+        <dt>Registros</dt>
+        <dd>
+          <code class="about-list__path">{{ about.log_file }}</code>
+          <a class="btn btn--secondary btn--sm" href="/ajustes/registros" hx-get="/ajustes/registros" hx-target="#modal-root" hx-swap="innerHTML" hx-push-url="false">{{ icon("scroll-text", 15) }}<span>Ver registros</span></a>
+          <form method="post" action="/ajustes/abrir-carpeta" hx-post="/ajustes/abrir-carpeta" hx-swap="none">
+            {{ sm.csrf() }}<input type="hidden" name="que" value="registros">
+            <button type="submit" class="btn btn--ghost btn--sm">{{ icon("folder-open", 15) }}<span>Abrir carpeta</span></button>
+          </form>
+        </dd>
+      </div>
+      <div class="about-list__row">
+        <dt>Base de datos</dt><dd><code class="about-list__path">{{ about.db_path }}</code></dd>
+      </div>
+      <div class="about-list__row">
+        <dt>Cifrado de secretos</dt>
+        <dd>
+          {% if about.key_source == "keyring" %}{{ ui.tag("Clave en el almacén seguro del sistema", "success", icon_name="shield-check") }}
+          {% elif about.key_source == "file" %}{{ ui.tag("Clave en el archivo secret.key", "warning", icon_name="file-key") }}
+            <span class="text-xs muted">El sistema no ofrece almacén seguro: protege la carpeta de datos (no la compartas).</span>
+          {% else %}{{ ui.tag("Clave en memoria (temporal)", "warning", icon_name="triangle-alert") }}{% endif %}
+        </dd>
+      </div>
+      <div class="about-list__row"><dt>Dirección local</dt><dd><code>{{ about.base_url }}</code>{% if not about.scheduler %} {{ ui.tag("Programador detenido", "warning", size="sm") }}{% endif %}</dd></div>
+      <div class="about-list__row"><dt>Sistema</dt><dd>{{ about.platform }} · Python {{ about.python }}</dd></div>
+    </dl>
+  </div>
+</section>

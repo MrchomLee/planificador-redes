@@ -112,17 +112,19 @@ def test_brand_switcher_bell_and_modal(browser: Any, live_server: LiveServer, sc
     live_server.shot(page, f"e2e-bell-{scheme}")
     page.keyboard.press("Escape")
 
-    # "Nueva publicación" opens a modal (button and shortcut N); Esc closes it.
+    # "Nueva publicación" opens the composer as a full-screen overlay in #modal-root (doc 05 §3; button and
+    # shortcut N); Esc and "Cancelar" close it.
+    composer = page.locator("#modal-root .composer--overlay")
     page.click("#btn-new-post")
-    page.locator("#modal-root .modal").wait_for(state="visible")
+    composer.wait_for(state="visible")
     assert page.url.endswith("/estadisticas")
     live_server.shot(page, f"e2e-modal-{scheme}")
     page.keyboard.press("Escape")
-    page.locator("#modal-root .modal").wait_for(state="detached")
+    composer.wait_for(state="detached")
     page.keyboard.press("n")
-    page.locator("#modal-root .modal").wait_for(state="visible")
-    page.locator("#modal-root .modal__footer [data-close]").click()
-    page.locator("#modal-root .modal").wait_for(state="detached")
+    composer.wait_for(state="visible")
+    composer.locator(".cmp-cancel").click()
+    composer.wait_for(state="detached")
     log.assert_clean("interactions")
 
     # POST without the CSRF token is refused even from our own origin; with it, it passes.

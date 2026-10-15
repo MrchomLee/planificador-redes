@@ -1,0 +1,138 @@
+{#- Planificación › Calendario (doc 05 §2, screenshot 1). planner.js mounts FullCalendar in #planner-calendar. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% import "planner/_macros.html" as pm with context %}
+
+{% block head %}<link rel="stylesheet" href="{{ static_url('css/planner.css') }}">{% endblock %}
+{% block scripts %}
+<script src="{{ static_url('vendor/fullcalendar/index.global.min.js') }}" defer></script>
+<script src="{{ static_url('vendor/fullcalendar/locales/es.global.min.js') }}" defer></script>
+<script src="{{ static_url('js/planner.js') }}" defer></script>
+{% endblock %}
+{% block body_class %}page-planner{% endblock %}
+
+{% block content %}
+<h1 class="visually-hidden">Planificación · Calendario</h1>
+{% include "planner/_subnav.html" %}
+
+<section class="planner-cal" x-data="plannerCalendar" aria-label="Calendario de publicaciones">
+  <script type="application/json" id="planner-config">{{ planner_config|tojson }}</script>
+
+  <div class="ptoolbar" role="toolbar" aria-label="Herramientas del calendario">
+    {{ pm.search(attrs={"x-model": "q", "@input.debounce.350ms": "refetchPosts()", "@keydown.escape": "q = ''; refetchPosts()", "aria-label": "Buscar publicaciones"}) }}
+
+    <button type="button" class="btn ptool" @click="goToday()" x-text="todayLabel">Esta semana</button>
+
+    <div class="ptool-group" role="group" aria-label="Fechas">
+      <button type="button" class="btn btn--icon ptool" @click="prev()" aria-label="Anterior" title="Anterior">{{ icon("chevron-left", 18) }}</button>
+      <span class="ptool-range">
+        <button type="button" class="btn ptool ptool-range__btn" @click="pickDate()" title="Ir a una fecha">
+          {{ icon("calendar", 17) }}<span x-text="rangeLabel">&nbsp;</span>
+        </button>
+        <input type="date" class="ptool-range__input" x-ref="datePicker" tabindex="-1" aria-hidden="true" @change="gotoDate($event.target.value)">
+      </span>
+      <button type="button" class="btn btn--icon ptool" @click="next()" aria-label="Siguiente" title="Siguiente">{{ icon("chevron-right", 18) }}</button>
+    </div>
+
+    <div class="ptool-group" role="group" aria-label="Filtros y opciones">
+      {# Filters (redes, estados) #}
+      <div class="dropdown" x-data="dropdown" @keydown="onKeydown($event)" @click.outside="close()">
+        <button type="button" class="btn btn--icon ptool" x-ref="button" @click="toggle()" :aria-expanded="open ? 'true' : 'false'"
+                aria-haspopup="dialog" aria-label="Filtros" title="Filtros" :class="filterCount && 'is-on'">
+          {{ icon("funnel", 18) }}<span class="ptool__badge" x-show="filterCount" x-text="filterCount" x-cloak></span>
+        </button>
+        <div class="dropdown__menu pfilter" x-ref="menu" x-show="open" x-cloak role="dialog" aria-label="Filtros"
+             x-transition:enter.duration.120ms x-transition:leave.duration.80ms>
+          <div class="pfilter__cols">
+            <fieldset class="pfilter__group">
+              <legend class="dropdown__label">Redes</legend>
+              {% for net in planner_networks %}
+              <label class="pfilter__opt">
+                <input type="checkbox" value="{{ net }}" x-model="filters.redes" @change="applyFilters()">
+                {{ net_icon(net, 20, title=False) }}<span>{{ network_label(net) }}</span>
+              </label>
+              {% endfor %}
+            </fieldset>
+            <fieldset class="pfilter__group">
+              <legend class="dropdown__label">Estado</legend>
+              {% for key, label in filter_statuses %}
+              <label class="pfilter__opt">
+                <input type="checkbox" value="{{ key }}" x-model="filters.estados" @change="applyFilters()">
+                <span class="dot st-{{ key }}" aria-hidden="true"></span><span>{{ label }}</span>
+              </label>
+              {% endfor %}
+            </fieldset>
+          </div>
+          <div class="pfilter__foot">
+            <button type="button" class="btn btn--ghost btn--sm" data-keep-open @click="clearFilters()" :disabled="!filterCount">Quitar filtros</button>
+            <button type="button" class="btn btn--secondary btn--sm" @click="close(true)">Listo</button>
+          </div>
+        </div>
+      </div>
+
+      {# Kebab: view + CSV #}
+      <div class="dropdown" x-data="dropdown" @keydown="onKeydown($event)" @click.outside="close()">
+        <button type="button" class="btn btn--icon ptool" x-ref="button" @click="toggle()" :aria-expanded="open ? 'true' : 'false'"
+                aria-haspopup="menu" aria-label="Más opciones" title="Más opciones">{{ icon("ellipsis-vertical", 18) }}</button>
+        <div class="dropdown__menu dropdown__menu--end" x-ref="menu" x-show="open" x-cloak role="menu"
+             x-transition:enter.duration.120ms x-transition:leave.duration.80ms
+             @click="if ($event.target.closest('a[href], button')) close()">
+          <div class="dropdown__label">Vista del calendario</div>
+          {% for key, label, ic in [("dayGridMonth", "Mes", "calendar-days"), ("timeGridWeek", "Semana", "calendar-range"), ("timeGridDay", "Día", "calendar-clock")] %}
+          <button type="button" class="dropdown__item" role="menuitemradio" :aria-checked="view === '{{ key }}' ? 'true' : 'false'" @click="setView('{{ key }}')">
+            {{- icon(ic, 16) }}<span>{{ label }}</span><span class="trail" x-show="view === '{{ key }}'">{{ icon("check", 16) }}</span></button>
+          {% endfor %}
+          <div class="dropdown__sep" role="separator"></div>
+          <a class="dropdown__item" role="menuitem" href="/planificacion/lista">{{ icon("list", 16) }}<span>Ver como lista</span></a>
+          <a class="dropdown__item" role="menuitem" href="/importar">{{ icon("file-up", 16) }}<span>Importar CSV</span></a>
+        </div>
+      </div>
+    </div>
+
+    {# "Mejores horas": shades the week/day grid by the chosen network's best times #}
+    <div class="dropdown" x-data="dropdown" @keydown="onKeydown($event)" @click.outside="close()">
+      <button type="button" class="btn ptool best-btn" x-ref="button" @click="toggle()" :aria-expanded="open ? 'true' : 'false'"
+              aria-haspopup="menu" :class="best && 'is-on'" title="Sombrear el calendario según las mejores horas para publicar">
+        <span class="best-btn__logo" x-html="bestLogo()">{{ icon("flame", 18) }}</span>
+        <span>Mejores horas</span>{{ icon("chevron-down", 16) }}
+      </button>
+      <div class="dropdown__menu dropdown__menu--end best-menu" x-ref="menu" x-show="open" x-cloak role="menu"
+           x-transition:enter.duration.120ms x-transition:leave.duration.80ms
+           @click="if ($event.target.closest('button')) close()">
+        <div class="dropdown__label">Sombrear según</div>
+        <button type="button" class="dropdown__item" role="menuitemradio" :aria-checked="!best ? 'true' : 'false'" @click="setBest('')">
+          <span class="best-menu__none">{{ icon("eye-off", 14) }}</span><span>Sin sombreado</span>
+          <span class="trail" x-show="!best">{{ icon("check", 16) }}</span></button>
+        {% for net in ["facebook", "instagram", "tiktok", "youtube"] %}
+        <button type="button" class="dropdown__item" role="menuitemradio" :aria-checked="best === '{{ net }}' ? 'true' : 'false'" @click="setBest('{{ net }}')">
+          {{- net_icon(net, 22, title=False) }}<span>{{ network_label(net) }}</span>
+          <span class="trail" x-show="best === '{{ net }}'">{{ icon("check", 16) }}</span></button>
+        {% endfor %}
+        <p class="best-menu__note">Solo en las vistas Semana y Día. Más oscuro = mejor momento.</p>
+      </div>
+    </div>
+
+    {{ pm.create_button() }}
+  </div>
+
+  {# Legend of the best-times shading #}
+  <div class="best-legend" x-show="best && bestInfo && view !== 'dayGridMonth'" x-cloak aria-live="polite">
+    <span class="best-legend__title">
+      <span x-html="bestLogo(16)"></span>
+      <strong>Mejores horas</strong>
+      <span class="best-legend__source" x-text="bestInfo ? bestInfo.sourceLabel : ''"></span>
+    </span>
+    <span class="best-legend__scale" role="img" aria-label="Escala de cinco niveles, de peor a mejor">
+      <span>Peor</span>
+      {% for level in range(1, 6) %}<span class="best-legend__swatch best-swatch--{{ level }}"></span>{% endfor %}
+      <span>Mejor</span>
+    </span>
+  </div>
+
+  <div class="planner-cal__frame" :class="{ 'is-loading': loading, 'is-best': best && view !== 'dayGridMonth' }">
+    <div id="planner-calendar" class="planner-cal__grid" x-ref="calendar"></div>
+    <noscript><p class="p-5">Activa JavaScript para ver el calendario. También puedes usar la <a href="/planificacion/lista">lista</a>.</p></noscript>
+  </div>
+  <div class="best-tip" x-ref="tip" role="tooltip" hidden></div>
+</section>
+{% endblock %}

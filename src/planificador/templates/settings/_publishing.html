@@ -1,0 +1,39 @@
+{#- Ajustes → Publicación: default time zone, grace window, demo mode. -#}
+{% import "components/ui.html" as ui with context %}
+{% import "settings/_macros.html" as sm with context %}
+{% import "brands/_macros.html" as bm with context %}
+{% set err = errors or {} %}
+{% set val = values or {} %}
+<section class="settings-section card" id="publicacion" aria-labelledby="publicacion-title">
+  <form method="post" action="/ajustes/publicacion" hx-post="/ajustes/publicacion" hx-target="#publicacion" hx-swap="outerHTML">
+    {{ sm.csrf() }}
+    <header class="settings-section__head">
+      <span class="settings-section__icon" aria-hidden="true">{{ icon("calendar-clock", 20) }}</span>
+      <div class="settings-section__titles">
+        <h2 class="settings-section__title" id="publicacion-title">Publicación</h2>
+        <p class="settings-section__subtitle">Valores por defecto y qué hacer con las publicaciones que no salieron a su hora.</p>
+      </div>
+    </header>
+    <div class="settings-section__body form-grid">
+      {{ bm.tz_select("default_timezone", val.get("default_timezone", pub.default_timezone), tz_groups, label="Zona horaria por defecto",
+                      error=err.get("default_timezone"), id="tz-default",
+                      help="Se usa al crear marcas nuevas. Cada marca tiene su propia zona horaria (en Marcas).") }}
+      <div class="form-field">
+        <label class="form-field__label" for="f-grace">Ventana de gracia</label>
+        <div class="input-suffix">
+          <input class="input" id="f-grace" name="grace_minutes" type="number" min="0" max="1440" step="5" required
+                 value="{{ val.get('grace_minutes', pub.grace_minutes) }}"{% if err.get("grace_minutes") %} aria-invalid="true"{% endif %} aria-describedby="f-grace-help">
+          <span class="input-suffix__text">minutos</span>
+        </div>
+        <p class="form-field__help" id="f-grace-help">Si el ordenador estaba apagado o dormido a la hora programada, la publicación sale al volver
+          si no han pasado más de estos minutos. Si han pasado más, se marca como «Perdido» y te avisamos para que decidas.</p>
+        {% if err.get("grace_minutes") %}<p class="form-field__error">{{ icon("circle-alert", 14) }}<span>{{ err.grace_minutes }}</span></p>{% endif %}
+      </div>
+      <div class="settings-demo{% if val.get('demo_mode', pub.demo_mode) %} is-on{% endif %}">
+        {{ ui.switch("demo_mode", "Modo prueba", checked=val.get("demo_mode", pub.demo_mode), id="sw-demo-mode",
+                     help="Añade la red «Demo», que simula publicaciones, estadísticas y comentarios sin conectarse a ninguna red real. Útil para aprender a usar la app.") }}
+      </div>
+    </div>
+    <footer class="settings-section__foot">{{ sm.save_button() }}</footer>
+  </form>
+</section>

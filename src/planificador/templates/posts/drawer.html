@@ -1,0 +1,6 @@
+{#- Post detail as a right-side drawer (htmx → #drawer-root). Context: detail_context(). -#}
+<div class="drawer-backdrop">
+  <aside class="drawer drawer--lg post-drawer" id="post-drawer" role="dialog" aria-modal="true" aria-labelledby="post-detail-title" tabindex="-1">
+    {% include "posts/_detail.html" %}
+  </aside>
+</div>

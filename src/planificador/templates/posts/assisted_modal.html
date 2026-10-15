@@ -1,0 +1,30 @@
+{#- "Publicación asistida" modal (htmx → #modal-root). Context: assisted_publish(). -#}
+{% set htmx_layer = True %}
+<div class="modal-backdrop">
+  <div class="modal modal--lg assist-modal" id="assist-modal" role="dialog" aria-modal="true" aria-labelledby="assist-modal-title" tabindex="-1">
+    <header class="modal__header">
+      <div class="modal__titles">
+        <span class="assist-modal__icon" aria-hidden="true">{{ icon("hand", 20) }}</span>
+        <div>
+          <h2 class="modal__title" id="assist-modal-title">Publicación asistida</h2>
+          <p class="modal__subtitle">Publícala tú en {{ network_name }} en cinco pasos y márcala como publicada.</p>
+        </div>
+      </div>
+      <button type="button" class="icon-btn" data-close aria-label="Cerrar" title="Cerrar (Esc)">{{ icon("x", 18) }}</button>
+    </header>
+    <div class="modal__body">
+      {% include "posts/_assisted_body.html" %}
+    </div>
+    <footer class="modal__footer">
+      <button type="button" class="btn btn--ghost" hx-get="/publicaciones/{{ post.id }}?objetivo={{ target.id }}" hx-target="#drawer-root" hx-swap="innerHTML" hx-push-url="false" data-close>
+        {{- icon("panel-right-open", 16) }}<span>Ver ficha</span></button>
+      <span class="spacer"></span>
+      <button type="button" class="btn btn--secondary" data-close>Cerrar</button>
+      {% if can_mark_done %}
+      <button type="submit" class="btn btn--primary" form="assist-done-{{ target.id }}">{{ icon("circle-check", 17) }}<span>Marcar como publicado</span></button>
+      {% elif done %}
+      <button type="submit" class="btn btn--secondary" form="assist-done-{{ target.id }}">{{ icon("link", 16) }}<span>Guardar enlace</span></button>
+      {% endif %}
+    </footer>
+  </div>
+</div>

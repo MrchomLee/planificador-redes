@@ -410,3 +410,19 @@ def test_default_brand_created_once_under_concurrency(app: FastAPI) -> None:
     with app.state.db.session() as s:
         assert s.scalar(select(func.count()).select_from(Brand)) == 1
     assert len(ids) == 1
+
+
+def test_lifespan_wires_the_public_media_service(app: FastAPI, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lifespan creates ``app.state.public_media`` (used by the engine for Instagram photos) and stops it
+    at shutdown; with public media off nothing is started."""
+    from planificador import publicmedia
+
+    stopped: list[bool] = []
+    monkeypatch.setattr(publicmedia.PublicMediaService, "stop", lambda self: stopped.append(True))
+    assert app.state.public_media is None
+    with TestClient(app, base_url="http://localhost:8765") as c:
+        assert c.get("/healthz").status_code == 200
+        service = app.state.public_media
+        assert isinstance(service, publicmedia.PublicMediaService)
+        assert service.mode() == "off" and not service.server.running
+    assert stopped == [True]

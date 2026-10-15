@@ -1,0 +1,19 @@
+{#- Logs as a full page (no-JS fallback). Context: log_lines, log_file. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% block head %}<link rel="stylesheet" href="{{ static_url('css/settings.css') }}">{% endblock %}
+{% block body_class %}page-settings{% endblock %}
+{% block content %}
+<a class="chooser__back" href="/ajustes#acerca">{{ icon("arrow-left", 16) }}<span>Ajustes</span></a>
+{% call ui.page_header("Registros", subtitle=log_file) %}
+  <button type="button" class="btn btn--secondary" data-copy-target="#log-view" data-copy-message="Registros copiados">{{ icon("copy", 16) }}<span>Copiar</span></button>
+{% endcall %}
+<div class="card">
+  {% if log_lines %}
+  <pre class="log-view log-view--page" id="log-view" tabindex="0">{% for line in log_lines %}<span class="log-line{% if ' ERROR ' in line or ' CRITICAL ' in line %} log-line--error{% elif ' WARNING ' in line %} log-line--warning{% endif %}">{{ line }}</span>
+{% endfor %}</pre>
+  {% else %}
+  {{ ui.empty_state("El registro está vacío", "Todavía no se ha escrito nada en el registro.", icon_name="scroll-text") }}
+  {% endif %}
+</div>
+{% endblock %}

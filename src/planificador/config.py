@@ -38,14 +38,17 @@ DEFAULTS: dict[str, Any] = {
     "meta_app_id": None,
     "meta_app_secret": None,  # secret
     "meta_api_version": "v25.0",
+    "meta_config_id": None,  # Facebook Login for Business configuration id (optional)
     "tiktok_client_key": None,
     "tiktok_client_secret": None,  # secret
     "tiktok_pkce_encoding": "hex",  # "hex" | "base64url"
+    "tiktok_analytics_scopes": False,  # also request user.info.profile/stats + video.list at login
     "google_client_id": None,  # YouTube
     "google_client_secret": None,  # secret
     "grace_minutes": 120,
     "public_media_mode": "off",  # "off" | "tunnel" | "base_url"
     "public_media_base_url": None,
+    "public_media_tunnel_consent_at": None,  # ISO timestamp of the user's consent to download cloudflared
     "default_timezone": "Europe/Madrid",
     "demo_mode": False,
     "password_hash": None,  # managed by security.set_password
@@ -283,6 +286,8 @@ def provider_settings(db: Session, base_url: str | None = None) -> ProviderSetti
         demo_mode=get_bool(db, "demo_mode"),
         google_client_id=(get_setting(db, "google_client_id") or None),
         google_client_secret=get_secret(db, "google_client_secret"),
+        meta_config_id=(str(get_setting(db, "meta_config_id") or "").strip() or None),
+        tiktok_analytics_scopes=get_bool(db, "tiktok_analytics_scopes"),
     )
 
 

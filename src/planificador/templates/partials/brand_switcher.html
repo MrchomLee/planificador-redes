@@ -1,20 +1,21 @@
-{#- Brand switcher. Switching POSTs to /marcas/{id}/activar (next = current path). -#}
+{#- Brand switcher (top bar, right side; doc 05 §1: square avatar + brand name + chevron).
+    Switching POSTs to /marcas/{id}/activar (next = current path). -#}
 {% import "components/ui.html" as ui with context %}
 <div class="dropdown brand-switcher" x-data="dropdown" @keydown="onKeydown($event)" @click.outside="close()">
   <button type="button" class="brand-switcher__btn" x-ref="button" @click="toggle()" :aria-expanded="open ? 'true' : 'false'"
           aria-haspopup="menu" aria-label="Marca activa: {{ active_brand.name if active_brand else 'ninguna' }}. Cambiar de marca">
     {% if active_brand %}
-    {{ ui.brand_avatar(active_brand, 28) }}
+    {{ ui.brand_avatar(active_brand, 30) }}
     {% else %}
-    <span class="avatar avatar--rounded avatar--empty" style="--avatar-size:28px" aria-hidden="true">{{ icon("building", 16) }}</span>
+    <span class="avatar avatar--rounded avatar--empty" style="--avatar-size:30px" aria-hidden="true">{{ icon("building", 16) }}</span>
     {% endif %}
     <span class="brand-switcher__text">
-      <span class="brand-switcher__eyebrow">Marca</span>
+      <span class="brand-switcher__eyebrow visually-hidden">Marca</span>
       <span class="brand-switcher__name">{{ active_brand.name if active_brand else "Sin marca" }}</span>
     </span>
-    {{ icon("chevrons-up-down", 16) }}
+    {{ icon("chevron-down", 16, cls="brand-switcher__chevron") }}
   </button>
-  <div class="dropdown__menu dropdown__menu--wide" x-ref="menu" role="menu" x-show="open" x-cloak
+  <div class="dropdown__menu dropdown__menu--wide dropdown__menu--end" x-ref="menu" role="menu" x-show="open" x-cloak
        x-transition:enter.duration.120ms x-transition:leave.duration.80ms>
     <div class="dropdown__label">Tus marcas</div>
     {% for b in brands %}
@@ -35,6 +36,7 @@
     <p class="dropdown__empty">Todavía no has creado ninguna marca.</p>
     {% endfor %}
     <div class="dropdown__sep" role="separator"></div>
+    <a class="dropdown__item" role="menuitem" href="/marcas/nueva">{{ icon("plus", 16) }}<span>Nueva marca</span></a>
     <a class="dropdown__item" role="menuitem" href="/marcas">{{ icon("settings-2", 16) }}<span>Gestionar marcas</span></a>
   </div>
 </div>

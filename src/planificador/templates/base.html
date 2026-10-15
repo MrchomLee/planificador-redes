@@ -32,11 +32,18 @@
     } catch (e) {}
   </script>
   <link rel="stylesheet" href="{{ static_url('css/app.css') }}">
+  {#- Layers that open from any page: the composer (top bar button, shortcut N), the post detail drawer and the
+      "Publicación asistida" modal (planner, bell, notification centre). Their assets load everywhere. #}
+  {% if static_exists('css/composer.css') %}<link rel="stylesheet" href="{{ static_url('css/composer.css') }}">{% endif %}
+  {% if static_exists('css/posts.css') %}<link rel="stylesheet" href="{{ static_url('css/posts.css') }}">{% endif %}
+  {#- The media picker opens from the composer on any page. #}
+  {% if static_exists('css/media.css') %}<link rel="stylesheet" href="{{ static_url('css/media.css') }}">{% endif %}
   {% block head %}{% endblock %}
   <script src="{{ static_url('vendor/htmx.org/htmx.min.js') }}" defer></script>
   <script src="{{ static_url('js/app.js') }}" defer></script>
-  {# The composer opens from any page (top bar button, shortcut N), so its script loads everywhere. #}
   {% if static_exists('js/composer.js') %}<script src="{{ static_url('js/composer.js') }}" defer></script>{% endif %}
+  {% if static_exists('js/posts.js') %}<script src="{{ static_url('js/posts.js') }}" defer></script>{% endif %}
+  {% if static_exists('js/media.js') %}<script src="{{ static_url('js/media.js') }}" defer></script>{% endif %}
   {% block scripts %}{% endblock %}
   <script src="{{ static_url('vendor/alpinejs/cdn.min.js') }}" defer></script>
 </head>

@@ -1,0 +1,56 @@
+{#-
+  Planner macros (import WITH CONTEXT):  {% import "planner/_macros.html" as pm with context %}
+  row = routes.planner.PostRow
+-#}
+
+{# Network logos of a post; each logo carries the per-network status (dot + tooltip). #}
+{% macro nets(row, size=22, show_status=True) -%}
+<span class="pnets">
+  {%- for t in row.targets %}
+  <span class="pnet" title="{{ network_label(t.network) }} · {{ t.label }}">
+    {{- net_icon(t.network, size, title=False) -}}
+    {%- if show_status %}<span class="pnet__dot dot st-{{ t.status }}" aria-hidden="true"></span>{% endif -%}
+    <span class="visually-hidden">{{ network_label(t.network) }}: {{ t.label }}</span>
+  </span>
+  {%- else %}
+  <span class="subtle text-sm">Sin redes</span>
+  {%- endfor %}
+</span>
+{%- endmacro %}
+
+{# Media thumbnail (falls back to an icon when there is no media or the image fails). #}
+{% macro thumb(row, size=48, cls="") -%}
+<span class="pthumb{% if not row.thumb_url %} is-empty{% endif %}{% if cls %} {{ cls }}{% endif %}" style="--thumb:{{ size }}px" aria-hidden="true">
+  {%- if row.thumb_url %}<img class="js-thumb" src="{{ row.thumb_url }}" alt="" loading="lazy" decoding="async">{% endif -%}
+  <span class="pthumb__fallback">{{ icon("image" if row.thumb_url else "text-align-start", (size * 0.42)|int) }}</span>
+  {%- if row.media_kind == "video" %}<span class="pthumb__play">{{ icon("play", 12) }}</span>{% endif -%}
+  {%- if row.media_count > 1 %}<span class="pthumb__count">{{ row.media_count }}</span>{% endif -%}
+</span>
+{%- endmacro %}
+
+{# Empty state in a white card, matching the Lista screenshot (doc 05 §5c). #}
+{% macro empty_card(title, text, icon_name="calendar", cls="") -%}
+<div class="pempty{% if cls %} {{ cls }}{% endif %}">
+  <div class="pempty__icon">{{ icon(icon_name, 26, stroke=1.75) }}</div>
+  <p class="pempty__title">{{ title }}</p>
+  <p class="pempty__text">{{ text }}</p>
+  {% if caller is defined %}<div class="pempty__actions">{{ caller() }}</div>{% endif %}
+</div>
+{%- endmacro %}
+
+{# "+ Crear publicación" (opens the composer overlay; also a plain link without JS). #}
+{% macro create_button(label="Crear publicación", short="Crear", query="", cls="") -%}
+{%- set href = "/publicaciones/nueva" ~ ("?" ~ query if query else "") -%}
+<a href="{{ href }}" class="btn btn--primary ptool planner-cta{% if cls %} {{ cls }}{% endif %}"
+   hx-get="{{ href }}" hx-target="#modal-root" hx-swap="innerHTML" hx-push-url="false" title="{{ label }}">
+  {{- icon("plus", 18, stroke=2.25) }}<span class="planner-cta__label">{{ label }}</span><span class="planner-cta__short" aria-hidden="true">{{ short }}</span></a>
+{%- endmacro %}
+
+{# Search box used by every planner toolbar. #}
+{% macro search(name="q", value="", attrs={}, placeholder="Buscar") -%}
+<label class="input-group psearch">
+  {{ icon("search", 18) }}
+  <span class="visually-hidden">{{ placeholder }}</span>
+  <input class="input" type="search" name="{{ name }}" value="{{ value }}" placeholder="{{ placeholder }}" autocomplete="off" spellcheck="false"{{ attrs|xmlattr }}>
+</label>
+{%- endmacro %}

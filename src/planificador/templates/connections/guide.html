@@ -1,0 +1,55 @@
+{#- Setup guide (docs/guia-<name>.md rendered by routes.connections.render_markdown).
+    Context: guide_title, guide_name, guide_body (Markup or None), toc [(label, slug)], redirect_uris. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% import "connections/_macros.html" as conn with context %}
+{% block head %}<link rel="stylesheet" href="{{ static_url('css/settings.css') }}">{% endblock %}
+{% block body_class %}page-guide{% endblock %}
+{% block content %}
+{% set guides = [("meta", "Meta (Facebook e Instagram)", "facebook"), ("tiktok", "TikTok", "tiktok"), ("youtube", "YouTube (Google)", "youtube")] %}
+<div class="guide-layout">
+  <aside class="guide-nav" aria-label="Guías">
+    <a class="chooser__back" href="/conexiones">{{ icon("arrow-left", 16) }}<span>Cuentas conectadas</span></a>
+    <div class="guide-nav__label">Guías</div>
+    {% for key, label, net in guides %}
+    <a class="guide-nav__link{% if key == guide_name %} is-active{% endif %}" href="/ayuda/{{ key }}"{% if key == guide_name %} aria-current="page"{% endif %}>
+      {{- net_icon(net, 22, title=False) }}<span>{{ label }}</span></a>
+    {% endfor %}
+    {% if toc %}
+    <div class="guide-nav__label">En esta guía</div>
+    <nav class="guide-toc" aria-label="Índice">
+      {% for label, slug in toc %}<a href="#{{ slug }}">{{ label }}</a>{% endfor %}
+    </nav>
+    {% endif %}
+  </aside>
+
+  <article class="card guide-card">
+    <div class="card__body">
+      {% if guide_body %}
+      <div class="md-body">{{ guide_body }}</div>
+      {% else %}
+      <h1 class="guide-card__title">{{ guide_title }}</h1>
+      {% call ui.empty_state("La guía todavía no está disponible", "No encontramos el archivo de esta guía en tu instalación (docs/guia-" ~ guide_name ~ ".md). Mientras tanto, aquí tienes los datos que te pedirá la consola de desarrolladores.", icon_name="book-open") %}{% endcall %}
+      {% endif %}
+    </div>
+  </article>
+
+  <aside class="guide-aside" aria-label="Tus datos">
+    <section class="card">
+      <div class="card__body stack" style="--gap: 12px">
+        <h2 class="guide-aside__title">{{ icon("clipboard-copy", 16) }}Datos para copiar</h2>
+        {% if guide_name in ("meta", "tiktok", "youtube") %}
+        {% set key = {"meta": "meta", "tiktok": "tiktok", "youtube": "google"}[guide_name] %}
+        <p class="text-sm muted">URI de redirección de esta instalación:</p>
+        {{ conn.copy_field(redirect_uris[key]) }}
+        {% else %}
+        {% for key, label in [("meta", "Meta"), ("tiktok", "TikTok"), ("google", "Google")] %}
+        <p class="text-sm muted">{{ label }}:</p>{{ conn.copy_field(redirect_uris[key]) }}
+        {% endfor %}
+        {% endif %}
+        <a class="btn btn--secondary btn--sm" href="/ajustes#{{ {'meta': 'credenciales-meta', 'tiktok': 'credenciales-tiktok', 'youtube': 'credenciales-google'}.get(guide_name, 'credenciales') }}">{{ icon("key-round", 15) }}<span>Pegar credenciales en Ajustes</span></a>
+      </div>
+    </section>
+  </aside>
+</div>
+{% endblock %}

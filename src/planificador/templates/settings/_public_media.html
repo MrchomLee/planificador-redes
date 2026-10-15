@@ -1,0 +1,71 @@
+{#- Ajustes → URL pública para Instagram (SPEC §9). Context: pm {mode, base_url, consent_at, public_port, status, polling}. -#}
+{% import "components/ui.html" as ui with context %}
+{% import "settings/_macros.html" as sm with context %}
+{% set err = errors or {} %}
+{% set val = values or {} %}
+{% set mode = val.get("mode", pm.mode) %}
+<section class="settings-section card" id="url-publica" aria-labelledby="url-publica-title">
+  <header class="settings-section__head">
+    <span class="settings-section__icon" aria-hidden="true">{{ icon("globe", 20) }}</span>
+    <div class="settings-section__titles">
+      <h2 class="settings-section__title" id="url-publica-title">URL pública para Instagram</h2>
+      <p class="settings-section__subtitle">Instagram descarga las fotos desde una dirección <strong>https</strong> pública; tu ordenador no la tiene.
+        Facebook, TikTok, YouTube y los vídeos de Instagram <strong>no</strong> la necesitan.</p>
+    </div>
+  </header>
+  <div class="settings-section__body pm-layout">
+    <form class="pm-form" method="post" action="/ajustes/url-publica" hx-post="/ajustes/url-publica" hx-target="#url-publica" hx-swap="outerHTML"
+          x-data="{ mode: {{ mode|tojson|forceescape }} }">
+      {{ sm.csrf() }}
+      <fieldset class="pm-modes">
+        <legend class="visually-hidden">Modo de la URL pública</legend>
+        <label class="pm-mode">
+          <input type="radio" name="mode" value="off" x-model="mode"{% if mode == "off" %} checked{% endif %}>
+          <span class="pm-mode__icon">{{ icon("circle-off", 20) }}</span>
+          <span class="pm-mode__text"><span class="pm-mode__title">Desactivada</span>
+            <span class="pm-mode__desc">Las fotos para Instagram tendrás que publicarlas tú (publicación asistida).</span></span>
+        </label>
+        <label class="pm-mode">
+          <input type="radio" name="mode" value="tunnel" x-model="mode"{% if mode == "tunnel" %} checked{% endif %}>
+          <span class="pm-mode__icon">{{ icon("cloud", 20) }}</span>
+          <span class="pm-mode__text"><span class="pm-mode__title">Túnel temporal de Cloudflare {{ ui.tag("Recomendado", "primary", size="sm") }}</span>
+            <span class="pm-mode__desc">Sin cuentas ni configuración: se abre solo cuando Instagram necesita una foto y se cierra al terminar.</span></span>
+        </label>
+        <label class="pm-mode">
+          <input type="radio" name="mode" value="base_url" x-model="mode"{% if mode == "base_url" %} checked{% endif %}>
+          <span class="pm-mode__icon">{{ icon("link", 20) }}</span>
+          <span class="pm-mode__text"><span class="pm-mode__title">URL pública propia</span>
+            <span class="pm-mode__desc">Para usuarios avanzados con su propio dominio, túnel con nombre o proxy inverso.</span></span>
+        </label>
+      </fieldset>
+
+      <div class="pm-consent" x-show="mode === 'tunnel'"{% if mode != "tunnel" %} x-cloak{% endif %}>
+        <h3 class="pm-consent__title">{{ icon("shield-check", 16) }}Cómo funciona el túnel temporal</h3>
+        <ul class="pm-consent__list">
+          <li>La primera vez se descarga el programa oficial <strong>cloudflared</strong> de Cloudflare desde GitHub (unas decenas de MB) y se comprueba su huella SHA-256 antes de usarlo.</li>
+          <li>Cuando Instagram necesita una foto, se abre un túnel <code>https://….trycloudflare.com</code> que sirve <strong>solo esa foto</strong>, con un enlace imposible de adivinar que caduca en 1 hora.</li>
+          <li>El resto de la aplicación (calendario, ajustes, tus cuentas) <strong>nunca</strong> es accesible desde Internet. El túnel se cierra tras 5 minutos sin uso.</li>
+          <li>La foto pasa por los servidores de Cloudflare mientras Instagram la descarga.</li>
+        </ul>
+        {% if pm.consent_at and pm.mode == "tunnel" %}
+        <p class="pm-consent__done">{{ icon("circle-check", 15) }}Aceptado el {{ pm.consent_at|dt_es(fmt="short") }}.</p>
+        {% else %}
+        <label class="check pm-consent__check">
+          <input type="checkbox" name="consent" value="1"{% if val.get("consent") %} checked{% endif %}{% if err.get("consent") %} aria-invalid="true"{% endif %}>
+          <span><span class="check__label">Entiendo cómo funciona y quiero activar el túnel temporal de Cloudflare.</span></span>
+        </label>
+        {% if err.get("consent") %}<p class="form-field__error">{{ icon("circle-alert", 14) }}<span>{{ err.consent }}</span></p>{% endif %}
+        {% endif %}
+      </div>
+
+      <div class="pm-baseurl" x-show="mode === 'base_url'"{% if mode != "base_url" %} x-cloak{% endif %}>
+        {{ ui.form_field("base_url", "Dirección pública (https)", value=val.get("base_url", pm.base_url), error=err.get("base_url"), id="f-pm-base",
+                         placeholder="https://fotos.midominio.com", autocomplete="off",
+                         help="Debe reenviar las peticiones a http://127.0.0.1:" ~ pm.public_port ~ " (el servidor de medios públicos, que solo sirve /m/<enlace>).",
+                         attrs={"spellcheck": "false", "inputmode": "url"}) }}
+      </div>
+      <div class="pm-form__foot">{{ sm.save_button() }}</div>
+    </form>
+    {% include "settings/_pm_status.html" %}
+  </div>
+</section>

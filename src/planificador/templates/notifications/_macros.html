@@ -1,0 +1,105 @@
+{#- Notification helpers shared by the bell (partials/notif_summary.html) and the notification centre.
+    Work with ORM rows and plain dicts/namespaces (id, kind, title, body, created_at, read_at, target_id[, url,
+    target]). Deep links: manual_publish → assisted modal; anything else with a target → post drawer;
+    reconnect → /conexiones. -#}
+{% import "components/ui.html" as ui with context %}
+
+{% set KIND_LABELS = {
+  "manual_publish": "Publicación asistida",
+  "error": "Error",
+  "unknown": "Sin confirmar",
+  "missed": "No publicada",
+  "reconnect": "Conexión",
+  "info": "Información",
+} %}
+
+{# Full-page URL (also used by browser notifications). #}
+{% macro href(n) -%}
+{%- set kind = n.kind|string -%}
+{%- if n.url is defined and n.url -%}{{ n.url }}
+{%- elif kind == "reconnect" -%}/conexiones
+{%- elif n.target_id and kind == "manual_publish" -%}/objetivos/{{ n.target_id }}/asistida
+{%- elif n.target_id -%}/objetivos/{{ n.target_id }}
+{%- else -%}/notificaciones
+{%- endif -%}
+{%- endmacro %}
+
+{# htmx attributes opening the deep link as a layer (leading space included; empty for plain links). #}
+{% macro hx_attrs(n) -%}
+{%- set kind = n.kind|string -%}
+{%- if n.url is defined and n.url -%}
+{%- elif kind == "reconnect" -%}
+{%- elif n.target_id and kind == "manual_publish" %} hx-get="/objetivos/{{ n.target_id }}/asistida" hx-target="#modal-root" hx-swap="innerHTML" hx-push-url="false"
+{%- elif n.target_id %} hx-get="/objetivos/{{ n.target_id }}" hx-target="#drawer-root" hx-swap="innerHTML" hx-push-url="false"
+{%- endif -%}
+{%- endmacro %}
+
+{# Label of the main action button. #}
+{% macro action_label(n) -%}
+{%- set kind = n.kind|string -%}
+{%- if kind == "reconnect" -%}Reconectar
+{%- elif n.target_id and kind == "manual_publish" -%}
+{%- set t = n.target if n.target is defined else none -%}
+{%- if t is not none and t.status|string in ("manual_done", "published", "cancelled") -%}Ver publicación asistida
+{%- else -%}Publicar ahora{%- endif -%}
+{%- elif n.target_id -%}Ver publicación
+{%- else -%}Ver detalles
+{%- endif -%}
+{%- endmacro %}
+
+{# Icon bubble (kind tone) with the target's network in the corner. #}
+{% macro bubble(n, size=30) -%}
+{%- set kind = n.kind|string -%}
+{%- set t = n.target if n.target is defined else none -%}
+<span class="notif-item__icon tone-{{ NOTIFICATION_TONES.get(kind, 'info') }}" style="--bubble:{{ size }}px">
+  {{- icon(NOTIFICATION_ICONS.get(kind, "info"), (size * 0.53)|int) -}}
+  {%- if t and t.network %}{{ net_icon(t.network, 15, cls="notif-item__net", title=False) }}{% endif -%}
+</span>
+{%- endmacro %}
+
+{# One row of the notification centre. #}
+{% macro page_item(n) -%}
+{%- set kind = n.kind|string -%}
+{%- set t = n.target if n.target is defined else none -%}
+{%- set acc = (t.account if t else none) or (n.account if n.account is defined else none) -%}
+{%- set urgent = kind in ("manual_publish", "error", "unknown", "missed", "reconnect") -%}
+<article class="nitem{% if not n.read_at %} is-unread{% endif %}" id="notif-{{ n.id }}" aria-labelledby="notif-{{ n.id }}-title">
+  {{ bubble(n, 40) }}
+  <div class="nitem__main">
+    <div class="nitem__head">
+      <h3 class="nitem__title" id="notif-{{ n.id }}-title">{{ n.title }}</h3>
+      {% if not n.read_at %}<span class="nitem__dot" title="Sin leer"><span class="visually-hidden">Sin leer</span></span>{% endif %}
+      <span class="nitem__time">
+        <span class="nitem__kind">{{ KIND_LABELS.get(kind, "Aviso") }}</span> ·
+        <time datetime="{{ n.created_at|iso_utc }}" data-timeago title="{{ n.created_at|dt_es(tz) }}">{{ n.created_at|timeago_es }}</time>
+      </span>
+    </div>
+    {% if n.body %}<p class="nitem__body">{{ n.body }}</p>{% endif %}
+    {% if t %}
+    <div class="nitem__context">
+      {{ net_icon(t.network, 18) }}
+      <span class="nitem__account truncate">{{ acc.display_name if acc else network_label(t.network) }}</span>
+      {% if t.post %}<span class="nitem__snippet truncate">«{{ ((t.text_override if t.text_override is not none else t.post.text) or "Sin texto")|truncate(90, True, "…", 0) }}»</span>{% endif %}
+      {{ ui.badge(t.status, size="sm") }}
+    </div>
+    {% elif acc %}
+    <div class="nitem__context">{{ net_icon(acc.network, 18) }}<span class="nitem__account truncate">{{ acc.display_name }}</span></div>
+    {% endif %}
+    <div class="nitem__actions">
+      {% set link = href(n)|trim %}
+      {% if link != "/notificaciones" %}
+      <a class="btn btn--sm {{ 'btn--primary' if urgent and not n.read_at else 'btn--secondary' }}" href="{{ link }}"{{ hx_attrs(n) }}
+         {%- if not n.read_at %} data-notif-read="{{ n.id }}"{% endif %}>
+        {{- icon("hand" if kind == "manual_publish" else ("plug-zap" if kind == "reconnect" else "arrow-right"), 15) }}<span>{{ action_label(n) }}</span></a>
+      {% endif %}
+      {% if n.read_at %}
+      <button type="button" class="btn btn--ghost btn--sm" hx-post="/notificaciones/{{ n.id }}/no-leida" hx-target="#notif-{{ n.id }}" hx-swap="outerHTML">
+        {{- icon("mail", 15) }}<span>Marcar como no leída</span></button>
+      {% else %}
+      <button type="button" class="btn btn--ghost btn--sm" hx-post="/notificaciones/{{ n.id }}/leer" hx-target="#notif-{{ n.id }}" hx-swap="outerHTML">
+        {{- icon("check", 15) }}<span>Marcar como leída</span></button>
+      {% endif %}
+    </div>
+  </div>
+</article>
+{%- endmacro %}

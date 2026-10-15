@@ -1,0 +1,45 @@
+{#- Ajustes → Seguridad: optional app password. Context: sec {password_set}. -#}
+{% import "components/ui.html" as ui with context %}
+{% import "settings/_macros.html" as sm with context %}
+{% set err = errors or {} %}
+<section class="settings-section card" id="seguridad" aria-labelledby="seguridad-title">
+  <header class="settings-section__head">
+    <span class="settings-section__icon" aria-hidden="true">{{ icon("lock", 20) }}</span>
+    <div class="settings-section__titles">
+      <h2 class="settings-section__title" id="seguridad-title">Seguridad</h2>
+      <p class="settings-section__subtitle">La aplicación solo es accesible desde este ordenador. Si lo compartes, puedes pedir una contraseña al abrirla.</p>
+    </div>
+    <div class="settings-section__aside">
+      {% if sec.password_set %}{{ ui.tag("Contraseña activada", "success", icon_name="lock") }}{% else %}{{ ui.tag("Sin contraseña", "muted", icon_name="lock-open") }}{% endif %}
+    </div>
+  </header>
+  <div class="settings-section__body">
+    <form class="security-form" method="post" action="/ajustes/seguridad" hx-post="/ajustes/seguridad" hx-target="#seguridad" hx-swap="outerHTML" autocomplete="off">
+      {{ sm.csrf() }}
+      <input type="hidden" name="action" value="set">
+      <div class="form-grid form-grid--2">
+        {% if sec.password_set %}
+        {{ ui.form_field("current_password", "Contraseña actual", type="password", required=True, error=err.get("current_password"), id="f-pw-current", autocomplete="current-password", cls="span-full security-form__current") }}
+        {% endif %}
+        {{ ui.form_field("new_password", "Nueva contraseña" if sec.password_set else "Contraseña", type="password", required=True, error=err.get("new_password"), id="f-pw-new",
+                         autocomplete="new-password", help="Al menos 6 caracteres.", attrs={"minlength": "6"}) }}
+        {{ ui.form_field("confirm_password", "Repite la contraseña", type="password", required=True, error=err.get("confirm_password"), id="f-pw-confirm", autocomplete="new-password") }}
+      </div>
+      <div class="settings-section__foot settings-section__foot--inline">
+        <p class="text-xs muted">{{ icon("info", 13) }} Se guarda con un hash (scrypt), nunca en claro. Si la olvidas, borra el ajuste «password_hash» de la base de datos.</p>
+        {{ sm.save_button("Cambiar contraseña" if sec.password_set else "Activar contraseña") }}
+      </div>
+    </form>
+    {% if sec.password_set %}
+    <details class="advanced security-remove"{% if err.get("current_password") and values and values.get("action") == "remove" %} open{% endif %}>
+      <summary>{{ icon("lock-open", 15) }}<span>Quitar la contraseña</span>{{ icon("chevron-down", 15, cls="advanced__chev") }}</summary>
+      <form class="advanced__body security-remove__form" method="post" action="/ajustes/seguridad" hx-post="/ajustes/seguridad" hx-target="#seguridad" hx-swap="outerHTML">
+        {{ sm.csrf() }}
+        <input type="hidden" name="action" value="remove">
+        {{ ui.form_field("current_password", "Contraseña actual", type="password", required=True, id="f-pw-remove", autocomplete="current-password") }}
+        <button type="submit" class="btn btn--danger-ghost">{{ icon("lock-open", 16) }}<span>Quitar contraseña</span></button>
+      </form>
+    </details>
+    {% endif %}
+  </div>
+</section>

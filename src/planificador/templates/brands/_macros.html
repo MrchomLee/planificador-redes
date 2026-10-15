@@ -1,0 +1,73 @@
+{#- Brand form pieces (also used by Ajustes for the default time zone). Import WITH CONTEXT. -#}
+{% import "components/ui.html" as ui with context %}
+
+{#- Searchable IANA time-zone select: a filter box (settings.js) above a grouped native <select>.
+    groups: brands.timezone_groups(value). -#}
+{% macro tz_select(name, value, groups, label="Zona horaria", error=None, help=None, id=None) -%}
+{%- set fid = id or ("tz-" ~ name) -%}
+{%- set common_values = groups[0][1]|map("first")|list if groups else [] -%}
+<div class="form-field tz-field" data-tz-picker>
+  <label class="form-field__label" for="{{ fid }}">{{ label }}</label>
+  <div class="tz-field__search input-group">
+    {{ icon("search", 16) }}
+    <input class="input input--sm" type="search" placeholder="Buscar ciudad o región (p. ej. Madrid, México)…" autocomplete="off"
+           aria-label="Buscar zona horaria" aria-controls="{{ fid }}" data-tz-filter>
+  </div>
+  <select class="select" id="{{ fid }}" name="{{ name }}" required{% if error %} aria-invalid="true"{% endif %}
+          {%- if help or error %} aria-describedby="{{ fid }}-help{% if error %} {{ fid }}-error{% endif %}"{% endif %}>
+    {% for group_label, items in groups %}
+    <optgroup label="{{ group_label }}">
+      {% for zone, zlabel in items %}
+      <option value="{{ zone }}"{% if zone == value and (group_label == "Habituales" or value not in common_values) %} selected{% endif %}>{{ zlabel }}</option>
+      {% endfor %}
+    </optgroup>
+    {% endfor %}
+  </select>
+  <p class="form-field__help tz-field__empty" data-tz-empty hidden>{{ icon("search-x", 14) }}Ninguna zona coincide con la búsqueda.</p>
+  {% if help %}<p class="form-field__help" id="{{ fid }}-help">{{ help }}</p>{% endif %}
+  {% if error %}<p class="form-field__error" id="{{ fid }}-error">{{ icon("circle-alert", 14) }}<span>{{ error }}</span></p>{% endif %}
+</div>
+{%- endmacro %}
+
+{#- Colour swatches + custom colour input. Lives inside brand_fields' x-data (``color``, ``swatches``); the hidden
+    input carries the value. -#}
+{% macro color_picker(value, colors, error=None) -%}
+<fieldset class="form-field color-field">
+  <legend class="form-field__label">Color</legend>
+  <input type="hidden" name="color" value="{{ value }}" :value="color">
+  <div class="color-field__swatches" role="radiogroup" aria-label="Color de la marca">
+    {% for hex, cname in colors %}
+    <label class="swatch" style="--swatch: {{ hex|css_color }}" title="{{ cname }}">
+      <input type="radio" name="color_swatch" value="{{ hex }}" x-model="color"{% if hex == value %} checked{% endif %}>
+      <span class="visually-hidden">{{ cname }}</span>
+    </label>
+    {% endfor %}
+    <label class="swatch swatch--custom{% if value not in colors|map('first')|list %} is-custom{% endif %}" :class="{ 'is-custom': !swatches.includes(color) }"
+           title="Otro color" :style="!swatches.includes(color) ? '--swatch:' + color : ''">
+      <input type="color" class="swatch__picker" value="{{ value|css_color }}" aria-label="Elegir otro color" @input="color = $event.target.value.toLowerCase()">
+      {{ icon("pipette", 15) }}
+    </label>
+  </div>
+  {% if error %}<p class="form-field__error">{{ icon("circle-alert", 14) }}<span>{{ error }}</span></p>{% endif %}
+</fieldset>
+{%- endmacro %}
+
+{#- The whole brand form body (fields only; the caller provides <form> and buttons). -#}
+{% macro brand_fields(form, colors, tz_groups, brand=None) -%}
+<div class="brand-form" x-data="{ name: {{ form.name|tojson|forceescape }}, color: {{ form.color|tojson|forceescape }}, swatches: {{ colors|map('first')|list|tojson|forceescape }} }">
+  <div class="brand-form__preview" aria-hidden="true">
+    <span class="avatar avatar--rounded brand-form__avatar" :style="'--avatar-size:56px;--avatar-bg:' + color"
+          style="--avatar-size:56px;--avatar-bg:{{ form.color|css_color }}"
+          x-text="(name.trim().split(/\s+/).map(w => w[0] || '').join('').slice(0, 2) || '?').toUpperCase()">{{ (form.name or "?")[:2]|upper }}</span>
+    <span class="brand-form__preview-name" x-text="name.trim() || 'Nueva marca'">{{ form.name or "Nueva marca" }}</span>
+  </div>
+  {{ ui.form_field("name", "Nombre", value=form.name, required=True, maxlength=120, error=form.errors.get("name"),
+                   placeholder="Por ejemplo: Panadería Lucía", autocomplete="off", attrs={"x-model": "name", "autofocus": True}) }}
+  {{ color_picker(form.color, colors, error=form.errors.get("color")) }}
+  {{ tz_select("timezone", form.timezone, tz_groups, error=form.errors.get("timezone"),
+               help="Las fechas del calendario y de las publicaciones se muestran en esta zona horaria.") }}
+  {% if brand %}
+  <p class="brand-form__note">{{ icon("info", 14) }}<span>Si cambias la zona horaria, las publicaciones ya programadas mantienen su hora exacta y se mostrarán convertidas a la nueva zona.</span></p>
+  {% endif %}
+</div>
+{%- endmacro %}

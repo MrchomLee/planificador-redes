@@ -1,0 +1,53 @@
+{#- Biblioteca de medios (SPEC §8). Context: views, total, page, has_more, q, kind, counts, detail (view or
+    None), public_media_off. Upload/drag & drop/progress live in static/js/media.js. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% import "media/_macros.html" as mm with context %}
+
+{#- media.css / media.js are loaded globally by base.html (the picker opens from the composer anywhere). #}
+
+{% block content %}
+<div class="medialib" id="medialib" data-medialib data-upload-url="/biblioteca/subir" data-max-bytes="{{ MAX_UPLOAD_BYTES }}">
+  <header class="medialib__header">
+    <div class="medialib__titles">
+      <h1 class="medialib__title">Biblioteca</h1>
+      <p class="medialib__subtitle">Fotos y vídeos de <strong>{{ active_brand.name if active_brand else "tu marca" }}</strong> listos para tus publicaciones.</p>
+    </div>
+    <div class="medialib__actions">
+      <span class="medialib__hint muted">{{ icon("mouse-pointer-click", 16) }}<span>Arrastra archivos aquí o</span></span>
+      <button type="button" class="btn btn--primary medialib__upload" data-upload-trigger>{{ icon("upload", 18) }}<span>Subir archivos</span></button>
+    </div>
+  </header>
+
+  <form class="medialib__toolbar" role="search" action="/biblioteca" method="get"
+        hx-get="/biblioteca" hx-target="#media-results" hx-swap="innerHTML" hx-push-url="true"
+        hx-trigger="input changed delay:300ms from:find [name=q], change from:find [name=tipo], submit">
+    <label class="input-group medialib__search">
+      {{ icon("search", 18) }}
+      <input class="input" type="search" name="q" value="{{ q }}" placeholder="Buscar por nombre de archivo" aria-label="Buscar en la biblioteca" autocomplete="off">
+    </label>
+    {{ mm.kind_filter(kind, counts) }}
+    <span class="medialib__total muted" id="media-total">{{ mm.total_label(total, counts, q, kind) }}</span>
+  </form>
+  <input type="file" multiple hidden accept="{{ ACCEPT_TYPES }}" data-upload-input tabindex="-1" aria-hidden="true">
+
+  <div class="upload-tray" data-upload-tray hidden aria-live="polite"></div>
+
+  <div class="medialib__layout{% if detail %} has-detail{% endif %}" id="media-layout">
+    <section class="medialib__main" aria-label="Archivos de la biblioteca">
+      <div id="media-results" class="medialib__results">{% include "media/_results.html" %}</div>
+    </section>
+    <aside class="medialib__detail" id="media-detail" aria-label="Detalle del archivo" aria-live="polite">
+      {%- if detail %}{% include "media/_detail.html" %}{% endif -%}
+    </aside>
+  </div>
+
+  <div class="drop-overlay" data-drop-overlay hidden>
+    <div class="drop-overlay__box">
+      <span class="drop-overlay__icon">{{ icon("cloud-upload", 34, stroke=1.6) }}</span>
+      <strong>Suelta los archivos para subirlos</strong>
+      <span class="muted">Fotos (JPEG, PNG, WebP, GIF, HEIC) y vídeos (MP4, MOV, M4V, WebM) de hasta 4 GB.</span>
+    </div>
+  </div>
+</div>
+{% endblock %}

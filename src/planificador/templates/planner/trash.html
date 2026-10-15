@@ -1,0 +1,19 @@
+{#- Planificación › Papelera: deleted posts kept 45 days (restore or delete for good). -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% import "planner/_macros.html" as pm with context %}
+
+{% block head %}<link rel="stylesheet" href="{{ static_url('css/planner.css') }}">{% endblock %}
+{% block scripts %}<script src="{{ static_url('js/planner.js') }}" defer></script>{% endblock %}
+{% block body_class %}page-planner{% endblock %}
+
+{% block content %}
+<h1 class="visually-hidden">Planificación · Papelera</h1>
+{% include "planner/_subnav.html" %}
+
+<section class="planner-trash" aria-label="Papelera">
+  <div id="trash-list" class="trash-list" hx-get="/papelera" hx-trigger="planner:refresh from:body" hx-target="this" hx-swap="innerHTML">
+    {% include "planner/_trash_body.html" %}
+  </div>
+</section>
+{% endblock %}

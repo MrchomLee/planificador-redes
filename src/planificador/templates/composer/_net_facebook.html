@@ -1,0 +1,28 @@
+{#- "Configuración de Facebook" (SPEC §7: title, link, native_schedule). Vars: K, T, O, info. -#}
+<div class="cmp-fields">
+  <div class="cmp-field" data-field="title" x-show="fmt('{{ K }}') === 'reel' || (fmt('{{ K }}') === 'post' && hasVideo('{{ K }}'))">
+    <label class="cmp-label" for="fb-title-{{ K }}">Título <span class="optional">(opcional)</span></label>
+    <input id="fb-title-{{ K }}" class="input" x-model="{{ O }}.title" maxlength="255" :disabled="ro" placeholder="Título del vídeo en Facebook">
+    <p class="cmp-help">Se muestra como título del vídeo o del reel.</p>
+  </div>
+
+  <div class="cmp-field" data-field="link" x-show="fmt('{{ K }}') === 'post'">
+    <label class="cmp-label" for="fb-link-{{ K }}">Enlace con vista previa <span class="optional">(opcional)</span></label>
+    <input id="fb-link-{{ K }}" class="input" type="url" x-model.trim="{{ O }}.link" :disabled="ro" placeholder="https://"
+           :aria-invalid="fieldError('{{ K }}', 'link') ? 'true' : 'false'">
+    <p class="cmp-error" x-show="fieldError('{{ K }}', 'link')" x-text="fieldError('{{ K }}', 'link')"></p>
+    <p class="cmp-help">Facebook mostrará la tarjeta del enlace. Solo en publicaciones sin fotos ni vídeo.</p>
+  </div>
+
+  <div class="cmp-field" data-field="native_schedule" x-show="fmt('{{ K }}') === 'post'">
+    <label class="switch">
+      <input type="checkbox" role="switch" x-model="{{ O }}.native_schedule" :disabled="ro">
+      <span class="switch__track" aria-hidden="true"></span>
+      <span class="switch__text"><span class="switch__label">Programar en Facebook</span>
+        <span class="switch__help">Facebook la publicará aunque el ordenador esté apagado (de 15 minutos a 29 días de antelación).</span></span>
+    </label>
+  </div>
+
+  <p class="cmp-note" x-show="fmt('{{ K }}') === 'story'">{{ icon("info", 15) }} Las historias de Facebook no muestran texto: solo se publica la foto o el vídeo (hasta 60 s).</p>
+  <p class="cmp-note" x-show="fmt('{{ K }}') === 'reel'">{{ icon("info", 15) }} Reels: un vídeo vertical de 3 a 90 segundos.</p>
+</div>

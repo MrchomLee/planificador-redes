@@ -1,0 +1,64 @@
+{#- Left card (doc 05 §5): network filter logos (red "!" when an account needs reconnecting) · search (≥ 3
+    characters) · tabs Sin responder / No leídos / Todos · conversation list. Replaced as a whole by the filters
+    and "Actualizar"; the search and live refreshes only swap #inbox-list. -#}
+{% import "components/ui.html" as ui with context %}
+<section class="card ib-panel ib-list-panel" id="inbox-list-panel" aria-label="Conversaciones">
+  <div class="ib-list-head">
+    <div class="ib-nets" role="group" aria-label="Filtrar por red social">
+      {% for f in filters %}
+      {% if f.unsupported %}
+      <span class="ib-net is-unsupported" title="{{ f.title }}" tabindex="0" aria-label="TikTok: {{ f.title }}">
+        {{ net_icon(f.network, 36, title=False) }}
+        <span class="ib-net__slash" aria-hidden="true"></span>
+      </span>
+      {% elif not f.connected %}
+      <a class="ib-net is-off" href="/conexiones" title="{{ f.title }}" aria-label="{{ f.title }}">
+        {{ net_icon(f.network, 36, title=False) }}
+        <span class="ib-net__plus" aria-hidden="true">{{ icon("plus", 10, stroke=3) }}</span>
+      </a>
+      {% else %}
+      {% set href_q = link(red=("" if f.active else f.network), c=None) %}
+      <a class="ib-net{% if f.active %} is-active{% elif red %} is-dim{% endif %}" href="/comentarios{{ '?' ~ href_q if href_q }}"
+         hx-get="/comentarios/lista{{ '?' ~ href_q if href_q }}" hx-target="#inbox-list-panel" hx-swap="outerHTML"
+         hx-push-url="/comentarios{{ '?' ~ href_q if href_q }}" aria-pressed="{{ 'true' if f.active else 'false' }}"
+         title="{{ f.title }}" aria-label="{{ f.title }}">
+        {{ net_icon(f.network, 36, title=False) }}
+        {% if f.problem %}<span class="ib-net__alert" aria-hidden="true">!</span>{% endif %}
+      </a>
+      {% endif %}
+      {% endfor %}
+      <a class="ib-net ib-net--add" href="/conexiones" title="Conectar más cuentas" aria-label="Conectar más cuentas">{{ icon("plus", 18) }}</a>
+    </div>
+
+    <form id="inbox-filters" class="ib-search" role="search" action="/comentarios" method="get"
+          hx-get="/comentarios/lista?parte=cuerpo" hx-target="#inbox-list" hx-swap="innerHTML" hx-push-url="false">
+      <input type="hidden" name="red" value="{{ red }}">
+      <input type="hidden" name="tab" value="{{ tab }}">
+      <input type="hidden" name="c" value="{{ selected_id or '' }}" data-inbox-selected>
+      {{ ui.tool_search("q", q, placeholder="Escribe al menos " ~ search_min ~ " caracteres", label="Buscar en los comentarios",
+           attrs={"hx-get": "/comentarios/lista?parte=cuerpo", "hx-include": "#inbox-filters", "hx-target": "#inbox-list",
+                  "hx-swap": "innerHTML", "hx-trigger": "input changed delay:400ms, search",
+                  "minlength": search_min, "maxlength": 100}) }}
+    </form>
+
+    <nav class="tabs ib-tabs" aria-label="Mostrar conversaciones">
+      {% for key, label in tabs %}
+      {% set tab_q = link(tab=key, c=None) %}
+      <a class="tab{% if key == tab %} is-active{% endif %}" href="/comentarios?{{ tab_q }}"{% if key == tab %} aria-current="page"{% endif %}
+         hx-get="/comentarios/lista?{{ tab_q }}" hx-target="#inbox-list-panel" hx-swap="outerHTML" hx-push-url="/comentarios?{{ tab_q }}">
+        <span>{{ label }}</span>{% if key != "todos" %}{% include "inbox/_count.html" %}{% endif %}
+      </a>
+      {% endfor %}
+    </nav>
+  </div>
+
+  <div class="ib-list-scroll" id="inbox-list" hx-get="/comentarios/lista?parte=cuerpo" hx-include="#inbox-filters"
+       hx-trigger="inbox:changed from:body" hx-swap="innerHTML">
+    {% include "inbox/_list_body.html" %}
+  </div>
+
+  {% if has_tiktok %}
+  <p class="ib-list-foot">{{ net_icon("tiktok", 16, title=False) }}<span>{{ tiktok_note }}</span></p>
+  {% endif %}
+</section>
+{% if oob_updated %}{% with oob=True %}{% include "inbox/_updated.html" %}{% endwith %}{% endif %}

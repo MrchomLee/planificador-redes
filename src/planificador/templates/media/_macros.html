@@ -1,0 +1,74 @@
+{#- Media library macros (cards for the library grid and the picker). Import WITH CONTEXT.
+    A "view" is routes.media.asset_view(): id, name, kind, kind_label, dims, ratio, duration, size, hdr,
+    thumb_url, file_url, item (picker JSON), compat_status {network: ok|warning|error}. -#}
+
+{% macro thumb(v, compat=False) -%}
+<div class="media-card__thumb">
+  {% if compat %}{{ compat_dots(v) }}{% endif %}
+  <img src="{{ v.thumb_url }}" alt="" loading="lazy" decoding="async" draggable="false">
+  <span class="media-card__fallback" aria-hidden="true">{{ icon("video" if v.kind == "video" else "image", 28, stroke=1.6) }}</span>
+  {% if v.kind == "video" %}
+  <span class="media-card__badge">{{ icon("play", 11, stroke=2.5) }}{% if v.duration %}<span>{{ v.duration }}</span>{% endif %}</span>
+  {% endif %}
+  {% if v.hdr %}<span class="media-card__chip" title="Vídeo HDR">HDR</span>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro compat_dots(v) -%}
+{% if v.compat_status %}
+<span class="compat-dots" aria-label="Compatibilidad por red">
+  {%- for net, st in v.compat_status.items() %}
+  <span class="compat-dot compat-dot--{{ st }}" title="{{ network_label(net) }}: {{ STATUS_LABELS_MEDIA[st] }}">{{ net_glyph(net, 13) }}<span class="visually-hidden">{{ network_label(net) }}: {{ STATUS_LABELS_MEDIA[st] }}</span></span>
+  {%- endfor %}
+</span>
+{% endif %}
+{%- endmacro %}
+
+{# Library card: the whole card opens the detail panel. #}
+{% macro card(v, selected=False) -%}
+<article class="media-card{% if selected %} is-selected{% endif %}" role="listitem" data-media-id="{{ v.id }}">
+  <button type="button" class="media-card__open" hx-get="/medios/{{ v.id }}" hx-target="#media-detail" hx-swap="innerHTML"
+          hx-push-url="false" aria-label="Ver detalles de {{ v.name }}" title="{{ v.name }}"></button>
+  {{ thumb(v, compat=True) }}
+  <div class="media-card__body">
+    <div class="media-card__name">{{ v.name }}</div>
+    <div class="media-card__meta">
+      <span class="truncate">{% if v.dims %}{{ v.dims }} · {% endif %}{{ v.size }}</span>
+    </div>
+  </div>
+</article>
+{%- endmacro %}
+
+{# Picker card: a checkbox (or radio) styled as a selectable tile. #}
+{% macro pick_card(v, multiple=True) -%}
+<label class="media-card media-card--pick" data-media-id="{{ v.id }}" role="listitem" title="{{ v.name }}">
+  <input type="{{ 'checkbox' if multiple else 'radio' }}" name="media" value="{{ v.id }}" class="media-card__input"
+         data-item='{{ v.item|tojson }}' aria-label="Seleccionar {{ v.name }}">
+  <span class="media-card__check" aria-hidden="true">{{ icon("check", 14, stroke=3) }}</span>
+  {{ thumb(v) }}
+  <span class="media-card__body">
+    <span class="media-card__name">{{ v.name }}</span>
+    <span class="media-card__meta"><span class="truncate">{% if v.dims %}{{ v.dims }} · {% endif %}{{ v.size }}</span></span>
+  </span>
+</label>
+{%- endmacro %}
+
+{% macro kind_filter(kind, counts=None, name="tipo", only=None) -%}
+<div class="segmented media-filter" role="radiogroup" aria-label="Tipo de archivo">
+  {% for key, label in KIND_FILTERS.items() %}
+  {% if only is none or key == only %}
+  <label>
+    <input type="radio" name="{{ name }}" value="{{ key }}"{% if kind == key %} checked{% endif %}>
+    {%- if key == "image" %}{{ icon("image", 14) }}{% elif key == "video" %}{{ icon("video", 14) }}{% else %}{{ icon("layout-grid", 14) }}{% endif -%}
+    <span>{{ label }}</span>
+    {%- if counts is not none %}<span class="count-pill" id="media-count-{{ key or 'all' }}">{{ counts[key] }}</span>{% endif %}
+  </label>
+  {% endif %}
+  {% endfor %}
+</div>
+{%- endmacro %}
+
+{% macro total_label(total, counts, q, kind) -%}
+{%- set all = counts[""] if counts else total -%}
+{{ all }} {{ "archivo" if all == 1 else "archivos" }}{% if q or kind %} · {{ total }} {{ "coincide" if total == 1 else "coinciden" }}{% endif %}
+{%- endmacro %}

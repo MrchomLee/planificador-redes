@@ -1,0 +1,47 @@
+{#- YouTube channel chooser (the Google account manages several channels). Context: pending, channels
+    (providers.youtube.YouTubeChannel), testing, target_brand, current. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% block head %}<link rel="stylesheet" href="{{ static_url('css/settings.css') }}">{% endblock %}
+{% block body_class %}page-connections page-chooser{% endblock %}
+{% block content %}
+<div class="chooser">
+  <a class="chooser__back" href="/conexiones">{{ icon("arrow-left", 16) }}<span>Cuentas conectadas</span></a>
+  {% call ui.page_header("Elige tu canal de YouTube", subtitle="Tu cuenta de Google gestiona varios canales. Elige el que quieres usar en esta marca.") %}
+    {% if target_brand %}<span class="conn-brand conn-brand--static">{{ ui.brand_avatar(target_brand, 28) }}<span class="conn-brand__text"><span class="conn-brand__eyebrow">Marca</span><span class="conn-brand__name truncate">{{ target_brand.name }}</span></span></span>{% endif %}
+  {% endcall %}
+
+  {% if testing %}
+  {{ ui.info_alert("Tu app de Google está en modo «Prueba»: la autorización dura 7 días y tendrás que reconectar YouTube cada semana. Publícala («En producción») en Google Cloud para evitarlo.", tone="warning", title="Autorización de 7 días") }}
+  {% endif %}
+
+  <form class="chooser__form" method="post" action="/conexiones/youtube/seleccionar">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="pendiente" value="{{ pending }}">
+    <fieldset class="chooser__list" role="radiogroup" aria-label="Canales de YouTube">
+      <legend class="chooser__legend">{{ channels|length }} canales disponibles</legend>
+      {% for ch in channels %}
+      <label class="chooser-item" for="ch-{{ ch.id }}">
+        <input type="radio" id="ch-{{ ch.id }}" name="channel_id" value="{{ ch.id }}"{% if (current and current.external_id == ch.id) or (not current and loop.first) %} checked{% endif %}>
+        <span class="chooser-item__radio" aria-hidden="true"></span>
+        <span class="chooser-item__main">
+          <span class="chooser-item__who">
+            <span class="avatar-wrap">{{ ui.avatar(ch.title, "#8a91a3", src=ch.thumbnail_url, size=44) }}{{ net_icon("youtube", 18, title=False) }}</span>
+            <span class="chooser-item__names">
+              <span class="chooser-item__name">{{ ch.title }}{% if current and current.external_id == ch.id %} {{ ui.tag("Conectado ahora", "success", size="sm") }}{% endif %}</span>
+              <span class="chooser-item__meta">{{ ch.custom_url or ch.id }}
+                {%- if ch.subscriber_count is not none and not ch.hidden_subscriber_count %} · {{ ch.subscriber_count|number_es(compact=True) }} suscriptores{% endif %}
+                {%- if ch.video_count is not none %} · {{ ch.video_count|number_es(compact=True) }} vídeos{% endif %}</span>
+            </span>
+          </span>
+        </span>
+      </label>
+      {% endfor %}
+    </fieldset>
+    <div class="chooser__actions">
+      <a class="btn btn--ghost" href="/conexiones">Cancelar</a>
+      <button type="submit" class="btn btn--primary">{{ icon("plug", 16) }}<span>Conectar canal</span></button>
+    </div>
+  </form>
+</div>
+{% endblock %}

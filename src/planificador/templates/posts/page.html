@@ -1,0 +1,16 @@
+{#- Post detail as a full page (direct navigation, links from desktop notifications). -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% block title %}{{ post_title }} · Planificador{% endblock %}
+{% block content %}
+<nav class="pd-crumbs" aria-label="Ruta">
+  <a href="/planificacion">{{ icon("calendar-days", 15) }}<span>Planificación</span></a>
+  {{ icon("chevron-right", 14) }}
+  <a href="/planificacion/lista">Lista</a>
+  {{ icon("chevron-right", 14) }}
+  <span aria-current="page">Publicación</span>
+</nav>
+<div class="card post-page">
+  {% include "posts/_detail.html" %}
+</div>
+{% endblock %}

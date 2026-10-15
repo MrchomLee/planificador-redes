@@ -1,0 +1,25 @@
+{#- Brand create/edit as a full page (no-JS fallback / direct link). Context: form, brand, colors, tz_groups. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% import "brands/_macros.html" as bm with context %}
+{% block head %}<link rel="stylesheet" href="{{ static_url('css/settings.css') }}">{% endblock %}
+{% block scripts %}<script src="{{ static_url('js/settings.js') }}" defer></script>{% endblock %}
+{% block body_class %}page-brands{% endblock %}
+{% block content %}
+{% set url = "/marcas/" ~ brand.id if brand else "/marcas" %}
+<div class="brand-page">
+  <a class="chooser__back" href="/marcas">{{ icon("arrow-left", 16) }}<span>Marcas</span></a>
+  {{ ui.page_header("Editar marca" if brand else "Nueva marca") }}
+  <form class="card" method="post" action="{{ url }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="card__body">
+      {{ bm.brand_fields(form, colors, tz_groups, brand) }}
+      {% if not brand %}<div class="mt-4">{{ ui.check("activar", "Cambiar a esta marca al crearla", checked=True, id="ck-brand-activate") }}</div>{% endif %}
+    </div>
+    <footer class="card__footer">
+      <a class="btn btn--ghost" href="/marcas">Cancelar</a>
+      <button type="submit" class="btn btn--primary">{{ icon("check", 16) }}<span>{{ "Guardar cambios" if brand else "Crear marca" }}</span></button>
+    </footer>
+  </form>
+</div>
+{% endblock %}

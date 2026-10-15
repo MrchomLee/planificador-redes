@@ -1,0 +1,127 @@
+{#- Importar o exportar CSV (SPEC §14): import in three steps (template → fill in → upload and review) and export
+    of the brand's posts by date range. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+
+{% block head %}{% include "csv/_styles.html" %}{% endblock %}
+{% block body_class %}page-csv{% endblock %}
+
+{% block content %}
+<header class="cv-header">
+  <div>
+    <h1 class="cv-header__title">Importar o exportar CSV</h1>
+    <p class="cv-header__sub">Programa muchas publicaciones de golpe desde una hoja de cálculo, o descarga las de <strong>{{ brand.name }}</strong>.</p>
+  </div>
+</header>
+
+{% if result %}
+{% set total = result.scheduled + result.drafts %}
+{% set actions %}
+  <a class="btn btn--primary btn--sm" href="/planificacion/lista">{{ icon("list", 16) }}<span>Ver en la lista</span></a>
+  <a class="btn btn--secondary btn--sm" href="/planificacion">{{ icon("calendar-days", 16) }}<span>Ver en el calendario</span></a>
+{% endset %}
+{% if total %}
+{{ ui.info_alert(tone="success", cls="cv-result", actions=actions,
+     title=("Se ha importado 1 publicación" if total == 1 else "Se han importado " ~ total ~ " publicaciones"),
+     text=(result.scheduled ~ " programada" ~ ("" if result.scheduled == 1 else "s") ~ " y " ~ result.drafts ~ " guardada" ~ ("" if result.drafts == 1 else "s") ~ " como borrador" ~ ("" if result.drafts == 1 else "es") ~ "." ~ (" Revisa los borradores: tienen algún dato que corregir antes de programarlos." if result.drafts else "") ~ (" " ~ result.failed ~ " fila(s) no se pudieron importar." if result.failed else ""))) }}
+{% else %}
+{{ ui.info_alert(tone="warning", cls="cv-result", title="No se ha importado ninguna publicación",
+     text="Revisa el archivo y vuelve a intentarlo.") }}
+{% endif %}
+{% endif %}
+
+<div class="cv-grid">
+  <section class="card cv-card" aria-labelledby="cv-import-title">
+    <div class="cv-card__head">
+      <span class="cv-card__icon">{{ icon("file-up", 20) }}</span>
+      <div>
+        <h2 class="cv-card__title" id="cv-import-title">Importar publicaciones</h2>
+        <p class="cv-card__sub">Una fila por publicación. Nada se publica hasta que revises y confirmes.</p>
+      </div>
+    </div>
+    <div class="cv-card__body">
+      <ol class="cv-steps">
+        <li class="cv-step">
+          <span class="cv-step__num" aria-hidden="true">1</span>
+          <div>
+            <h3 class="cv-step__title">Descarga la plantilla</h3>
+            <p class="cv-step__text">Es un archivo CSV con las columnas preparadas y dos filas de ejemplo que puedes borrar o modificar.</p>
+            <div class="cv-step__actions">
+              <a class="btn btn--secondary" href="/importar/plantilla.csv" download>{{ icon("download", 18) }}<span>Descargar plantilla</span></a>
+            </div>
+          </div>
+        </li>
+        <li class="cv-step">
+          <span class="cv-step__num" aria-hidden="true">2</span>
+          <div>
+            <h3 class="cv-step__title">Rellénala con tus publicaciones</h3>
+            <p class="cv-step__text">Ábrela con Excel, LibreOffice o Google Sheets, escribe una publicación por fila y guárdala otra vez como
+              <strong>CSV</strong> (en Excel: «Archivo › Guardar como › CSV UTF-8»). Las fotos y vídeos tienen que estar antes en la
+              <a href="/biblioteca">Biblioteca</a>: en la columna <span class="cv-code">medios</span> escribe su nombre de archivo.</p>
+            <details class="cv-help">
+              <summary>{{ icon("table", 16) }}<span>¿Qué va en cada columna?</span>{{ icon("chevron-down", 16, cls="cv-chev") }}</summary>
+              <div class="table-wrap">
+                <table class="table table--compact">
+                  <thead><tr><th scope="col">Columna</th><th scope="col">Qué escribir</th><th scope="col">Ejemplo</th></tr></thead>
+                  <tbody>
+                    {% for col, text, example in column_help %}
+                    <tr><td><code>{{ col }}</code></td><td>{{ text }}</td><td><code>{{ example }}</code></td></tr>
+                    {% endfor %}
+                    {% if demo_mode %}
+                    <tr><td><code>demo</code></td><td>Solo en modo prueba (columna opcional que puedes añadir): «si» para programarla en la red Demo.</td><td><code>si</code></td></tr>
+                    {% endif %}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          </div>
+        </li>
+        <li class="cv-step">
+          <span class="cv-step__num" aria-hidden="true">3</span>
+          <div>
+            <h3 class="cv-step__title">Sube el archivo y revísalo</h3>
+            <p class="cv-step__text">Verás cada fila con sus avisos. Las filas correctas se programan; las que tengan errores se guardan como borrador para que las corrijas.</p>
+            <form class="stack gap-3 mt-3" action="/importar/revisar" method="post" enctype="multipart/form-data"
+                  x-data="{ name: '' }">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <label class="dropzone cv-drop" :class="{ 'is-over': over }" x-data="{ over: false }"
+                     @dragover="over = true" @dragleave="over = false" @drop="over = false">
+                <input type="file" name="archivo" accept=".csv,text/csv,text/plain" required
+                       @change="name = $event.target.files.length ? $event.target.files[0].name : ''">
+                <span class="cv-drop__icon">{{ icon("file-spreadsheet", 22) }}</span>
+                <span class="cv-drop__title" x-show="!name">Arrastra aquí tu CSV o haz clic para elegirlo</span>
+                <span class="cv-drop__file" x-show="name" x-cloak x-text="name"></span>
+                <span class="text-xs">Hasta {{ max_rows }} filas · separador «;» o «,»</span>
+              </label>
+              <div class="row row--wrap gap-3">
+                <button type="submit" class="btn btn--primary" :disabled="!name">{{ icon("scan-eye", 18) }}<span>Revisar el archivo</span></button>
+                <span class="cv-note">{{ icon("info", 14) }}<span>Las horas se interpretan en la zona horaria de la marca ({{ brand.timezone }}).</span></span>
+              </div>
+            </form>
+          </div>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="card cv-card" aria-labelledby="cv-export-title">
+    <div class="cv-card__head">
+      <span class="cv-card__icon cv-card__icon--alt">{{ icon("file-down", 20) }}</span>
+      <div>
+        <h2 class="cv-card__title" id="cv-export-title">Exportar publicaciones</h2>
+        <p class="cv-card__sub">Descarga un CSV con las publicaciones de esta marca.</p>
+      </div>
+    </div>
+    <div class="cv-card__body">
+      <form class="cv-export" action="/exportar.csv" method="get">
+        <div class="cv-export__dates">
+          {{ ui.form_field("desde", "Desde", type="date", value=export_from, required=True) }}
+          {{ ui.form_field("hasta", "Hasta", type="date", value=export_to, required=True) }}
+        </div>
+        <p class="cv-note">{{ icon("info", 14) }}<span>Incluye las publicaciones con fecha (no las ideas ni la papelera). Usa las mismas columnas que la plantilla, así que puedes editarlo y volver a importarlo.</span></p>
+        <button type="submit" class="btn btn--secondary">{{ icon("download", 18) }}<span>Descargar CSV</span></button>
+      </form>
+    </div>
+  </section>
+</div>
+{% endblock %}

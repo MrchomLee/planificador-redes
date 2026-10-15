@@ -211,7 +211,7 @@ TARGET_STATUS_LABELS: dict[str, str] = {
 
 ACCOUNT_STATUS_LABELS: dict[str, str] = {
     AccountStatus.CONNECTED: "Conectada",
-    AccountStatus.NEEDS_RECONNECT: "Requiere reconexión",
+    AccountStatus.NEEDS_RECONNECT: "Reconexión necesaria",
     AccountStatus.DISCONNECTED: "Desconectada",
 }
 
@@ -415,6 +415,8 @@ class Account(Base):
             token_expires_at=self.token_expires_at,
             refresh_expires_at=self.refresh_expires_at,
             meta=dict(self.meta or {}),
+            username=self.username,
+            scopes=list(self.scopes or []),
         )
 
     def __repr__(self) -> str:
