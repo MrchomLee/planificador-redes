@@ -143,6 +143,50 @@ Two white cards side by side:
   (thumbnail + caption + link "Ver en Instagram/Facebook") and the comment with replies, reply box, "Marcar como
   resuelto".
 
+## 5b. Composer — per-network configuration sections (screenshot `6.png`)
+
+File: `/tmp/claude-0/-home-user-ascendia/e91bf9d5-eee6-5506-a9c5-a075f2256e79/images/6.png` (FB REEL + IG REEL +
+TikTok selected, scrolled to the per-network sections). Each section is a bordered collapsible card: header with
+the network logo + **"Configuración de Instagram"** / **"Configuración de Tiktok"** + chevron ˄; the expanded
+header of the focused one has a light grey background. Content rows:
+
+- **Instagram**:
+  - "Colaboradores:" + a **dashed-border button** "🚶 Añadir colaborador" (opens an input to add @usernames, chips).
+  - "Audio del reel:" + dashed button "♫ Añadir audio" (ours: text field "Nombre del audio" → IG `audio_name`;
+    no music library).
+  - Toggle **"Mostrar reel en el feed"** (on by default; tooltip "Requiere conexión de Instagram vía Facebook").
+  - Toggle **"Contenido generado por IA (?)"** (implement only if the Graph API exposes a flag; otherwise omit).
+  - (Post format adds first comment via the editor's speech-bubble icon, location via the pin icon.)
+- **TikTok**:
+  - Label **"¿Quién puede ver la publicación?"** + full-width select (Metricool shows "Público"). Ours: options from
+    `creator_info.privacy_level_options` with Spanish labels (Público / Amigos mutuos / Seguidores / Solo yo);
+    **no default unless there is exactly one option** (unaudited apps → only "Solo yo", preselected, with a note).
+  - A row of three toggles: **"Permitir comentarios" · "Permitir dúo" · "Permitir pegar"** (Stitch). Disabled
+    (greyed) when the creator has them disabled; Dúo/Pegar hidden for photo posts.
+  - Divider; "Música del post:" + dashed "♫ Agregar música" (not available in the public API → omit).
+  - Divider; toggles **"Contenido generado por IA"** and **"Contenido comercial (i)"**; turning the latter on
+    reveals the two checkboxes "Tu marca" / "Contenido de marca" + TikTok's required notice and consent text.
+- Toggles are pill switches with the primary colour when on (Metricool uses a periwinkle blue `≈#5b6cf0`).
+- Small mint-green **"Nuevo"** pills next to new features (we don't need them).
+
+## 5c. Planificación — Listado (screenshot `7.webp`)
+
+File: `/tmp/claude-0/-home-user-ascendia/e91bf9d5-eee6-5506-a9c5-a075f2256e79/images/7.webp`.
+- Sub-tab "Listado" active (dark text + 2 px dark underline).
+- Toolbar: wide "Buscar" input · date-range button "📅 16 sep 2026 - 15 oct 2026" · funnel · kebab ·
+  **"Acciones en bloque ⌄"** (grey, disabled until rows are selected: Duplicar, Reprogramar, Mover a la papelera)
+  · "+ Crear publicación".
+- Table header (on the page background, not inside the card): **Fecha · Contenido de la publicación · Redes ·
+  Estado** (ours: + a checkbox column for bulk selection and a row actions menu).
+- Body in a white card; empty state: calendar icon inside a light-blue circle, bold **"Aún no tienes
+  publicaciones planificadas"**, muted "Usa el botón de arriba a la derecha para crear tu primera publicación".
+
+## 5d. Networks decision (user, 2026-10-15)
+
+The user only needs **Facebook, Instagram, TikTok — and wants YouTube added** (see
+`docs/research/06-youtube-api.md`). No LinkedIn/X/Pinterest/etc. The "+" in the composer network row and the
+analytics sidebar list exactly these four (plus Demo when demo mode is on).
+
 ## 6. Global visual cues to reproduce (with our colours)
 
 - Rounded everything (buttons 10–12 px, cards 16 px, pills fully rounded), 1 px light borders, soft shadows.
