@@ -588,6 +588,15 @@ Import flow: upload → preview table with per-row validation (errors highlighte
 
 ## 15. UI / design system
 
+**Layout fidelity: `docs/research/05-metricool-capturas.md` (real screenshots of Metricool from the user) is
+binding for layout and flow** — planner sub-tabs + timezone indicator + one-row toolbar + week grid with
+best-times shading; the composer as a full-screen overlay with editor card (network logo row with format chips,
+"Editar por red social", text box with media thumbnails, icon toolbar, counters, collapsible "Configuración
+global" with the Autopublicar toggle and per-network config sections, error panel, footer with Cancelar /
+date-time / split "Programar") and preview card (network tabs, mobile/desktop toggle, realistic mocks, disclaimer);
+analytics with left network sidebar, COMUNIDAD/CUENTA/POSTS tabs, period pickers and coloured KPI tiles; inbox
+with two panels. Where 05 and the text below disagree on layout, 05 wins; colours/branding stay ours.
+
 Own identity — never use Metricool's name, logo, colors or copy. App name in UI: **"Planificador"** with a
 small original logo (inline SVG: rounded square with a calendar/orbit glyph).
 
