@@ -16,7 +16,8 @@ A **local, single-user** web app that runs on the user's Windows PC (also Linux/
 `http://localhost:8765` and replicates the core of Metricool with our own name and look:
 
 - **Marcas** (brands): containers of connected accounts (one account per network per brand).
-- **Cuentas conectadas**: Facebook Page, Instagram professional account (via Facebook Login), TikTok.
+- **Cuentas conectadas**: Facebook Page, Instagram professional account (via Facebook Login), TikTok,
+  **YouTube** channel (added at the user's request; research in `docs/research/06-youtube-api.md`).
   Plus a **Demo** network (fake provider) usable when `modo prueba` is on.
 - **Planificación**: calendar (Mes / Semana / Día / Lista), drag & drop rescheduling, filters, search,
   "Mejores horas" shading, **Ideas** board (undated posts), **Papelera** (trash, 45 days).
@@ -141,7 +142,7 @@ type decorator that stores UTC and returns aware UTC datetimes)
 Enums are `StrEnum`s stored as strings.
 
 ```
-Network: facebook | instagram | tiktok | demo
+Network: facebook | instagram | tiktok | youtube | demo
 AccountStatus: connected | needs_reconnect | disconnected
 TargetStatus: draft | scheduled | publishing | published | manual_pending | manual_done |
               sent_to_app | error | missed | unknown | cancelled
@@ -168,7 +169,8 @@ Tables:
   secret=False)`, `get_secret(db, key)`.
 - `brands`: `id`, `name`, `color` (hex), `timezone` (IANA, default from settings, default `Europe/Madrid`),
   `created_at`, `archived_at`.
-- `accounts`: `id`, `brand_id` FK, `network`, `external_id` (page id / ig user id / tiktok open_id / demo id),
+- `accounts`: `id`, `brand_id` FK, `network`, `external_id` (page id / ig user id / tiktok open_id / youtube
+  channel id / demo id),
   `name`, `username`, `avatar_path` (local cached file, nullable), `account_type` (`page`, `business`,
   `creator`, `personal`, `demo`), `status`, `access_token_enc`, `refresh_token_enc`, `token_expires_at`,
   `refresh_expires_at`, `scopes` (JSON list), `meta` (JSON: e.g. IG `page_id`; TikTok `creator_info` cache;
@@ -393,11 +395,33 @@ def query_creator_info(account: AccountCreds, settings, http) -> CreatorInfo
 def revoke(settings, http, access_token) -> None
 ```
 
+`providers/youtube.py` (owned by the YouTube agent) — details in `docs/research/06-youtube-api.md` §1–§2, §14:
+
+```python
+SCOPES_YT = ["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube.readonly",
+             "https://www.googleapis.com/auth/youtube.force-ssl", "https://www.googleapis.com/auth/yt-analytics.readonly"]
+def redirect_uri(settings) -> str   # f"{settings.base_url}/conexiones/callback/google"
+def new_pkce_pair() -> tuple[str, str]   # S256, base64url without padding
+def build_login_url(settings, redirect_uri, state, code_challenge) -> str  # access_type=offline, prompt=consent select_account
+def exchange_code(settings, http, code, redirect_uri, code_verifier) -> GoogleTokens
+@dataclass class GoogleTokens: access_token, expires_at, refresh_token, refresh_expires_at (from
+    refresh_token_expires_in when present → "Testing" warning), scopes: list[str]
+@dataclass class YouTubeChannel: id, title, custom_url, thumbnail_url, long_uploads_status, ...
+def list_my_channels(settings, http, access_token) -> list[YouTubeChannel]
+def revoke(settings, http, token) -> None
+def run_lock_test(account, settings, http, clock) -> Literal["unlocked", "locked", "error"]  # §3.7 of report 06
+```
+
+`ProviderSettings` gains `google_client_id`, `google_client_secret` (secret), and settings keys
+`youtube_publish_mode` per account in `accounts.meta` (`"assisted"` default | `"api"`), `youtube_lock_status`
+(`unknown` | `unlocked` | `locked`).
+
 Connection routes (`routes/connections.py`, owned by the Connections agent) orchestrate: create
 `oauth_states` row → redirect → callback validates state (and expiry) → exchange → (Meta) page chooser page
 listing pages with their linked IG accounts and warnings (missing `CREATE_CONTENT`, IG not business) → create or
 update `accounts` rows for the active brand (encrypt tokens via crypto). TikTok: callback → exchange →
-`get_user_info` → create/update account. Disconnect: mark `disconnected`, wipe tokens (TikTok: call `revoke`).
+`get_user_info` → create/update account. YouTube: callback → exchange → `list_my_channels` (chooser if >1) →
+create/update account; warn when `refresh_expires_at` is ~7 days (project in "Testing"). Disconnect: mark `disconnected`, wipe tokens (TikTok: call `revoke`).
 
 ---
 
@@ -430,6 +454,16 @@ Formats and options (option keys are part of the contract; providers read them f
   (bool), `brand_organic_toggle`, `brand_content_toggle` (commercial disclosure; branded content cannot be
   `SELF_ONLY`), `video_cover_timestamp_ms`, `consent` (bool, must be true for direct post — the UI shows TikTok's
   required consent sentence). Text: caption ≤ 2200 chars; newlines allowed but warn they may be flattened.
+- **youtube**: `video` (1 video), `short` (1 video ≤ 180 s, vertical/square). Options per report 06 §13.2:
+  `title` (required ≤100, no `<`/`>`, prefill first line of text), `privacy_status` (`public`|`unlisted`|`private`),
+  `native_schedule` (publishAt), `category_id` (default "22"), `tags` (list, ≤500 chars total),
+  `made_for_kids` (REQUIRED, no default), `synthetic_media` (default false), `paid_promotion`,
+  `notify_subscribers` (default true), `thumbnail_media_id`, `playlist_id`, `first_comment`, `language`,
+  `embeddable`, `license`. Description = target text (≤5000 UTF-8 bytes, no `<`/`>`).
+  **Publishing mode**: while the account's `youtube_lock_status != "unlocked"`, YouTube targets default to
+  `auto_publish = False` (Publicación asistida: copy title/description/tags, open YouTube Studio upload, then link the
+  video by title/URL); API upload is opt-in with a clear warning that it may stay private; the Connections card
+  offers the "Prueba de bloqueo" (report 06 §3.7) to unlock automatic publishing.
 - **demo**: `post` (anything). Options: see demo provider.
 
 Validation also emits **warnings** for: HEVC/HDR video (may be rejected), very large files, missing text,
@@ -569,9 +603,10 @@ Post metric keys: `views`, `reach`, `likes`, `comments`, `shares`, `saves`, `int
 
 ## 13. Comments inbox (`inbox.py`, `/comentarios`)
 
-Poll FB/IG comments for posts published in the last 30 days (both ours and recent account posts) every 15 min
+Poll FB/IG/YouTube comments for posts published in the last 30 days (both ours and recent account posts) every 15 min
 and on demand. List grouped by post with filters (red, no leídos, sin responder), reply box (htmx), mark as
-read. Replies via provider `reply_comment`. TikTok: not supported (explain in UI).
+read. Replies via provider `reply_comment`. TikTok: not supported (explain in UI). YouTube: `commentThreads.list` +
+`comments.insert` (report 06 §11).
 
 ---
 
@@ -579,8 +614,9 @@ read. Replies via provider `reply_comment`. TikTok: not supported (explain in UI
 
 Template download (`plantilla.csv`, UTF-8 with BOM for Excel, `;` separator autodetect on import) with columns:
 `fecha` (YYYY-MM-DD), `hora` (HH:MM, brand tz), `texto`, `facebook` (si/no), `instagram` (si/no),
-`tiktok` (si/no), `formato_facebook`, `formato_instagram`, `formato_tiktok`, `medios` (file names in the
-library separated by `|`), `privacidad_tiktok`, `primer_comentario`, `autopublicar` (si/no).
+`tiktok` (si/no), `youtube` (si/no), `formato_facebook`, `formato_instagram`, `formato_tiktok`, `medios` (file names in the
+library separated by `|`), `privacidad_tiktok`, `primer_comentario`, `autopublicar` (si/no), `formato_youtube`, `titulo_youtube`,
+`privacidad_youtube`, `ninos_youtube`.
 Import flow: upload → preview table with per-row validation (errors highlighted) → confirm creates posts
 (status `draft` if errors, else `scheduled`). Export: `/exportar.csv` of posts in a date range.
 
@@ -608,7 +644,7 @@ small original logo (inline SVG: rounded square with a calendar/orbit glyph).
 - CSS tokens in `:root` (light) and dark under `@media (prefers-color-scheme: dark)`: `--bg`, `--surface`,
   `--surface-2`, `--border`, `--text`, `--text-muted`, `--primary` (#5b4cf0), `--primary-contrast`,
   `--success`, `--warning`, `--danger`, `--info`, network colors `--fb` (#1877f2), `--ig` (#e1306c),
-  `--tt` (#111 / dark: #f5f5f5), `--demo` (#8b5cf6). System font stack. 8 px spacing scale, radius 10 px,
+  `--tt` (#111 / dark: #f5f5f5), `--yt` (#ff0033), `--demo` (#8b5cf6). System font stack. 8 px spacing scale, radius 10 px,
   subtle shadows. Components: `.btn` (primary/secondary/ghost/danger, sizes), `.card`, `.badge` (status colors),
   `.chip`, `.tabs`, `.modal`, `.drawer` (right side panel for post detail), `.form-field`, `.switch`,
   `.dropdown`, `.table`, `.empty-state`, `.toast`, `.avatar`, `.net-icon` (network logo in colored circle).
