@@ -1,0 +1,348 @@
+{#-
+  Planificador UI macro library.
+
+  Import it WITH CONTEXT so date filters use the active brand's timezone:
+      {% import "components/ui.html" as ui with context %}
+
+  Macros: button, icon_button, badge, tag, status_dot, card, callout, empty_state, page_header, form_field,
+  switch, check, tabs, tab_panel, modal, drawer, avatar, brand_avatar, account_avatar, net_badge, kpi_card,
+  dropdown, dropdown_item, spinner, reltime, kbd.
+
+  Extra HTML attributes are passed as a dict: attrs={"hx-post": "/x", "hx-target": "#y", "data-foo": "1"}.
+  Macros that wrap content use {% call %}: {% call ui.card("Título") %}…{% endcall %}.
+-#}
+
+{# ---------------------------------------------------------------- buttons #}
+{% macro button(label, href=None, variant="secondary", size="md", icon_name=None, icon_right=None, type="button",
+                attrs={}, cls="", disabled=False, icon_only=False, id=None, title=None) -%}
+{%- set classes = "btn btn--" ~ variant ~ (" btn--" ~ size if size != "md" else "") ~ (" btn--icon" if icon_only else "") ~ (" " ~ cls if cls else "") -%}
+{%- set isz = 16 if size == "sm" else 18 -%}
+{%- if href and not disabled -%}
+<a href="{{ href }}" class="{{ classes }}"{% if id %} id="{{ id }}"{% endif %}{% if title or icon_only %} title="{{ title or label }}"{% endif %}{{ attrs|xmlattr }}>
+{%- else -%}
+<button type="{{ type }}" class="{{ classes }}"{% if id %} id="{{ id }}"{% endif %}{% if title or icon_only %} title="{{ title or label }}"{% endif %}{% if disabled %} disabled{% endif %}{{ attrs|xmlattr }}>
+{%- endif -%}
+{%- if icon_name %}{{ icon(icon_name, isz) }}{% endif -%}
+{%- if icon_only %}<span class="visually-hidden">{{ label }}</span>{% else %}<span>{{ label }}</span>{% endif -%}
+{%- if icon_right %}{{ icon(icon_right, 16) }}{% endif -%}
+{%- if href and not disabled %}</a>{% else %}</button>{% endif -%}
+{%- endmacro %}
+
+{% macro icon_button(label, icon_name, href=None, attrs={}, cls="", size=None) -%}
+{%- set classes = "icon-btn" ~ (" icon-btn--sm" if size == "sm" else "") ~ (" " ~ cls if cls else "") -%}
+{%- if href -%}
+<a href="{{ href }}" class="{{ classes }}" aria-label="{{ label }}" title="{{ label }}"{{ attrs|xmlattr }}>{{ icon(icon_name, 16 if size == "sm" else 18) }}</a>
+{%- else -%}
+<button type="button" class="{{ classes }}" aria-label="{{ label }}" title="{{ label }}"{{ attrs|xmlattr }}>{{ icon(icon_name, 16 if size == "sm" else 18) }}</button>
+{%- endif -%}
+{%- endmacro %}
+
+{# ---------------------------------------------------------------- badges #}
+{# Status badge for a TargetStatus (or derived post status). #}
+{% macro badge(status, label=None, size=None, show_icon=True, title=None, cls="") -%}
+{%- set key = status|string -%}
+<span class="badge st-{{ key }}{% if size %} badge--{{ size }}{% endif %}{% if cls %} {{ cls }}{% endif %}"{% if title %} title="{{ title }}"{% endif %}>
+{%- if show_icon and STATUS_ICONS.get(key) %}{{ icon(STATUS_ICONS[key], 13) }}{% endif -%}
+<span>{{ label or status_label(key) }}</span></span>
+{%- endmacro %}
+
+{# Generic badge with a tone: primary | success | warning | danger | info | muted | demo #}
+{% macro tag(text, tone="muted", icon_name=None, dot=False, size=None, variant=None, title=None) -%}
+<span class="badge tone-{{ tone }}{% if dot %} badge--dot{% endif %}{% if size %} badge--{{ size }}{% endif %}{% if variant %} badge--{{ variant }}{% endif %}"{% if title %} title="{{ title }}"{% endif %}>
+{%- if icon_name %}{{ icon(icon_name, 13) }}{% endif %}<span>{{ text }}</span></span>
+{%- endmacro %}
+
+{% macro status_dot(status, title=None) -%}
+<span class="dot st-{{ status|string }}" title="{{ title or status_label(status) }}" role="img" aria-label="{{ title or status_label(status) }}"></span>
+{%- endmacro %}
+
+{# ---------------------------------------------------------------- cards #}
+{# actions / footer: Markup built with {% set x %}…{% endset %} #}
+{% macro card(title=None, subtitle=None, actions=None, footer=None, cls="", body_cls="", id=None, flush=False,
+              header_border=False, tag="section") -%}
+<{{ tag }} class="card{% if cls %} {{ cls }}{% endif %}"{% if id %} id="{{ id }}"{% endif %}>
+  {% if title or actions %}
+  <header class="card__header{% if header_border %} card__header--bordered{% endif %}">
+    <div class="grow">
+      {% if title %}<h2 class="card__title">{{ title }}</h2>{% endif %}
+      {% if subtitle %}<p class="card__subtitle">{{ subtitle }}</p>{% endif %}
+    </div>
+    {% if actions %}<div class="card__actions">{{ actions }}</div>{% endif %}
+  </header>
+  {% endif %}
+  {% if caller is defined %}
+  <div class="{% if not flush %}card__body{% endif %}{% if body_cls %} {{ body_cls }}{% endif %}">{{ caller() }}</div>
+  {% endif %}
+  {% if footer %}<footer class="card__footer">{{ footer }}</footer>{% endif %}
+</{{ tag }}>
+{%- endmacro %}
+
+{% macro callout(text=None, tone="info", title=None, icon_name=None, cls="") -%}
+{%- set default_icons = {"info": "info", "success": "circle-check", "warning": "triangle-alert", "danger": "circle-alert", "primary": "sparkles", "muted": "info", "demo": "flask-conical"} -%}
+<div class="callout tone-{{ tone }}{% if cls %} {{ cls }}{% endif %}" role="{{ 'alert' if tone == 'danger' else 'note' }}">
+  {{ icon(icon_name or default_icons.get(tone, "info"), 18) }}
+  <div class="callout__body">
+    {% if title %}<div class="callout__title">{{ title }}</div>{% endif %}
+    {% if text %}<div>{{ text }}</div>{% endif %}
+    {% if caller is defined %}{{ caller() }}{% endif %}
+  </div>
+</div>
+{%- endmacro %}
+
+{% macro empty_state(title, text=None, icon_name="inbox", compact=False, cls="") -%}
+<div class="empty-state{% if compact %} empty-state--compact{% endif %}{% if cls %} {{ cls }}{% endif %}">
+  <div class="empty-state__icon">{{ icon(icon_name, 22 if compact else 28, stroke=1.75) }}</div>
+  <h3 class="empty-state__title">{{ title }}</h3>
+  {% if text %}<p class="empty-state__text">{{ text }}</p>{% endif %}
+  {% if caller is defined %}<div class="empty-state__actions">{{ caller() }}</div>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro page_header(title, subtitle=None, eyebrow=None, cls="") -%}
+<header class="page-header{% if cls %} {{ cls }}{% endif %}">
+  <div class="page-header__titles">
+    {% if eyebrow %}<div class="eyebrow">{{ eyebrow }}</div>{% endif %}
+    <h1 class="page-header__title">{{ title }}</h1>
+    {% if subtitle %}<p class="page-header__subtitle">{{ subtitle }}</p>{% endif %}
+  </div>
+  {% if caller is defined %}<div class="page-header__actions">{{ caller() }}</div>{% endif %}
+</header>
+{%- endmacro %}
+
+{# ---------------------------------------------------------------- forms #}
+{#
+  form_field(name, label, type="text"|"textarea"|"select"|any input type, ...)
+  options for select: list of (value, label) pairs or dicts {"value", "label"}.
+  Custom control: {% call(fid) ui.form_field("x", "Etiqueta") %}<input id="{{ fid }}" …>{% endcall %}
+#}
+{% macro form_field(name, label, type="text", value=None, help=None, error=None, required=False, placeholder=None,
+                    attrs={}, id=None, options=None, rows=4, optional=False, cls="", input_cls="", maxlength=None,
+                    autocomplete=None, disabled=False) -%}
+{%- set fid = id or ("f-" ~ name|replace(".", "-")|replace("[", "-")|replace("]", "")) -%}
+{%- set described = ((fid ~ "-help ") if help else "") ~ ((fid ~ "-error") if error else "") -%}
+<div class="form-field{% if cls %} {{ cls }}{% endif %}">
+  <label class="form-field__label" for="{{ fid }}">{{ label }}
+    {%- if required %} <span class="req" aria-hidden="true">*</span>{% elif optional %} <span class="optional">(opcional)</span>{% endif %}</label>
+  {% if caller is defined %}
+  {{ caller(fid) }}
+  {% elif type == "textarea" %}
+  <textarea class="textarea{% if input_cls %} {{ input_cls }}{% endif %}" id="{{ fid }}" name="{{ name }}" rows="{{ rows }}"
+    {%- if placeholder %} placeholder="{{ placeholder }}"{% endif %}{% if required %} required{% endif %}{% if disabled %} disabled{% endif %}
+    {%- if maxlength %} maxlength="{{ maxlength }}"{% endif %}{% if error %} aria-invalid="true"{% endif %}
+    {%- if described %} aria-describedby="{{ described|trim }}"{% endif %}{{ attrs|xmlattr }}>{{ value if value is not none else "" }}</textarea>
+  {% elif type == "select" %}
+  <select class="select{% if input_cls %} {{ input_cls }}{% endif %}" id="{{ fid }}" name="{{ name }}"
+    {%- if required %} required{% endif %}{% if disabled %} disabled{% endif %}{% if error %} aria-invalid="true"{% endif %}
+    {%- if described %} aria-describedby="{{ described|trim }}"{% endif %}{{ attrs|xmlattr }}>
+    {% if placeholder %}<option value="">{{ placeholder }}</option>{% endif %}
+    {% for opt in options or [] %}
+    {% set ov = opt.value if opt is mapping else opt[0] %}{% set ol = opt.label if opt is mapping else opt[1] %}
+    <option value="{{ ov }}"{% if value is not none and ov|string == value|string %} selected{% endif %}>{{ ol }}</option>
+    {% endfor %}
+  </select>
+  {% else %}
+  <input class="input{% if input_cls %} {{ input_cls }}{% endif %}" id="{{ fid }}" name="{{ name }}" type="{{ type }}"
+    {%- if value is not none %} value="{{ value }}"{% endif %}{% if placeholder %} placeholder="{{ placeholder }}"{% endif %}
+    {%- if required %} required{% endif %}{% if disabled %} disabled{% endif %}{% if maxlength %} maxlength="{{ maxlength }}"{% endif %}
+    {%- if autocomplete %} autocomplete="{{ autocomplete }}"{% endif %}{% if error %} aria-invalid="true"{% endif %}
+    {%- if described %} aria-describedby="{{ described|trim }}"{% endif %}{{ attrs|xmlattr }}>
+  {% endif %}
+  {% if help %}<p class="form-field__help" id="{{ fid }}-help">{{ help }}</p>{% endif %}
+  {% if error %}<p class="form-field__error" id="{{ fid }}-error">{{ icon("circle-alert", 14) }}<span>{{ error }}</span></p>{% endif %}
+</div>
+{%- endmacro %}
+
+{# Toggle switch. off_value: also submit this value when unchecked (hidden input placed before). #}
+{% macro switch(name, label, checked=False, help=None, value="1", attrs={}, id=None, disabled=False, off_value=None, cls="") -%}
+{%- set fid = id or ("sw-" ~ name|replace(".", "-")) -%}
+{% if off_value is not none %}<input type="hidden" name="{{ name }}" value="{{ off_value }}">{% endif %}
+<label class="switch{% if cls %} {{ cls }}{% endif %}" for="{{ fid }}">
+  <input type="checkbox" role="switch" id="{{ fid }}" name="{{ name }}" value="{{ value }}"{% if checked %} checked{% endif %}{% if disabled %} disabled{% endif %}{{ attrs|xmlattr }}>
+  <span class="switch__track" aria-hidden="true"></span>
+  <span class="switch__text"><span class="switch__label">{{ label }}</span>{% if help %}<span class="switch__help">{{ help }}</span>{% endif %}</span>
+</label>
+{%- endmacro %}
+
+{% macro check(name, label, checked=False, help=None, value="1", attrs={}, id=None, disabled=False, type="checkbox") -%}
+{%- set fid = id or ("ck-" ~ name|replace(".", "-") ~ "-" ~ value) -%}
+<label class="check" for="{{ fid }}">
+  <input type="{{ type }}" id="{{ fid }}" name="{{ name }}" value="{{ value }}"{% if checked %} checked{% endif %}{% if disabled %} disabled{% endif %}{{ attrs|xmlattr }}>
+  <span><span class="check__label">{{ label }}</span>{% if help %}<span class="check__help">{{ help }}</span>{% endif %}</span>
+</label>
+{%- endmacro %}
+
+{# ---------------------------------------------------------------- tabs
+  items: list of dicts {key, label, href?, icon?, icon_html?, count?, error?} or tuples (key, label, href[, icon]).
+  mode="link"  : server-side tabs (anchors, aria-current).
+  mode="alpine": client tabs; wrap tabs + panels in <div x-data="tabs('key')"> and use tab_panel(). #}
+{% macro tabs(items, active=None, mode="link", label="Secciones", cls="", id_prefix="tab") -%}
+{% if mode == "alpine" %}
+<div class="tabs{% if cls %} {{ cls }}{% endif %}" role="tablist" aria-label="{{ label }}" @keydown="onKeydown($event)">
+{% else %}
+<nav class="tabs{% if cls %} {{ cls }}{% endif %}" aria-label="{{ label }}">
+{% endif %}
+  {% for it in items %}
+  {% set key = it.key if it is mapping else it[0] %}
+  {% set text = it.label if it is mapping else it[1] %}
+  {% set href = (it.href if it.href is defined else None) if it is mapping else (it[2] if it|length > 2 else None) %}
+  {% set ic = (it.icon if it.icon is defined else None) if it is mapping else (it[3] if it|length > 3 else None) %}
+  {% set ichtml = it.icon_html if (it is mapping and it.icon_html is defined) else None %}
+  {% set count = it.count if (it is mapping and it.count is defined) else None %}
+  {% set err = it.error if (it is mapping and it.error is defined) else False %}
+  {% if mode == "alpine" %}
+  <button type="button" class="tab{% if err %} has-error{% endif %}" role="tab" id="{{ id_prefix }}-{{ key }}" aria-controls="{{ id_prefix }}-panel-{{ key }}"
+          :aria-selected="is('{{ key }}') ? 'true' : 'false'" :tabindex="is('{{ key }}') ? 0 : -1" @click="select('{{ key }}')">
+    {%- if ichtml %}{{ ichtml }}{% elif ic %}{{ icon(ic, 16) }}{% endif %}<span>{{ text }}</span>
+    {%- if count is not none %}<span class="count-pill">{{ count }}</span>{% endif %}
+    {%- if err %}{{ icon("circle-alert", 14, label="Con errores") }}{% endif %}</button>
+  {% else %}
+  <a class="tab{% if key == active %} is-active{% endif %}{% if err %} has-error{% endif %}" href="{{ href or '#' }}"{% if key == active %} aria-current="page"{% endif %}>
+    {%- if ichtml %}{{ ichtml }}{% elif ic %}{{ icon(ic, 16) }}{% endif %}<span>{{ text }}</span>
+    {%- if count is not none %}<span class="count-pill">{{ count }}</span>{% endif %}</a>
+  {% endif %}
+  {% endfor %}
+{% if mode == "alpine" %}</div>{% else %}</nav>{% endif %}
+{%- endmacro %}
+
+{# active=True on the initially selected panel avoids a flash before Alpine starts. #}
+{% macro tab_panel(key, active=False, cls="", id_prefix="tab") -%}
+<div{% if cls %} class="{{ cls }}"{% endif %} role="tabpanel" id="{{ id_prefix }}-panel-{{ key }}" aria-labelledby="{{ id_prefix }}-{{ key }}" x-show="is('{{ key }}')"{% if not active %} x-cloak{% endif %}>{{ caller() }}</div>
+{%- endmacro %}
+
+{# ---------------------------------------------------------------- modal & drawer
+  Returned by htmx into #modal-root / #drawer-root (they open automatically).
+  footer: Markup ({% set footer %}…{% endset %}). form: dict of attributes; wraps header/body/footer in a <form>
+  (e.g. form={"hx-post": "/x", "hx-target": "#modal-root"}). size: sm | md | lg | xl | full. #}
+{% macro modal(title, subtitle=None, size="md", id="modal", footer=None, icon_html=None, static=False, body_cls="", form=None) -%}
+<div class="modal-backdrop"{% if static %} data-static{% endif %}>
+  <div class="modal modal--{{ size }}" id="{{ id }}" role="dialog" aria-modal="true" aria-labelledby="{{ id }}-title" tabindex="-1">
+    {% if form %}<form{{ form|xmlattr }}>{% endif %}
+    <header class="modal__header">
+      <div class="modal__titles">
+        {% if icon_html %}{{ icon_html }}{% endif %}
+        <div><h2 class="modal__title" id="{{ id }}-title">{{ title }}</h2>{% if subtitle %}<p class="modal__subtitle">{{ subtitle }}</p>{% endif %}</div>
+      </div>
+      <button type="button" class="icon-btn" data-close aria-label="Cerrar" title="Cerrar (Esc)">{{ icon("x", 18) }}</button>
+    </header>
+    <div class="modal__body{% if body_cls %} {{ body_cls }}{% endif %}">{{ caller() }}</div>
+    {% if footer %}<footer class="modal__footer">{{ footer }}</footer>{% endif %}
+    {% if form %}</form>{% endif %}
+  </div>
+</div>
+{%- endmacro %}
+
+{% macro drawer(title, subtitle=None, size="md", id="drawer", footer=None, icon_html=None, body_cls="", form=None) -%}
+<div class="drawer-backdrop">
+  <aside class="drawer drawer--{{ size }}" id="{{ id }}" role="dialog" aria-modal="true" aria-labelledby="{{ id }}-title" tabindex="-1">
+    {% if form %}<form{{ form|xmlattr }}>{% endif %}
+    <header class="drawer__header">
+      <div class="drawer__titles">
+        {% if icon_html %}{{ icon_html }}{% endif %}
+        <div><h2 class="drawer__title" id="{{ id }}-title">{{ title }}</h2>{% if subtitle %}<p class="drawer__subtitle">{{ subtitle }}</p>{% endif %}</div>
+      </div>
+      <button type="button" class="icon-btn" data-close aria-label="Cerrar" title="Cerrar (Esc)">{{ icon("x", 18) }}</button>
+    </header>
+    <div class="drawer__body{% if body_cls %} {{ body_cls }}{% endif %}">{{ caller() }}</div>
+    {% if footer %}<footer class="drawer__footer">{{ footer }}</footer>{% endif %}
+    {% if form %}</form>{% endif %}
+  </aside>
+</div>
+{%- endmacro %}
+
+{# ---------------------------------------------------------------- avatars & networks #}
+{% macro avatar(name, color=None, src=None, size=32, shape="circle", cls="", title=None) -%}
+{%- set words = (name or "?")|string|trim|default("?", true) -%}
+{%- set parts = words.split() -%}
+{%- set initials = (parts[0][:1] ~ (parts[1][:1] if parts|length > 1 else (parts[0][1:2] if parts[0]|length > 1 else "")))|upper -%}
+<span class="avatar{% if shape == 'rounded' %} avatar--rounded{% endif %}{% if not color and not src %} avatar--empty{% endif %}{% if cls %} {{ cls }}{% endif %}"
+      style="--avatar-size:{{ size|int }}px{% if color %};--avatar-bg:{{ color|css_color }}{% endif %}" title="{{ title or name }}" aria-hidden="true">
+  {%- if src %}<img src="{{ src }}" alt="" loading="lazy">{% else %}{{ initials }}{% endif -%}
+</span>
+{%- endmacro %}
+
+{% macro brand_avatar(brand, size=24) -%}
+{{ avatar(brand.name if brand else "?", (brand.color if brand else None) or "#8a91a3", size=size, shape="rounded") }}
+{%- endmacro %}
+
+{# Account avatar with the network logo overlaid. src: URL of the cached avatar (optional). #}
+{% macro account_avatar(account, src=None, size=32) -%}
+<span class="avatar-wrap" title="{{ account.name }} · {{ network_label(account.network) }}">
+  {{ avatar(account.name, "#8a91a3", src=src, size=size) }}
+  {{ net_icon(account.network, (size * 0.5)|int, title=False) }}
+</span>
+{%- endmacro %}
+
+{% macro net_badge(network, label=None, size=20, cls="") -%}
+<span class="net-badge{% if cls %} {{ cls }}{% endif %}">{{ net_icon(network, size, title=False) }}<span>{{ label or network_label(network) }}</span></span>
+{%- endmacro %}
+
+{# ---------------------------------------------------------------- KPI card
+  value: number (None -> "—"); delta: % change vs previous period (e.g. 12.5 or -3.2; None hides it).
+  fmt: "number" (auto-compact 12,3 mil) | "pct". positive_is_good=False for metrics where down is good. #}
+{% macro kpi_card(label, value, delta=None, period="vs. periodo anterior", icon_name=None, network=None, help=None,
+                  compact=True, decimals=0, positive_is_good=True, fmt="number", suffix=None, cls="") -%}
+<div class="card kpi{% if cls %} {{ cls }}{% endif %}">
+  <div class="kpi__head">
+    {% if network %}{{ net_icon(network, 18, title=False) }}{% elif icon_name %}{{ icon(icon_name, 16) }}{% endif %}
+    <span>{{ label }}</span>
+    {% if help %}<span class="kpi__help" title="{{ help }}">{{ icon("info", 14, label=help) }}</span>{% endif %}
+  </div>
+  <div class="kpi__value"{% if value is not none and fmt != "pct" %} title="{{ value|number_es(decimals) }}"{% endif %}>
+    {%- if value is none %}—{% elif fmt == "pct" %}{{ value|pct(decimals or 1) }}{% else %}{{ value|number_es(decimals, compact) }}{% endif -%}
+    {%- if suffix %}<small>{{ suffix }}</small>{% endif -%}
+  </div>
+  {% if delta is not none %}
+  {% set dir = "up" if delta > 0 else ("down" if delta < 0 else "flat") %}
+  {% set good = (dir == "up" and positive_is_good) or (dir == "down" and not positive_is_good) %}
+  <div class="kpi__foot">
+    <span class="delta delta--{{ 'flat' if dir == 'flat' else ('good' if good else 'bad') }}">
+      {{- icon("arrow-up-right" if dir == "up" else ("arrow-down-right" if dir == "down" else "minus"), 12) -}}
+      {{ delta|pct(1, signed=True) }}<span class="visually-hidden"> {{ "más" if dir == "up" else ("menos" if dir == "down" else "igual") }}</span></span>
+    <span>{{ period }}</span>
+  </div>
+  {% elif period %}
+  <div class="kpi__foot"><span class="delta delta--flat">—</span><span>{{ period }}</span></div>
+  {% endif %}
+</div>
+{%- endmacro %}
+
+{# ---------------------------------------------------------------- dropdown
+  {% call ui.dropdown("Acciones", icon_name="ellipsis") %}{{ ui.dropdown_item("Editar", href="/x") }}{% endcall %} #}
+{% macro dropdown(label, icon_name=None, align="start", variant="secondary", size="md", icon_only=False, cls="",
+                  menu_cls="", chevron=True) -%}
+<div class="dropdown{% if cls %} {{ cls }}{% endif %}" x-data="dropdown" @keydown="onKeydown($event)" @click.outside="close()">
+  <button type="button" class="btn btn--{{ variant }}{% if size != 'md' %} btn--{{ size }}{% endif %}{% if icon_only %} btn--icon{% endif %}"
+          x-ref="button" @click="toggle()" :aria-expanded="open ? 'true' : 'false'" aria-haspopup="menu"{% if icon_only %} aria-label="{{ label }}" title="{{ label }}"{% endif %}>
+    {%- if icon_name %}{{ icon(icon_name, 16 if size == "sm" else 18) }}{% endif -%}
+    {%- if not icon_only %}<span>{{ label }}</span>{% if chevron %}{{ icon("chevron-down", 16) }}{% endif %}{% endif -%}
+  </button>
+  <div class="dropdown__menu{% if align == 'end' %} dropdown__menu--end{% endif %}{% if menu_cls %} {{ menu_cls }}{% endif %}" x-ref="menu" role="menu"
+       x-show="open" x-cloak x-transition:enter.duration.120ms x-transition:leave.duration.80ms
+       @click="if ($event.target.closest('a[href], button:not([data-keep-open])')) close()">
+    {{ caller() }}
+  </div>
+</div>
+{%- endmacro %}
+
+{% macro dropdown_item(label, href=None, icon_name=None, attrs={}, danger=False, active=False, trail=None, type="button") -%}
+{%- set classes = "dropdown__item" ~ (" dropdown__item--danger" if danger else "") ~ (" is-active" if active else "") -%}
+{%- if href -%}
+<a class="{{ classes }}" role="menuitem" href="{{ href }}"{% if active %} aria-current="page"{% endif %}{{ attrs|xmlattr }}>
+{%- else -%}
+<button class="{{ classes }}" role="menuitem" type="{{ type }}"{{ attrs|xmlattr }}>
+{%- endif -%}
+{%- if icon_name %}{{ icon(icon_name, 16) }}{% endif %}<span>{{ label }}</span>{% if trail %}<span class="trail">{{ trail }}</span>{% endif -%}
+{%- if href %}</a>{% else %}</button>{% endif -%}
+{%- endmacro %}
+
+{# ---------------------------------------------------------------- small helpers #}
+{% macro spinner(size="md", label="Cargando") -%}
+<span class="spinner{% if size == 'lg' %} spinner--lg{% endif %}" role="status" aria-label="{{ label }}"></span>
+{%- endmacro %}
+
+{# Relative time that app.js keeps fresh; full date in the tooltip. #}
+{% macro reltime(value) -%}
+{%- if value -%}<time datetime="{{ value|iso_utc }}" data-timeago title="{{ value|dt_es }}">{{ value|timeago_es }}</time>{%- endif -%}
+{%- endmacro %}
+
+{% macro kbd(key) -%}<kbd>{{ key }}</kbd>{%- endmacro %}

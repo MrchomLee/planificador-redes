@@ -1,0 +1,17 @@
+{#- Original "Planificador" mark: rounded square, calendar with an orbit and a satellite dot.
+    Optional: logo_size (px), logo_cls. -#}
+<svg class="{{ logo_cls|default('brandmark__logo') }}" width="{{ logo_size|default(30) }}" height="{{ logo_size|default(30) }}" viewBox="0 0 32 32" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="plf-logo-bg" x1="3" y1="1" x2="29" y2="31" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7c6dff"/>
+      <stop offset="1" stop-color="#4632dc"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="9" fill="url(#plf-logo-bg)"/>
+  <path d="M4.2 23.6C8.6 28.4 23.4 25.9 27.6 12.4" fill="none" stroke="#fff" stroke-opacity=".7" stroke-width="1.6" stroke-linecap="round"/>
+  <rect x="7" y="7.6" width="15.5" height="14.6" rx="3.4" fill="url(#plf-logo-bg)" stroke="#fff" stroke-width="2"/>
+  <path d="M7 12.6h15.5" stroke="#fff" stroke-width="2"/>
+  <path d="M11.2 5.6v3.6M18.3 5.6v3.6" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="14.75" cy="17.3" r="1.9" fill="#fff"/>
+  <circle cx="27.4" cy="12.6" r="2.5" fill="#ffd166" stroke="#5a48ea" stroke-width="1.2"/>
+</svg>

@@ -1,0 +1,89 @@
+{#- Top bar: logo, brand switcher, main navigation, "Nueva publicación", notifications, ☰ menu. -#}
+<header class="topbar">
+  <div class="topbar__inner">
+    <div class="topbar__left">
+      <a href="/planificacion" class="brandmark" aria-label="Planificador, ir a Planificación">
+        {% include "partials/logo.html" %}
+        <span class="brandmark__name">Planificador</span>
+      </a>
+      <span class="topbar__divider" aria-hidden="true"></span>
+      {% include "partials/brand_switcher.html" %}
+    </div>
+
+    <nav class="mainnav" aria-label="Principal">
+      {% for key, label, href, ic in NAV_ITEMS %}
+      <a href="{{ href }}" class="mainnav__link{% if nav_active == key %} is-active{% endif %}"{% if nav_active == key %} aria-current="page"{% endif %}>
+        {{- icon(ic, 18) }}<span>{{ label }}</span></a>
+      {% endfor %}
+    </nav>
+
+    <div class="topbar__actions">
+      <a id="btn-new-post" href="/publicaciones/nueva" class="btn btn--primary btn-new-post"
+         hx-get="/publicaciones/nueva" hx-target="#modal-root" hx-swap="innerHTML" hx-push-url="false"
+         aria-keyshortcuts="N" title="Nueva publicación (N)">
+        {{- icon("plus", 18, stroke=2.25) }}<span class="btn-new-post__label">Nueva<span class="btn-new-post__long"> publicación</span></span></a>
+
+      {# Notifications: badge polled every 30 s; the list arrives as an out-of-band swap into #notif-list. #}
+      <div class="dropdown notif" x-data="dropdown" @keydown="onKeydown($event)" @click.outside="close()">
+        <button type="button" class="icon-btn notif__btn" x-ref="button" aria-haspopup="true"
+                :aria-expanded="open ? 'true' : 'false'" aria-label="Notificaciones" aria-describedby="notif-badge" title="Notificaciones"
+                @click="toggle(); if (open) htmx.trigger(document.body, 'notifications:refresh')">
+          {{ icon("bell", 20) }}
+          <span id="notif-badge" hx-get="/api/notificaciones/resumen" hx-trigger="load delay:400ms, every 30s, notifications:refresh from:body"
+                hx-swap="innerHTML" data-silent-errors>{% include "partials/notif_badge.html" %}</span>
+        </button>
+        <div class="dropdown__menu dropdown__menu--end notif__panel" x-ref="menu" x-show="open" x-cloak
+             x-transition:enter.duration.120ms x-transition:leave.duration.80ms role="dialog" aria-label="Notificaciones recientes">
+          <div class="notif__head">
+            <strong>Notificaciones</strong>
+            <a href="/notificaciones" class="btn btn--ghost btn--sm">Ver todas</a>
+          </div>
+          <div id="notif-list" class="notif__list">
+            <div class="empty-state empty-state--compact">
+              <div class="empty-state__icon">{{ icon("bell", 20) }}</div>
+              <p class="text-sm">{{ "Cargando…" if unread_notifications else "No tienes avisos pendientes." }}</p>
+            </div>
+          </div>
+          <div class="notif__foot">
+            <span class="text-xs muted" data-notify-status></span>
+            <button type="button" class="btn btn--soft btn--sm" data-notify-enable hidden>{{ icon("bell-ring", 16) }}<span>Activar avisos</span></button>
+          </div>
+        </div>
+      </div>
+
+      {# ☰ menu #}
+      <div class="dropdown" x-data="dropdown" @keydown="onKeydown($event)" @click.outside="close()">
+        <button type="button" class="icon-btn" x-ref="button" @click="toggle()" :aria-expanded="open ? 'true' : 'false'"
+                aria-haspopup="menu" aria-label="Menú" title="Menú">{{ icon("menu", 20) }}</button>
+        <div class="dropdown__menu dropdown__menu--end" x-ref="menu" role="menu" x-show="open" x-cloak
+             x-transition:enter.duration.120ms x-transition:leave.duration.80ms
+             @click="if ($event.target.closest('a[href]')) close()">
+          {% for key, label, href, ic in MENU_ITEMS %}
+          <a class="dropdown__item{% if nav_active == key %} is-active{% endif %}" role="menuitem" href="{{ href }}"{% if nav_active == key %} aria-current="page"{% endif %}>
+            {{- icon(ic, 16) }}<span>{{ label }}</span></a>
+          {% endfor %}
+          <a class="dropdown__item{% if nav_active == 'notificaciones' %} is-active{% endif %}" role="menuitem" href="/notificaciones">
+            {{- icon("bell", 16) }}<span>Notificaciones</span>{% if unread_notifications %}<span class="trail"><span class="count-pill">{{ unread_notifications }}</span></span>{% endif %}</a>
+          <div class="dropdown__sep" role="separator"></div>
+          <div class="dropdown__label">Apariencia</div>
+          <div class="dropdown__block">
+            <div class="segmented w-full" role="group" aria-label="Tema">
+              <button type="button" data-theme-set="auto" aria-pressed="true" title="Según el sistema">{{ icon("monitor", 14) }}<span>Auto</span></button>
+              <button type="button" data-theme-set="light" aria-pressed="false">{{ icon("sun", 14) }}<span>Claro</span></button>
+              <button type="button" data-theme-set="dark" aria-pressed="false">{{ icon("moon", 14) }}<span>Oscuro</span></button>
+            </div>
+          </div>
+          <button type="button" class="dropdown__item" role="menuitem" data-notify-enable hidden>{{ icon("bell-ring", 16) }}<span>Activar avisos del navegador</span></button>
+          {% if password_enabled %}
+          <div class="dropdown__sep" role="separator"></div>
+          <form method="post" action="/logout">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="dropdown__item" role="menuitem">{{ icon("log-out", 16) }}<span>Cerrar sesión</span></button>
+          </form>
+          {% endif %}
+          <div class="dropdown__footer"><span>Planificador {{ app_version }}</span><span>Atajo: <kbd>N</kbd> nueva</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>

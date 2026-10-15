@@ -1,0 +1,28 @@
+{#- Standalone on purpose: it must render even when the normal layout cannot (no DB, broken partial).
+    Context (all optional): message, error_id. -#}
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Algo ha fallado · Planificador</title>
+  <link rel="icon" type="image/svg+xml" href="{{ static_url('img/favicon.svg') }}">
+  <link rel="stylesheet" href="{{ static_url('css/app.css') }}">
+</head>
+<body>
+  <main class="auth-page">
+    <div class="card auth-card text-center">
+      <div class="empty-state empty-state--compact">
+        <div class="empty-state__icon" style="color: var(--danger-fg); background: var(--danger-soft)">{{ icon("circle-alert", 26) }}</div>
+        <h1 class="empty-state__title">Algo ha fallado</h1>
+        <p class="empty-state__text">{{ message or "Ha ocurrido un error inesperado. Tus publicaciones programadas no se han perdido." }}</p>
+        {% if error_id %}<p class="text-xs subtle">Referencia del error: <code>{{ error_id }}</code> (búscala en el registro de la aplicación).</p>{% endif %}
+        <div class="empty-state__actions">
+          <a class="btn btn--primary" href="">{{ icon("refresh-cw", 18) }}<span>Volver a intentarlo</span></a>
+          <a class="btn btn--secondary" href="/planificacion">{{ icon("calendar-days", 18) }}<span>Ir a Planificación</span></a>
+        </div>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

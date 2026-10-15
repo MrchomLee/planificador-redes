@@ -1,0 +1,16 @@
+{#- "En construcción" page for sections that are not built yet.
+    Context: page_title (section name), placeholder_text or description (optional), icon_name (optional). -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% block content %}
+{{ ui.page_header(page_title or "Planificador", subtitle=page_subtitle) }}
+<section class="construction">
+  {% call ui.empty_state("En construcción",
+        placeholder_text or description or "Esta sección todavía se está preparando. Muy pronto podrás usarla desde aquí.",
+        icon_name=icon_name or "construction") %}
+    {% if nav_active != "planificacion" %}
+    {{ ui.button("Ir a Planificación", href="/planificacion", variant="secondary", icon_name="calendar-days") }}
+    {% endif %}
+  {% endcall %}
+</section>
+{% endblock %}

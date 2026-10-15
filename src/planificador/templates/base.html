@@ -1,0 +1,68 @@
+<!doctype html>
+{#-
+  Base layout. Blocks:
+    title       <title> (default: "{page_title} · Planificador")
+    head        extra <head> content (stylesheets, meta)
+    scripts     page scripts, loaded after htmx/app.js and before Alpine, e.g.
+                <script src="{{ static_url('vendor/fullcalendar/index.global.min.js') }}" defer></script>
+    body_class  classes for <body>
+    topbar      the top bar (login/error pages override it with nothing)
+    main        the whole <main> element; or override only:
+    main_class  extra classes for <main> ("app-main--wide" removes the 1440 px cap, "app-main--flush" the padding)
+    content     page content
+    layers      extra markup after the layer roots
+  Vendored files: vendor/fullcalendar/index.global.min.js + vendor/fullcalendar/locales/es.global.min.js,
+  vendor/chart.js/chart.umd.min.js, vendor/htmx.org/htmx.min.js, vendor/alpinejs/cdn.min.js,
+  vendor/lucide-static/sprite.svg, vendor/simple-icons/{facebook,instagram,tiktok}.svg.
+-#}
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <meta name="color-scheme" content="light dark">
+  <meta name="htmx-config" content='{"includeIndicatorStyles": false, "historyRestoreAsHxRequest": false, "defaultSwapStyle": "innerHTML", "responseHandling": [{"code": "204", "swap": false}, {"code": "[23]..", "swap": true}, {"code": "422", "swap": true, "error": false}, {"code": "[45]..", "swap": false, "error": true}]}'>
+  <title>{% block title %}{% if page_title %}{{ page_title }} · {% endif %}Planificador{% endblock %}</title>
+  <link rel="icon" type="image/svg+xml" href="{{ static_url('img/favicon.svg') }}">
+  <script>
+    /* Apply the saved theme before first paint (per-browser preference). */
+    try {
+      var t = JSON.parse(localStorage.getItem("planificador.theme") || '"auto"');
+      if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+    } catch (e) {}
+  </script>
+  <link rel="stylesheet" href="{{ static_url('css/app.css') }}">
+  {% block head %}{% endblock %}
+  <script src="{{ static_url('vendor/htmx.org/htmx.min.js') }}" defer></script>
+  <script src="{{ static_url('js/app.js') }}" defer></script>
+  {# The composer opens from any page (top bar button, shortcut N), so its script loads everywhere. #}
+  {% if static_exists('js/composer.js') %}<script src="{{ static_url('js/composer.js') }}" defer></script>{% endif %}
+  {% block scripts %}{% endblock %}
+  <script src="{{ static_url('vendor/alpinejs/cdn.min.js') }}" defer></script>
+</head>
+<body class="{% block body_class %}{% endblock %}" data-sprite="{{ static_url('vendor/lucide-static/sprite.svg') }}" data-favicon="{{ static_url('img/favicon.svg') }}" data-browser-notify="{{ 1 if notifications_browser else 0 }}"
+      {%- if active_brand %} data-brand-id="{{ active_brand.id }}" data-brand-tz="{{ active_brand.timezone or app_timezone }}"{% endif %}>
+  <a class="skip-link" href="#main">Saltar al contenido</a>
+  <div class="progress-bar" aria-hidden="true"></div>
+
+  {% block topbar %}
+  {% include "partials/topbar.html" %}
+  {% if demo_mode %}{% include "partials/demo_ribbon.html" %}{% endif %}
+  {% endblock %}
+
+  {% block main %}
+  <main id="main" class="app-main {% block main_class %}{% endblock %}" tabindex="-1">
+    {% block content %}{% endblock %}
+  </main>
+  {% endblock %}
+
+  <div id="drawer-root" class="layer-root"></div>
+  <div id="modal-root" class="layer-root"></div>
+  <div id="confirm-root" class="layer-root"></div>
+  {% block layers %}{% endblock %}
+  <div id="toast-root" class="toast-region" role="region" aria-label="Avisos" aria-live="polite"></div>
+
+  {% include "partials/js_templates.html" %}
+  <script type="application/json" id="flash-data">{{ ((flashes or []) + (pop_flashes() if pop_flashes else []))|tojson }}</script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+{#- Password screen (only when a password is set in Ajustes).
+    Context: error (optional Spanish message), next (path to return to). Posts to /login. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% block title %}Entrar · Planificador{% endblock %}
+{% block topbar %}{% endblock %}
+{% block main %}
+<main id="main" class="auth-page" tabindex="-1">
+  <div class="card auth-card">
+    <div class="auth-card__logo">{% with logo_size=48, logo_cls="" %}{% include "partials/logo.html" %}{% endwith %}</div>
+    <div class="stack gap-2 text-center mb-5">
+      <h1 class="text-xl">Planificador</h1>
+      <p class="muted">Introduce la contraseña para continuar.</p>
+    </div>
+    <form method="post" action="/login" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="{{ next or '/' }}">
+      {{ ui.form_field("password", "Contraseña", type="password", error=error, required=True,
+                       autocomplete="current-password", attrs={"autofocus": True}) }}
+      {{ ui.button("Entrar", type="submit", variant="primary", size="lg", cls="btn--block", icon_right="arrow-right") }}
+    </form>
+    <p class="text-xs subtle text-center mt-5">La aplicación solo es accesible desde este ordenador.</p>
+  </div>
+</main>
+{% endblock %}

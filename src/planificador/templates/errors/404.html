@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+{% block title %}Página no encontrada · Planificador{% endblock %}
+{% block content %}
+<div class="error-page">
+  <div class="stack gap-2 text-center" style="align-items:center">
+    <div class="error-page__code" aria-hidden="true">404</div>
+    {% call ui.empty_state("No encontramos esta página",
+          message or "Puede que el enlace sea antiguo o que el contenido se haya borrado.", icon_name="map-pin-off") %}
+      {{ ui.button("Ir a Planificación", href="/planificacion", variant="primary", icon_name="calendar-days") }}
+      {{ ui.button("Volver atrás", variant="secondary", icon_name="arrow-left", attrs={"onclick": "history.back()"}) }}
+    {% endcall %}
+  </div>
+</div>
+{% endblock %}

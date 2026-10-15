@@ -1,0 +1,15 @@
+{#- "En construcción" modal/drawer for htmx requests aimed at #modal-root / #drawer-root while a section is
+    not built yet (see routes.render_placeholder). Context: layer ("modal" | "drawer"), page_title, description. -#}
+{% import "components/ui.html" as ui with context %}
+{% set footer %}
+<button type="button" class="btn btn--secondary" data-close>Cerrar</button>
+{% endset %}
+{% if layer == "drawer" %}
+{% call ui.drawer(page_title or "Planificador", id="placeholder-drawer", footer=footer) %}
+  {{ ui.empty_state("En construcción", description or "Esta sección estará disponible muy pronto.", icon_name="construction") }}
+{% endcall %}
+{% else %}
+{% call ui.modal(page_title or "Planificador", id="placeholder-modal", footer=footer) %}
+  {{ ui.empty_state("En construcción", description or "Esta sección estará disponible muy pronto.", icon_name="construction") }}
+{% endcall %}
+{% endif %}

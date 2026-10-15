@@ -1,0 +1,5 @@
+{#- Unread counter inside the bell (initial render uses the unread_notifications global). -#}
+{% set _count = unread if unread is defined else unread_notifications %}
+{#- The bell button is aria-describedby="notif-badge": the visible number is hidden from assistive tech and the
+    sr-only text is what screen readers announce (aria-label on a plain <span> is not exposed). -#}
+{% if _count %}<span class="notif__badge" aria-hidden="true">{{ _count if _count < 100 else "99+" }}</span><span class="sr-only">{{ _count }} sin leer</span>{% endif %}

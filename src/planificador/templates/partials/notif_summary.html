@@ -1,0 +1,35 @@
+{#- Response of GET /api/notificaciones/resumen (polled by the bell every 30 s).
+    Context: unread (int), items (latest notifications, newest first; ORM rows or dicts with
+    id, kind, title, body, created_at, read_at, target_id, optional url).
+    Main content -> the badge; #notif-list is updated out of band; data-notify-items feeds the
+    browser Notification helper in app.js (only ids newer than the last seen one are announced). -#}
+{% set payload = [] %}
+{% for n in items or [] %}
+{% set kind = n.kind|string %}
+{% set url = n.url if (n.url is defined and n.url) else ("/conexiones" if kind == "reconnect" else "/notificaciones") %}
+{% do payload.append({"id": n.id, "kind": kind, "title": n.title, "body": n.body or "", "url": url}) %}
+{% endfor %}
+{% include "partials/notif_badge.html" %}
+<span hidden data-notify-items='{{ payload|tojson }}'></span>
+<div id="notif-list" hx-swap-oob="innerHTML">
+  {% for n in items or [] %}
+  {% set kind = n.kind|string %}
+  {% set tone = NOTIFICATION_TONES.get(kind, "info") %}
+  {% set assisted = kind == "manual_publish" and n.target_id %}
+  {% set url = n.url if (n.url is defined and n.url) else ("/conexiones" if kind == "reconnect" else "/notificaciones") %}
+  <a class="notif-item{% if not n.read_at %} is-unread{% endif %}" href="{{ url }}"
+     {%- if assisted %} hx-get="/objetivos/{{ n.target_id }}/asistida" hx-target="#modal-root" hx-swap="innerHTML" hx-push-url="false"{% endif %}>
+    <span class="notif-item__icon tone-{{ tone }}">{{ icon(NOTIFICATION_ICONS.get(kind, "info"), 16) }}</span>
+    <span class="notif-item__body">
+      <span class="notif-item__title">{{ n.title }}</span>
+      {% if n.body %}<span class="notif-item__text">{{ n.body }}</span>{% endif %}
+      {% if n.created_at %}<span class="notif-item__time"><time datetime="{{ n.created_at|iso_utc }}" data-timeago title="{{ n.created_at|dt_es }}">{{ n.created_at|timeago_es }}</time></span>{% endif %}
+    </span>
+  </a>
+  {% else %}
+  <div class="empty-state empty-state--compact">
+    <div class="empty-state__icon">{{ icon("bell", 20) }}</div>
+    <p class="text-sm">No tienes avisos pendientes.</p>
+  </div>
+  {% endfor %}
+</div>

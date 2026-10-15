@@ -1,0 +1,38 @@
+{#- Markup used by app.js (icons for toasts/dialogs, confirm dialog). -#}
+<div id="js-icons" hidden>
+  <span data-icon="info">{{ icon("info", 18) }}</span>
+  <span data-icon="success">{{ icon("circle-check", 18) }}</span>
+  <span data-icon="warning">{{ icon("triangle-alert", 18) }}</span>
+  <span data-icon="error">{{ icon("circle-alert", 18) }}</span>
+  <span data-icon="question">{{ icon("circle-question-mark", 20) }}</span>
+  <span data-icon="x">{{ icon("x", 16) }}</span>
+  <span data-icon="check">{{ icon("check", 16) }}</span>
+  <span data-icon="copy">{{ icon("copy", 16) }}</span>
+  <span data-icon="external">{{ icon("external-link", 16) }}</span>
+  <span data-icon="download">{{ icon("download", 16) }}</span>
+  <span data-icon="clock">{{ icon("clock", 14) }}</span>
+  <span data-icon="image">{{ icon("image", 14) }}</span>
+  <span data-icon="video">{{ icon("video", 14) }}</span>
+  <span data-icon="spinner"><span class="spinner"></span></span>
+  {% for status, name in STATUS_ICONS.items() %}<span data-icon="status-{{ status }}">{{ icon(name, 13) }}</span>{% endfor %}
+  {% for net in NETWORKS %}<span data-icon="net-{{ net }}">{{ net_icon(net, 16) }}</span>{% endfor %}
+</div>
+<template id="tpl-confirm">
+  <div class="modal-backdrop">
+    <div class="modal modal--sm confirm" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-message" tabindex="-1">
+      <div class="modal__body">
+        <div class="confirm__body">
+          <div class="confirm__icon"></div>
+          <div class="grow">
+            <h2 class="confirm__title" id="confirm-title"></h2>
+            <p class="confirm__message" id="confirm-message"></p>
+          </div>
+        </div>
+      </div>
+      <footer class="modal__footer">
+        <button type="button" class="btn btn--secondary" data-confirm-dismiss>Cancelar</button>
+        <button type="button" class="btn btn--primary" data-confirm-accept>Aceptar</button>
+      </footer>
+    </div>
+  </div>
+</template>

@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+test-results/
+playwright-report/
+
+# Local runtime data (only when PLANIFICADOR_DATA_DIR points inside the repo)
+/data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+secret.key
+instance.lock
+instance.json
+logs/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

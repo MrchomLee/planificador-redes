@@ -1,0 +1,93 @@
+[project]
+name = "planificador-redes"
+version = "0.1.0"
+description = "Planificador local de publicaciones para Facebook, Instagram y TikTok (app web de un solo usuario)."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "MrchomLee" }]
+keywords = ["social media", "scheduler", "facebook", "instagram", "tiktok", "planner"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+    "Natural Language :: Spanish",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "jinja2>=3.1.4",
+    "python-multipart>=0.0.18",
+    "itsdangerous>=2.2",
+    "sqlalchemy>=2.0.36",
+    "httpx>=0.28",
+    "pillow>=11.0",
+    "av>=14.0",
+    "cryptography>=44.0",
+    "keyring>=25.5",
+    "tzdata>=2025.1",
+    "desktop-notifier>=6.0",
+]
+
+[project.optional-dependencies]
+heic = ["pillow-heif>=0.21"]
+
+[project.scripts]
+planificador = "planificador.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "respx>=0.22",
+    "time-machine>=2.16",
+    "ruff>=0.9",
+    "pytest-playwright>=0.6",
+]
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/planificador"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/planificador", "tests", "docs", "scripts", "LICENSE", "README.md", "iniciar.bat", "iniciar.sh"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+src = ["src", "tests"]
+extend-exclude = ["src/planificador/static/vendor"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    "B008", # FastAPI's Depends()/Form()/File() in argument defaults is the documented idiom
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["planificador"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -m 'not e2e'"
+markers = [
+    "e2e: Playwright end-to-end smoke tests (run explicitly with -m e2e)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:keyring.*",
+    # Starlette 1.x prefers httpx2 for its TestClient; plain httpx still works (we pin httpx for the app).
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]
