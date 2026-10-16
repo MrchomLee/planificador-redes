@@ -1840,3 +1840,161 @@ def test_private_posts_need_no_public_id_follow_up(tmp_path, settings, http, rou
     ctx, _ = make_ctx(account, make_target(make_video(tmp_path, 2000)), settings, http, clock)
     results = run_until_done(tiktok.TikTokProvider(), ctx)
     assert results[-1].status == "published" and "followup" not in ctx.state
+
+
+# ------------------------------------------------------------------------- scopes the app may lack
+
+
+def test_login_scopes_follow_the_scopes_ticked_in_settings(settings):
+    inbox_only = replace(settings, tiktok_scopes=["video.upload"])
+    assert tiktok.login_scopes(inbox_only) == ["user.info.basic", "video.upload"]  # basic always added
+    url = tiktok.build_login_url(inbox_only, "http://localhost:8765/x", "s", "c")
+    assert parse_qs(urlsplit(url).query)["scope"] == ["user.info.basic,video.upload"]
+    mixed = replace(settings, tiktok_scopes="video.list, video.publish,user.info.basic")
+    assert tiktok.login_scopes(mixed) == ["user.info.basic", "video.publish", "video.list"]
+    # No explicit list: the publishing scopes (legacy behaviour).
+    assert tiktok.login_scopes(settings) == ["user.info.basic", "video.publish", "video.upload"]
+
+
+def test_normalize_scopes_orders_and_filters():
+    assert tiktok.normalize_scopes(None) == ["user.info.basic"]
+    assert tiktok.normalize_scopes(["video.list", "video.upload", "video.upload"]) == [
+        "user.info.basic",
+        "video.upload",
+        "video.list",
+    ]
+    assert tiktok.normalize_scopes("video.publish,x.future") == [
+        "user.info.basic",
+        "video.publish",
+        "x.future",
+    ]
+    assert tiktok.normalize_scopes("video.publish,x.future", known_only=True) == [
+        "user.info.basic",
+        "video.publish",
+    ]
+    assert set(tiktok.DEFAULT_SCOPES) == {"user.info.basic", "video.upload", "video.publish"}
+
+
+@pytest.mark.parametrize(
+    ("granted", "modes"),
+    [
+        (None, ("direct", "inbox")),
+        ([], ("direct", "inbox")),
+        (["user.info.basic", "video.publish", "video.upload"], ("direct", "inbox")),
+        (["user.info.basic", "video.upload", "video.list"], ("inbox",)),
+        ({"user.info.basic", "video.publish"}, ("direct",)),
+        (["user.info.basic"], ()),
+    ],
+)
+def test_available_modes(granted, modes):
+    assert tiktok.available_modes(granted) == modes
+
+
+def test_granted_scopes_reads_attribute_then_meta(account):
+    assert tiktok.granted_scopes(account) is None  # unknown
+    assert tiktok.granted_scopes(replace(account, scopes=["user.info.basic", "video.upload"])) == {
+        "user.info.basic",
+        "video.upload",
+    }
+    assert tiktok.granted_scopes(
+        replace(account, meta={"granted_scopes": "user.info.basic video.upload"})
+    ) == {
+        "user.info.basic",
+        "video.upload",
+    }
+    assert tiktok.account_modes(replace(account, scopes=["user.info.basic", "video.upload"])) == ("inbox",)
+    assert "video.publish" in tiktok.mode_unavailable_message("direct", ["video.upload"])
+    assert "video.upload" in tiktok.mode_unavailable_message("inbox", ["video.publish"])
+    assert tiktok.mode_unavailable_message("direct", ["user.info.basic"]) == tiktok.MSG_NO_PUBLISH_SCOPE
+
+
+def test_direct_post_without_video_publish_fails_before_any_call(
+    tmp_path, settings, http, router, clock, account
+):
+    """Scopes revoked / reconnected with fewer permissions after scheduling: a clear PERMANENT error before
+    the commit point and without touching TikTok."""
+    video = make_video(tmp_path, 3000)
+    creator_route, init_route, _, _, inbox_route = mock_direct_flow(router)
+    inbox_only = replace(account, scopes=["user.info.basic", "video.upload"])
+    ctx, rec = make_ctx(inbox_only, make_target(video), settings, http, clock)
+    with pytest.raises(ProviderError) as exc:
+        tiktok.TikTokProvider().publish_step(ctx)
+    err = exc.value
+    assert err.kind == ErrorKind.PERMANENT and err.code == "tiktok_mode_not_granted"
+    assert "video.publish" in err.message and "borrador" in err.message
+    assert err.detail["mode"] == "direct"
+    assert not rec.commits and len(router.calls) == 0
+    assert creator_route.call_count == init_route.call_count == inbox_route.call_count == 0
+
+
+def test_inbox_without_video_upload_fails_before_any_call(tmp_path, settings, http, router, clock, account):
+    video = make_video(tmp_path, 3000)
+    mock_direct_flow(router)
+    direct_only = replace(account, meta={"granted_scopes": ["user.info.basic", "video.publish"]})
+    target = make_target(video, mode="inbox", privacy_level=_DROP, consent=_DROP)
+    ctx, rec = make_ctx(direct_only, target, settings, http, clock)
+    with pytest.raises(ProviderError) as exc:
+        tiktok.TikTokProvider().publish_step(ctx)
+    assert exc.value.kind == ErrorKind.PERMANENT and exc.value.code == "tiktok_mode_not_granted"
+    assert "video.upload" in exc.value.message
+    assert not rec.commits and len(router.calls) == 0
+
+
+def test_inbox_only_account_sends_drafts_without_creator_info(
+    tmp_path, settings, http, router, clock, account
+):
+    video = make_video(tmp_path, 3000)
+    creator_route, init_route, _, _, inbox_route = mock_direct_flow(
+        router, statuses=[status_json("SEND_TO_USER_INBOX")]
+    )
+    inbox_only = replace(account, scopes=["user.info.basic", "video.upload"])
+    target = make_target(video, mode="inbox", privacy_level=_DROP, consent=_DROP)
+    ctx, rec = make_ctx(inbox_only, target, settings, http, clock)
+    results = run_until_done(tiktok.TikTokProvider(), ctx)
+    assert results[-1].status == "sent_to_app"
+    assert creator_route.call_count == 0 and init_route.call_count == 0 and inbox_route.call_count == 1
+
+
+@pytest.mark.parametrize(("mode", "needle"), [("direct", "video.publish"), ("inbox", "video.upload")])
+def test_scope_refusal_at_init_names_the_missing_permission(
+    tmp_path, settings, http, router, clock, account, mode, needle
+):
+    video = make_video(tmp_path, 3000)
+    router.post(tiktok.CREATOR_INFO_URL).mock(return_value=httpx.Response(200, json=creator_json()))
+    url = tiktok.VIDEO_INIT_URL if mode == "direct" else tiktok.INBOX_INIT_URL
+    router.post(url).mock(return_value=httpx.Response(403, json=api_error("scope_not_authorized")))
+    extra = {} if mode == "direct" else {"privacy_level": _DROP, "consent": _DROP}
+    ctx, rec = make_ctx(account, make_target(video, mode=mode, **extra), settings, http, clock)
+    with pytest.raises(ProviderError) as exc:
+        tiktok.TikTokProvider().publish_step(ctx)
+    assert exc.value.kind == ErrorKind.PERMANENT and exc.value.code == "scope_not_authorized"
+    assert needle in exc.value.message and exc.value.detail["mode"] == mode
+    assert rec.last["phase"] == "new" and "publish_id" not in rec.last
+
+
+def test_creator_info_scope_refusal_suggests_the_draft_mode(tmp_path, settings, http, router, clock, account):
+    video = make_video(tmp_path, 3000)
+    router.post(tiktok.CREATOR_INFO_URL).mock(
+        return_value=httpx.Response(401, json=api_error("scope_not_authorized"))
+    )
+    ctx, rec = make_ctx(account, make_target(video), settings, http, clock)
+    with pytest.raises(ProviderError) as exc:
+        tiktok.TikTokProvider().publish_step(ctx)
+    assert exc.value.kind == ErrorKind.PERMANENT and "video.publish" in exc.value.message
+    assert "borrador" in exc.value.message and not rec.commits
+
+
+def test_analytics_only_calls_granted_endpoints(settings, http, router, account):
+    stats_route = router.get(tiktok.USER_INFO_URL)
+    list_route = router.post(tiktok.VIDEO_LIST_URL)
+    provider = tiktok.TikTokProvider()
+    sandbox = replace(account, scopes=["user.info.basic", "video.upload", "video.list"])
+    snap = provider.fetch_account_snapshot(sandbox, settings, http, date(2026, 11, 3))
+    assert snap.metrics == {} and snap.notice == tiktok.NOTICE_STATS_SCOPE and stats_route.call_count == 0
+    list_route.mock(return_value=httpx.Response(200, json=ok({"videos": [], "has_more": False})))
+    posts = provider.fetch_recent_posts(sandbox, settings, http, NOW - timedelta(days=30))
+    assert list(posts) == [] and posts.notice is None and list_route.call_count == 1
+    no_list = replace(account, scopes=["user.info.basic", "video.upload"])
+    posts = provider.fetch_recent_posts(no_list, settings, http, NOW - timedelta(days=30))
+    assert posts.notice == tiktok.NOTICE_VIDEO_SCOPE and list_route.call_count == 1
+    assert "Ajustes › Credenciales › TikTok" in tiktok.NOTICE_STATS_SCOPE

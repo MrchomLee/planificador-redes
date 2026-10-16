@@ -92,8 +92,11 @@ Cada red necesita una app de desarrollador **tuya** (gratis, se hace una vez). C
 | Red | Guía | Qué necesitas | Dirección de redirección que hay que registrar |
 |---|---|---|---|
 | Facebook e Instagram | [docs/guia-meta.md](docs/guia-meta.md) | App de Meta tipo **Negocios** | `http://localhost:8765/conexiones/callback/meta` |
-| TikTok | [docs/guia-tiktok.md](docs/guia-tiktok.md) | App de TikTok con plataforma **Desktop** (Sandbox) | `http://localhost:8765/conexiones/callback/social1` |
+| TikTok | [docs/guia-tiktok.md](docs/guia-tiktok.md) | App de TikTok en **Sandbox** con plataforma **Desktop** (pide verificar una web tuya; vale una gratis de GitHub Pages) | `http://localhost:8765/conexiones/callback/social1` |
 | YouTube | [docs/guia-youtube.md](docs/guia-youtube.md) | Proyecto de Google Cloud con cliente **Aplicación web** | `http://localhost:8765/conexiones/callback/google` |
+
+En TikTok, marca en **Ajustes › Credenciales › TikTok** exactamente los permisos (scopes) que tiene tu app: si
+Planificador pide uno que tu app no tiene, TikTok rechaza la conexión con el error «scope».
 
 Las contraseñas de tus redes nunca pasan por Planificador: te conectas en la página oficial de cada red. Los
 tokens de acceso y las claves secretas se guardan **cifrados** en tu ordenador.
@@ -148,6 +151,10 @@ terminas allí (música, efectos, visibilidad).
 - Mientras tu app no pase la auditoría de TikTok, solo se puede publicar como **«Solo yo»** (privado); luego
   cambias la visibilidad en la app de TikTok. Puede que TikTok exija además que la cuenta sea privada. La
   alternativa es **Enviar a la app de TikTok como borrador** (máximo 5 borradores pendientes cada 24 horas).
+- Si tu app no tiene **Direct Post** (permiso `video.publish`, a menudo no disponible en el Sandbox), los vídeos
+  solo se pueden enviar como borrador a la app de TikTok; si no tiene `video.upload`, solo publicación directa.
+  La tarjeta de **Cuentas conectadas** muestra qué modos tienes.
+- Las estadísticas de TikTok necesitan los permisos opcionales `user.info.stats` y `video.list`.
 - Solo **vídeos** (las fotos de TikTok necesitan un dominio público verificado).
 - La API de TikTok **no** permite leer ni responder comentarios.
 
@@ -226,6 +233,11 @@ Cloudflare**.
 
 **TikTok publica mis vídeos en privado.** Es la norma de TikTok para apps sin auditar. Cambia la visibilidad en
 la app de TikTok o usa **Enviar a la app de TikTok como borrador**.
+
+**TikTok muestra un error «client_key» o «scope» al conectar.** «client_key»: en el **Sandbox** de tu app falta
+Login Kit o la plataforma Desktop, o no pulsaste **Apply changes**. «scope»: desmarca en **Ajustes ›
+Credenciales › TikTok** los permisos que tu app no tiene. Detalles en la
+[guía de TikTok](docs/guia-tiktok.md#16-problemas-frecuentes).
 
 **Un vídeo de YouTube se quedó privado y no puedo cambiarlo.** YouTube lo bloqueó porque tu proyecto no está
 auditado. Bórralo, súbelo desde YouTube Studio y mantén YouTube en **Publicación asistida**.

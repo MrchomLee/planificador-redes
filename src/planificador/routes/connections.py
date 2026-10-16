@@ -559,6 +559,8 @@ class Card:
     warnings: list[str] = field(default_factory=list)
     pending_targets: int = 0
     youtube: dict[str, Any] | None = None
+    tiktok: dict[str, Any] | None = None  # publishing modes (tiktok_modes_info)
+    requested_scopes: list[str] = field(default_factory=list)  # TikTok: scopes asked for at login
     polling: bool = False
 
     @property
@@ -676,6 +678,10 @@ def build_card(
         guide_url=f"/ayuda/{info['guide']}" if info["guide"] else None,
         connect_url=_connect_url(network),
     )
+    if network == "tiktok":
+        from planificador.providers import tiktok
+
+        card.requested_scopes = tiktok.login_scopes(ps)
     if not has_account or account is None:
         return card
     card.type_label = account_type_label(account)
@@ -700,17 +706,24 @@ def build_card(
             )
         )
     if network == "tiktok":
+        card.tiktok = tiktok_modes_info(account)
         creator = meta.get("creator_info") if isinstance(meta.get("creator_info"), dict) else None
-        if creator and creator.get("privacy_level_options") == ["SELF_ONLY"]:
+        if (
+            creator
+            and creator.get("privacy_level_options") == ["SELF_ONLY"]
+            and "direct" in card.tiktok["available"]
+        ):
             card.warnings.append(
-                "Tu app de TikTok aún no está auditada: solo podrás publicar en privado («Solo yo») o enviar "
-                "los vídeos como borrador a la app de TikTok."
+                "Tu app de TikTok aún no está auditada: solo podrás publicar en privado («Solo yo»)"
+                + (
+                    " o enviar los vídeos como borrador a la app de TikTok."
+                    if "inbox" in card.tiktok["available"]
+                    else "."
+                )
             )
-        granted = meta.get("granted_scopes") or account.scopes or []
-        if granted and not {"video.publish", "video.upload"} <= set(granted):
-            card.warnings.append(
-                "No concediste todos los permisos de publicación. Vuelve a conectar TikTok y acéptalos."
-            )
+        warning = tiktok_scope_warning(account.scopes or meta.get("granted_scopes"))
+        if warning:
+            card.warnings.append(warning)
     if network == "youtube":
         from planificador.providers import youtube
 
@@ -1072,9 +1085,8 @@ def tiktok_start(request: Request, db: DbSession, brand: ActiveBrand, clock: Clo
         _require_credentials(ps, "tiktok")
         verifier, challenge = tiktok.new_pkce_pair(ps.tiktok_pkce_encoding or "hex")
         state = new_oauth_state(db, request, "tiktok", brand.id, clock.now(), code_verifier=verifier)
-        scopes = None
-        if config.get_bool(db, "tiktok_analytics_scopes", False) and hasattr(tiktok, "login_scopes"):
-            scopes = tiktok.login_scopes(ps, include_analytics=True)
+        # Exactly the scopes ticked in Ajustes (TikTok rejects the whole request for a scope the app lacks).
+        scopes = tiktok.login_scopes(ps)
         url = _call(tiktok.build_login_url, ps, tiktok.redirect_uri(ps), state, challenge, scopes=scopes)
     except (ConnectError, ProviderError) as exc:
         return _start_error(request, "tiktok", exc)
@@ -1097,6 +1109,8 @@ def _tiktok_creator_info(ps: ProviderSettings, http: httpx.Client, tokens: Any, 
         refresh_expires_at=tokens.refresh_expires_at,
         meta={"granted_scopes": list(tokens.scopes or [])},
     )
+    if tokens.scopes and "direct" not in tiktok.available_modes(tokens.scopes):
+        return None  # creator_info belongs to Direct Post (video.publish): an inbox-only account has none
     try:
         info = tiktok.query_creator_info(creds, ps, http)
     except ProviderError as exc:
@@ -1175,14 +1189,48 @@ def tiktok_callback(
         db.rollback()
         return _after_callback_error(request, "tiktok", exc)
     _flash(request, f"Conectado: TikTok ({account.display_name}).", "success")
-    granted = set(tokens.scopes or [])
-    if granted and not {"video.publish", "video.upload"} <= granted:
-        _flash(
-            request,
-            "No concediste todos los permisos de publicación de TikTok. Vuelve a conectar y acéptalos.",
-            "warning",
-        )
+    message = tiktok_scope_warning(tokens.scopes)
+    if message:
+        _flash(request, message, "warning")
     return RedirectResponse("/conexiones", status_code=303)
+
+
+def tiktok_scope_warning(granted: Any) -> str | None:
+    """Warning for a TikTok connection without any publishing permission (at least one of ``video.publish`` /
+    ``video.upload`` is needed; one alone is fine — the composer then offers only that mode)."""
+    from planificador.providers import tiktok
+
+    if granted and not tiktok.available_modes(granted):
+        return (
+            "TikTok no ha concedido ningún permiso de publicación (video.publish o video.upload), así que no "
+            "podrás publicar con esta cuenta. Comprueba que tu app de TikTok tiene Content Posting API, "
+            "marca sus permisos en Ajustes › Credenciales › TikTok y vuelve a conectar aceptándolos."
+        )
+    return None
+
+
+TIKTOK_MODE_LABELS: dict[str, tuple[str, str]] = {
+    "direct": ("Publicación directa", "send"),
+    "inbox": ("Borrador en la app", "inbox"),
+}
+
+
+def tiktok_modes_info(account: Account) -> dict[str, Any]:
+    """Publishing modes of a TikTok account for its card: ``[{"key", "label", "icon", "available"}]`` plus a
+    Spanish ``note`` when one mode is missing (``known`` is False when the grants are unknown)."""
+    from planificador.providers import tiktok
+
+    granted = tiktok.granted_scopes(account)
+    available = tiktok.available_modes(granted)
+    modes = [
+        {"key": key, "label": label, "icon": icon_name, "available": key in available}
+        for key, (label, icon_name) in TIKTOK_MODE_LABELS.items()
+    ]
+    note = None
+    if granted is not None and available and len(available) < len(TIKTOK_MODE_LABELS):
+        missing = next(m for m in TIKTOK_MODE_LABELS if m not in available)
+        note = tiktok.MSG_MODE_UNAVAILABLE[missing]
+    return {"known": granted is not None, "modes": modes, "available": list(available), "note": note}
 
 
 # ------------------------------------------------------------------------------------------- YouTube

@@ -182,7 +182,7 @@ class ProviderSettings:  # built by config.provider_settings(db)
     google_client_id: str | None = None  # YouTube (Google OAuth client)
     google_client_secret: str | None = None  # secret
     meta_config_id: str | None = None  # Facebook Login for Business configuration id (optional)
-    tiktok_analytics_scopes: bool = False  # also request TikTok's analytics scopes at login
+    tiktok_scopes: list[str] | None = None  # scopes requested at TikTok login (config.tiktok_scopes)
 
 
 class PublicMedia(Protocol):  # implemented by publicmedia.PublicMediaService

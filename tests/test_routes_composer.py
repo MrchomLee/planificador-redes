@@ -21,6 +21,7 @@ from planificador.models import (
     MediaKind,
     Post,
     PostKind,
+    PostTarget,
     TargetStatus,
 )
 from planificador.postsvc import PostInput, TargetInput
@@ -47,6 +48,7 @@ def account(db, brand, network, **kw) -> Account:
         account_type=kw.pop("account_type", None),
         status=kw.pop("status", AccountStatus.CONNECTED),
         meta=kw.pop("meta", {}),
+        scopes=kw.pop("scopes", []),
     )
     token = kw.pop("token", None)
     if token:
@@ -439,6 +441,77 @@ def test_validate_api(csrf_client, db, brand, clock):
     assert data["can_schedule"] is True, data["errors"]
 
 
+SANDBOX_SCOPES = ["user.info.basic", "video.upload", "video.list"]  # no video.publish (no Direct Post)
+
+
+def test_tiktok_modes_in_composer_state(client, db, brand, demo_mode_off):
+    sandbox = account(db, brand, "tiktok", scopes=SANDBOX_SCOPES)
+    html = client.get("/publicaciones/nueva?red=tiktok", headers=HX).text
+    st = state_of(html)
+    info = next(a for a in st["accounts"] if a["key"] == str(sandbox.id))
+    assert info["tiktok"]["modes"] == ["inbox"]
+    assert "video.publish" in info["tiktok"]["note"] and "borrador" in info["tiktok"]["note"]
+    # The section locks the mode switch and explains why.
+    assert "ttModeLocked(" in html and "ttModeNote(" in html and "ttCan(" in html
+    sandbox.scopes = ["user.info.basic", "video.publish"]
+    db.commit()
+    info = state_of(client.get("/publicaciones/nueva?red=tiktok", headers=HX).text)["accounts"][0]
+    assert info["tiktok"]["modes"] == ["direct"] and "video.upload" in info["tiktok"]["note"]
+    sandbox.scopes = []  # unknown grants (older connection): both modes, no note
+    db.commit()
+    info = state_of(client.get("/publicaciones/nueva?red=tiktok", headers=HX).text)["accounts"][0]
+    assert info["tiktok"] == {"modes": ["direct", "inbox"], "note": None}
+
+
+def test_validate_and_save_force_the_draft_mode_without_video_publish(csrf_client, db, brand, clock):
+    tt = account(db, brand, "tiktok", scopes=SANDBOX_SCOPES)
+    video = asset(db, brand, "v.mp4", "video")
+    body = payload(
+        action=None,
+        media_ids=[video.id],
+        scheduled_at=wall(clock.now() + timedelta(hours=3)),
+        targets=[
+            {
+                "account_id": tt.id,
+                "format": "video",
+                "options": {"mode": "direct", "privacy_level": "SELF_ONLY", "consent": True},
+            }
+        ],
+    )
+    data = csrf_client.post("/api/composer/validar", json=body).json()
+    err = next(e for e in data["errors"] if e["code"] == "tiktok_mode_unavailable")
+    assert err["field"] == "mode" and "video.publish" in err["message"]
+    assert data["can_schedule"] is False
+    body["action"] = "schedule"
+    r = csrf_client.post("/publicaciones", json=body)
+    assert r.status_code == 422 and db.scalar(select(Post.id)) is None
+    # Draft mode: no privacy, consent or interaction settings are required.
+    body["targets"][0]["options"] = {"mode": "inbox"}
+    body["action"] = None
+    data = csrf_client.post("/api/composer/validar", json=body).json()
+    assert data["can_schedule"] is True, data["errors"]
+    body["action"] = "schedule"
+    r = csrf_client.post("/publicaciones", json=body)
+    assert r.status_code == 200, r.text
+    target = db.scalar(select(PostTarget))
+    assert target.options["mode"] == "inbox"
+
+
+def test_validate_refuses_the_draft_mode_without_video_upload(csrf_client, db, brand, clock):
+    tt = account(db, brand, "tiktok", scopes=["user.info.basic", "video.publish"])
+    video = asset(db, brand, "v.mp4", "video")
+    body = payload(
+        action=None,
+        media_ids=[video.id],
+        scheduled_at=wall(clock.now() + timedelta(hours=3)),
+        targets=[{"account_id": tt.id, "format": "video", "options": {"mode": "inbox"}}],
+    )
+    data = csrf_client.post("/api/composer/validar", json=body).json()
+    assert any(
+        e["code"] == "tiktok_mode_unavailable" and "video.upload" in e["message"] for e in data["errors"]
+    )
+
+
 def test_validate_api_general_and_idea(csrf_client, brand, clock):
     data = csrf_client.post("/api/composer/validar", json=payload(action=None)).json()
     assert {e["code"] for e in data["errors"]} == {"no_targets", "date_required"}
@@ -531,6 +604,17 @@ def test_creator_info_error_returns_cached(client, db, brand, demo_mode_off, rou
     assert data["ok"] is False and data["message"]
     assert data["creator_info"] == cached
     assert data["privacy_options"] == [{"value": "SELF_ONLY", "label": "Solo yo"}]
+
+
+def test_creator_info_not_asked_without_video_publish(client, db, brand, demo_mode_off, router):
+    from planificador.providers import tiktok
+
+    route = router.post(tiktok.CREATOR_INFO_URL)
+    tt = account(db, brand, "tiktok", token="tok-123", scopes=SANDBOX_SCOPES)
+    data = client.get(f"/api/tiktok/{tt.id}/creator-info").json()
+    assert data["ok"] is False and data["code"] == "tiktok_mode_not_granted"
+    assert data["direct_available"] is False and "video.publish" in data["message"]
+    assert not route.called
 
 
 def test_creator_info_not_found(client, db, brand):

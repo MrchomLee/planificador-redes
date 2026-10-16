@@ -63,6 +63,27 @@
 </section>
 {%- endmacro %}
 
+{% macro tiktok_block(c) -%}
+{% set tt = c.tiktok %}
+<section class="conn-tt" aria-label="Modos de publicación de TikTok">
+  <p class="conn-tt__label">Modos de publicación disponibles</p>
+  <ul class="conn-tt__modes">
+    {% for m in tt.modes %}
+    <li class="conn-tt__mode{% if not m.available %} is-off{% endif %}">
+      {{- icon("circle-check" if m.available else "circle-minus", 15) }}<span>{{ m.label }}</span>
+      {%- if not m.available %}<span class="visually-hidden"> (no disponible)</span>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% if tt.note %}<p class="conn-tt__note">{{ tt.note }}</p>{% elif not tt.known %}<p class="conn-tt__note">TikTok no indicó los permisos concedidos: se comprobarán al publicar.</p>{% endif %}
+</section>
+{%- endmacro %}
+
+{% macro tiktok_scopes_line(c) -%}
+<p class="conn-scopes">Permisos que se pedirán a TikTok:
+  {% for s in c.requested_scopes %}<code>{{ s }}</code>{% if not loop.last %}, {% endif %}{% endfor %}.
+  Si TikTok muestra un error «scope», <a href="/ajustes#credenciales-tiktok">desmarca en Ajustes</a> los que tu app no tiene.</p>
+{%- endmacro %}
+
 {% macro card(c) -%}
 {% set acc = c.account %}
 <article class="card conn-card conn-card--{{ c.network }} is-{{ c.status }}" id="conn-{{ c.network }}" aria-labelledby="conn-{{ c.network }}-title"
@@ -105,9 +126,11 @@
     {% call ui.info_alert(tone="danger", title="Último error", compact=True) %}{{ acc.last_error }}{% endcall %}
     {% endif %}
     {% for w in c.warnings %}{{ ui.info_alert(w, tone="warning", compact=True) }}{% endfor %}
+    {% if c.tiktok %}{{ tiktok_block(c) }}{% endif %}
     {% if c.youtube %}{{ youtube_block(c) }}{% endif %}
     {% else %}
     <p class="conn-card__desc">{{ c.description }}</p>
+    {% if c.requested_scopes and c.configured %}{{ tiktok_scopes_line(c) }}{% endif %}
     {% if c.missing_message %}
     {% call ui.info_alert(tone="warning", compact=True, cls="conn-card__missing") %}
       {{ c.missing_message }} <a href="{{ c.settings_url }}">Configurar ahora</a>
@@ -156,6 +179,7 @@
     <div class="conn-dev__body">
       <p class="conn-dev__label">URI de redirección que debes registrar{% if c.network in ("facebook", "instagram") %} (Facebook Login → URI de redireccionamiento de OAuth válidos){% elif c.network == "tiktok" %} (Login Kit → Redirect URI){% elif c.network == "youtube" %} (cliente OAuth de tipo «Aplicación web»){% endif %}:</p>
       {{ copy_field(c.redirect_uri) }}
+      {% if c.requested_scopes %}{{ tiktok_scopes_line(c) }}{% endif %}
       <div class="conn-dev__links">
         {% if c.guide_url %}<a href="{{ c.guide_url }}">{{ icon("book-open", 15) }}<span>Guía paso a paso</span></a>{% endif %}
         {% if c.settings_url %}<a href="{{ c.settings_url }}">{{ icon("key-round", 15) }}<span>Credenciales en Ajustes</span></a>{% endif %}

@@ -25,7 +25,14 @@
 
 <div class="an-alerts">{{ am.alerts(alerts) }}</div>
 
-{% if not has_data %}
+{% if not has_data and no_stats_scopes %}
+<section class="card an-empty">
+  {% call ui.empty_state("Tu app de TikTok no tiene permisos de estadísticas", "Esta cuenta se conectó sin user.info.stats ni video.list, así que TikTok no da seguidores ni métricas de vídeos (es lo normal en muchas apps nuevas y en Sandbox). Si tu app de TikTok tiene esos permisos, márcalos en Ajustes › Credenciales › TikTok y vuelve a conectar la cuenta. Publicar no necesita estos permisos.", icon_name="chart-no-axes-column") %}
+    <a class="btn btn--primary" href="/ajustes#credenciales-tiktok">{{ icon("key-round", 16) }}<span>Revisar permisos en Ajustes</span></a>
+    <a class="btn btn--secondary" href="/ayuda/tiktok">{{ icon("book-open", 16) }}<span>Guía de TikTok</span></a>
+  {% endcall %}
+</section>
+{% elif not has_data %}
 <section class="card an-empty">
   {% call ui.empty_state("Aún no hay datos de " ~ network_name, "Pulsa «Actualizar ahora» para tomar la primera foto de tus estadísticas. A partir de hoy se guardará una cada día automáticamente.", icon_name="chart-no-axes-column") %}
     <button type="button" class="btn btn--primary" data-an-refresh>{{ icon("refresh-cw", 16) }}<span>Actualizar ahora</span></button>

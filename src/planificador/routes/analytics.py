@@ -518,6 +518,29 @@ def network_context(
     return ctx, {"charts": charts}
 
 
+def tiktok_scope_notices(account: Account | None) -> list[str]:
+    """Spanish notices for the TikTok statistics scopes the account was not granted (``user.info.stats``
+    for the account figures, ``video.list`` for the per-video ones). Empty when the grants are unknown."""
+    if account is None or str(account.network) != "tiktok":
+        return []
+    from planificador.providers import tiktok
+
+    granted = tiktok.granted_scopes(account)
+    if granted is None:
+        return []
+    out = []
+    if "user.info.stats" not in granted:
+        out.append(tiktok.NOTICE_STATS_SCOPE)
+    if "video.list" not in granted:
+        out.append(tiktok.NOTICE_VIDEO_SCOPE)
+    return out
+
+
+def tiktok_without_stats(account: Account | None) -> bool:
+    """A TikTok account granted neither statistics scope: TikTok has nothing to give it."""
+    return len(tiktok_scope_notices(account)) == 2
+
+
 def alerts_for(account: Account | None, network: str) -> list[dict[str, Any]]:
     alerts: list[dict[str, Any]] = []
     if account is not None:
@@ -558,6 +581,9 @@ def alerts_for(account: Account | None, network: str) -> list[dict[str, Any]]:
         notice = meta.get("analytics_notice")
         if notice:
             alerts.append({"tone": "warning", "title": None, "text": str(notice)})
+        for text in tiktok_scope_notices(account):
+            if not notice or text not in str(notice):
+                alerts.append({"tone": "warning", "title": None, "text": text})
     note = NETWORK_NOTES.get(network)
     if note:
         alerts.append({"tone": "info", "title": None, "text": note})
@@ -915,6 +941,11 @@ def network_page(
         meta = account.meta or {}
         ctx["account_last_ok"] = _parse_iso(meta.get("analytics_last_ok"))
     tabs = [{"key": key, "label": label, "href": state.url(tab=key)} for key, label in TABS]
+    alerts = alerts_for(account, network)
+    no_stats_scopes = tiktok_without_stats(account)
+    if no_stats_scopes and not has_data:  # the empty state already explains it
+        hidden = tiktok_scope_notices(account)
+        alerts = [a for a in alerts if not any(h in str(a.get("text") or "") for h in hidden)]
     return render(
         request,
         "analytics/network.html",
@@ -923,9 +954,10 @@ def network_page(
         network_name=network_label(network),
         account=account,
         has_data=has_data,
+        no_stats_scopes=no_stats_scopes,
         tab=tab,
         tabs=tabs,
-        alerts=alerts_for(account, network),
+        alerts=alerts,
         chart_data=data,
         **ctx,
     )

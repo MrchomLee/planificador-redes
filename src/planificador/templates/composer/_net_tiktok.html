@@ -2,9 +2,11 @@
     with no default (not even when only one option is offered; a saved value the account no longer offers is
     cleared with a notice — composer.js loadCreator), interaction toggles greyed per creator settings, max duration,
     AI-generated, commercial content disclosure with labels, consent sentence; inbox mode ("borrador").
+    Only the modes the account's granted scopes allow (info.tiktok.modes): without video.publish the section is
+    locked to the draft mode, without video.upload to Direct Post (composer.js newTarget forces the mode).
     Vars: K, T, O, info. -#}
 <div class="cmp-fields cmp-tt">
-  <div class="cmp-tt__creator">
+  <div class="cmp-tt__creator" x-show="ttCan('{{ K }}', 'direct')">
     <template x-if="creatorInfo('{{ K }}') && creatorInfo('{{ K }}').avatar_url">
       <img class="cmp-tt__avatar" :src="creatorInfo('{{ K }}').avatar_url" alt="" referrerpolicy="no-referrer">
     </template>
@@ -21,15 +23,22 @@
   </div>
 
   <div class="cmp-field" data-field="mode">
-    <label class="switch">
-      <input type="checkbox" role="switch" :checked="{{ O }}.mode === 'inbox'" @change="{{ O }}.mode = $event.target.checked ? 'inbox' : 'direct'" :disabled="ro">
+    <label class="switch" :class="{'is-locked': ttModeLocked('{{ K }}')}">
+      <input type="checkbox" role="switch" :checked="{{ O }}.mode === 'inbox'" @change="{{ O }}.mode = $event.target.checked ? 'inbox' : 'direct'"
+             :disabled="ro || ttModeLocked('{{ K }}')" :aria-describedby="ttModeNote('{{ K }}') ? 'tt-mode-note-{{ K }}' : null">
       <span class="switch__track" aria-hidden="true"></span>
       <span class="switch__text"><span class="switch__label">Enviar a la app de TikTok como borrador</span>
         <span class="switch__help">A la hora indicada el vídeo llegará a tu bandeja de TikTok para que lo termines allí (música, efectos…). El texto no se envía: te lo copiaremos para pegarlo.</span></span>
     </label>
+    <div class="callout cmp-callout" id="tt-mode-note-{{ K }}" x-show="ttModeNote('{{ K }}')" x-cloak
+         :class="ttModes('{{ K }}').length ? 'tone-info' : 'tone-danger'">
+      {{ icon("info", 16) }}<div><span x-text="ttModeNote('{{ K }}')"></span>
+        <a href="/ayuda/tiktok#7-content-posting-api-publicar-videos">Ver la guía</a></div>
+    </div>
+    <p class="cmp-error" x-show="fieldError('{{ K }}', 'mode')" x-text="fieldError('{{ K }}', 'mode')"></p>
   </div>
 
-  <div x-show="{{ O }}.mode !== 'inbox'" class="cmp-fields">
+  <div x-show="{{ O }}.mode !== 'inbox' && ttCan('{{ K }}', 'direct')" class="cmp-fields">
     <div class="cmp-field" data-field="privacy_level">
       <label class="cmp-label" for="tt-privacy-{{ K }}">¿Quién puede ver la publicación? <span class="req" aria-hidden="true">*</span></label>
       <select id="tt-privacy-{{ K }}" class="select" @change="{{ O }}.privacy_level = $event.target.value || null; notice['{{ K }}'] = ''" :disabled="ro"

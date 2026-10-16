@@ -3,7 +3,8 @@
 Sections (each one its own form; htmx re-renders just that section, plain forms redirect back):
 
 - **Credenciales** — Meta (App ID, App Secret, Graph API version, optional Login-for-Business
-  ``config_id``), TikTok (Client Key, Client Secret, PKCE encoding and analytics scopes as advanced options),
+  ``config_id``), TikTok (Client Key, Client Secret, the scopes its app has — ``tiktok_scopes`` — and the PKCE
+  encoding as an advanced option),
   Google/YouTube (client ID and secret). Secrets are **write-only**: the page only shows "•••• guardado"; an
   empty field keeps the stored value; they are stored encrypted (``config.set_setting(secret=True)``).
   ``POST /ajustes/credenciales/{meta|tiktok|google}``
@@ -62,6 +63,49 @@ SECRET_FIELDS = {
     "google": "google_client_secret",
 }
 ID_FIELDS = {"meta": "meta_app_id", "tiktok": "tiktok_client_key", "google": "google_client_id"}
+
+#: Ajustes › Credenciales › TikTok scope checkboxes: (group title, [(scope, Spanish label, help)]). The first
+#: one (``user.info.basic``) is always requested and shown ticked and disabled.
+TIKTOK_SCOPE_GROUPS: tuple[tuple[str, tuple[tuple[str, str, str], ...]], ...] = (
+    (
+        "Siempre",
+        (
+            (
+                "user.info.basic",
+                "Iniciar sesión",
+                "Tu nombre y tu foto de perfil. TikTok lo da a todas las apps.",
+            ),
+        ),
+    ),
+    (
+        "Publicación (marca al menos uno)",
+        (
+            (
+                "video.publish",
+                "Publicación directa",
+                "El vídeo se publica en tu perfil. En el portal: Content Posting API con «Direct Post» "
+                "activado.",
+            ),
+            (
+                "video.upload",
+                "Enviar como borrador a la app de TikTok",
+                "El vídeo llega a tu bandeja de TikTok y lo terminas allí.",
+            ),
+        ),
+    ),
+    (
+        "Estadísticas (opcional)",
+        (
+            ("user.info.profile", "Perfil", "Tu @usuario y el enlace a tu perfil."),
+            ("user.info.stats", "Estadísticas de la cuenta", "Seguidores, «me gusta» y número de vídeos."),
+            (
+                "video.list",
+                "Estadísticas de tus vídeos",
+                "Visualizaciones, «me gusta», comentarios y compartidos.",
+            ),
+        ),
+    ),
+)
 
 GRAPH_VERSION_RE = re.compile(r"^v\d{1,3}\.\d{1,2}$")
 META_APP_ID_RE = re.compile(r"^\d{5,25}$")
@@ -153,7 +197,8 @@ def credentials_context(request: Request, db: Session) -> dict[str, Any]:
     groups["meta"]["api_version"] = config.get_setting(db, "meta_api_version")
     groups["meta"]["config_id"] = config.get_setting(db, "meta_config_id", "") or ""
     groups["tiktok"]["pkce_encoding"] = ps.tiktok_pkce_encoding
-    groups["tiktok"]["analytics_scopes"] = config.get_bool(db, "tiktok_analytics_scopes", False)
+    groups["tiktok"]["scopes"] = config.tiktok_scopes(db)
+    groups["tiktok"]["scope_groups"] = TIKTOK_SCOPE_GROUPS
     return {"cred_groups": groups}
 
 
@@ -319,6 +364,22 @@ def _validate_credentials(group: str, form: dict[str, str]) -> dict[str, str]:
     return errors
 
 
+def _tiktok_scope_selection(submitted: list[str] | None) -> tuple[list[str], str | None]:
+    """(normalised scopes, error). Only known scopes; ``user.info.basic`` is always added; at least one of
+    ``video.publish`` / ``video.upload`` is needed (without them nothing can be published)."""
+    from planificador.providers import tiktok
+
+    chosen = tiktok.normalize_scopes(
+        [s for s in submitted or [] if s in tiktok.KNOWN_SCOPES], known_only=True
+    )
+    if not tiktok.PUBLISH_SCOPES & set(chosen):
+        return chosen, (
+            "Marca al menos «video.publish» (publicación directa) o «video.upload» (borrador en la app de "
+            "TikTok): sin uno de los dos no se puede publicar en TikTok."
+        )
+    return chosen, None
+
+
 @router.post("/ajustes/credenciales/{group}")
 def save_credentials(
     request: Request,
@@ -330,7 +391,8 @@ def save_credentials(
     api_version: Annotated[str, Form()] = "",
     config_id: Annotated[str, Form()] = "",
     pkce_encoding: Annotated[str, Form()] = "hex",
-    analytics_scopes: Annotated[str, Form()] = "",
+    scopes: Annotated[list[str] | None, Form()] = None,
+    scopes_form: Annotated[str, Form()] = "",
 ) -> Response:
     if group not in CREDENTIAL_GROUPS:
         raise HTTPException(status_code=404)
@@ -342,7 +404,13 @@ def save_credentials(
         "pkce_encoding": _clean(pkce_encoding) or "hex",
     }
     errors = {f"{group}_{k}": v for k, v in _validate_credentials(group, form).items()}
-    values = {f"{group}_{k}": v for k, v in form.items() if k != "client_secret"}
+    values: dict[str, Any] = {f"{group}_{k}": v for k, v in form.items() if k != "client_secret"}
+    new_scopes: list[str] | None = None
+    if group == "tiktok" and scopes_form:  # the scope checkboxes were on the form (always, from the page)
+        new_scopes, scope_error = _tiktok_scope_selection(scopes)
+        values["tiktok_scopes"] = new_scopes
+        if scope_error:
+            errors["tiktok_scopes"] = scope_error
     template = "settings/_credentials_group_response.html"
     if errors:
         return _section_response(
@@ -360,15 +428,25 @@ def save_credentials(
             db, "meta_api_version", form["api_version"] or config.DEFAULTS["meta_api_version"], commit=False
         )
         config.set_setting(db, "meta_config_id", form["config_id"] or None, commit=False)
-    elif group == "tiktok":
+    scopes_changed = False
+    if group == "tiktok":
         config.set_setting(db, "tiktok_pkce_encoding", form["pkce_encoding"], commit=False)
-        config.set_setting(db, "tiktok_analytics_scopes", bool(analytics_scopes), commit=False)
+        if new_scopes is not None:
+            scopes_changed = new_scopes != config.tiktok_scopes(db)
+            config.set_setting(db, "tiktok_scopes", new_scopes, commit=False)
     db.commit()
     message, kind = f"Credenciales de {GROUP_TITLES[group]} guardadas.", "success"
-    if previous_id and previous_id != form["client_id"] and _connected_count(db, GROUP_NETWORKS[group]):
+    connected = _connected_count(db, GROUP_NETWORKS[group])
+    if previous_id and previous_id != form["client_id"] and connected:
         message += (
             " Has cambiado de app: las cuentas conectadas con la anterior tendrán que reconectarse en "
             "Cuentas conectadas."
+        )
+        kind = "warning"
+    elif scopes_changed and connected:
+        message += (
+            " Has cambiado los permisos: vuelve a conectar TikTok en Cuentas conectadas (botón «Reconectar») "
+            "para que se apliquen."
         )
         kind = "warning"
     return _section_response(

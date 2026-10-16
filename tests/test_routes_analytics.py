@@ -179,6 +179,41 @@ def test_connected_without_data_and_error_alert(client: TestClient, db: Session,
     assert 'class="an-side__flag"' in r.text
 
 
+def test_tiktok_without_stats_scopes_explains_instead_of_refreshing(
+    client: TestClient, db: Session, brand, clock, demo_mode_off
+) -> None:
+    account = make_account(db, brand, Network.TIKTOK, scopes=["user.info.basic", "video.upload"])
+    account.set_tokens("tok")
+    db.commit()
+    html = client.get("/estadisticas/tiktok").text
+    assert "Tu app de TikTok no tiene permisos de estadísticas" in html
+    assert 'href="/ajustes#credenciales-tiktok"' in html
+    assert "Pulsa «Actualizar ahora» para tomar la primera foto" not in html
+    assert html.count("user.info.stats") == 1  # the empty state only, no duplicate alert
+    # The snapshot job asks TikTok nothing for those scopes.
+    with _no_http() as http:
+        summary = analytics.snapshot_all(
+            db, http, clock, config.provider_settings(db), account_ids=[account.id]
+        )
+    assert summary["ok"] == 1
+    db.expire_all()
+    assert "user.info.stats" in (db.get(Account, account.id).meta or {}).get("analytics_notice", "")
+    assert client.get("/estadisticas/tiktok").text.count("user.info.stats") == 1  # stored notice not repeated
+
+
+def test_tiktok_with_one_stats_scope_warns_about_the_other(client: TestClient, db: Session, brand) -> None:
+    make_account(db, brand, Network.TIKTOK, scopes=["user.info.basic", "video.upload", "user.info.stats"])
+    html = client.get("/estadisticas/tiktok").text
+    assert "Tu app de TikTok no tiene permisos de estadísticas" not in html
+    assert "Aún no hay datos de TikTok" in html
+    assert "video.list" in html and "Ajustes › Credenciales › TikTok" in html  # alert for the missing one
+    # Unknown grants (older connection): no scope alert.
+    db.execute(Account.__table__.update().values(scopes=[]))
+    db.commit()
+    html = client.get("/estadisticas/tiktok").text
+    assert "video.list" not in html
+
+
 def test_youtube_native_metrics_only(client: TestClient, db: Session, brand, clock) -> None:
     yt = make_account(db, brand, Network.YOUTUBE, name="Mi canal")
     today = date(2026, 11, 3)

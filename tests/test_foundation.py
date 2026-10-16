@@ -469,6 +469,7 @@ def test_provider_settings(db: Session, app_settings) -> None:
         tiktok_pkce_encoding="hex",
         base_url="http://localhost:8765",
         demo_mode=True,
+        tiktok_scopes=["user.info.basic", "video.publish", "video.upload"],  # defaults (config.tiktok_scopes)
     )
     config.set_setting(db, "tiktok_pkce_encoding", "weird")
     assert config.provider_settings(db, base_url="http://localhost:9000").tiktok_pkce_encoding == "hex"

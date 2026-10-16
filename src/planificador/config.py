@@ -42,7 +42,8 @@ DEFAULTS: dict[str, Any] = {
     "tiktok_client_key": None,
     "tiktok_client_secret": None,  # secret
     "tiktok_pkce_encoding": "hex",  # "hex" | "base64url"
-    "tiktok_analytics_scopes": False,  # also request user.info.profile/stats + video.list at login
+    "tiktok_scopes": None,  # scopes the user's TikTok app has (list); None = derive (see tiktok_scopes())
+    "tiktok_analytics_scopes": False,  # legacy (before tiktok_scopes): also request the Display API scopes
     "google_client_id": None,  # YouTube
     "google_client_secret": None,  # secret
     "grace_minutes": 120,
@@ -270,6 +271,23 @@ def default_timezone(db: Session) -> str:
     return tz if is_valid_timezone(tz) else DEFAULT_TIMEZONE
 
 
+def tiktok_scopes(db: Session) -> list[str]:
+    """Scopes requested at TikTok login: the ones the user ticked in Ajustes (``tiktok_scopes``, normalised,
+    ``user.info.basic`` always included). Unset or unusable (no publishing scope) → derived from the legacy
+    ``tiktok_analytics_scopes`` flag: the default scopes, plus the Display API ones when it was on."""
+    from planificador.providers import tiktok
+
+    raw = get_setting(db, "tiktok_scopes", None)
+    if isinstance(raw, str | list | tuple):
+        scopes = tiktok.normalize_scopes(raw, known_only=True)
+        if tiktok.PUBLISH_SCOPES & set(scopes):
+            return scopes
+    legacy = list(tiktok.DEFAULT_SCOPES)
+    if get_bool(db, "tiktok_analytics_scopes"):
+        legacy += list(tiktok.SCOPES_ANALYTICS)
+    return tiktok.normalize_scopes(legacy, known_only=True)
+
+
 def provider_settings(db: Session, base_url: str | None = None) -> ProviderSettings:
     """Snapshot of everything providers need (decrypted app secrets included — never log it)."""
     encoding = get_setting(db, "tiktok_pkce_encoding")
@@ -287,7 +305,7 @@ def provider_settings(db: Session, base_url: str | None = None) -> ProviderSetti
         google_client_id=(get_setting(db, "google_client_id") or None),
         google_client_secret=get_secret(db, "google_client_secret"),
         meta_config_id=(str(get_setting(db, "meta_config_id") or "").strip() or None),
-        tiktok_analytics_scopes=get_bool(db, "tiktok_analytics_scopes"),
+        tiktok_scopes=tiktok_scopes(db),
     )
 
 

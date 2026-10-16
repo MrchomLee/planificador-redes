@@ -505,3 +505,24 @@ def test_followups_crash_is_postponed_not_retried_every_run(app, db, clock):
     assert info["errors"] == 1
     assert followups._parse(info["next_at"]) == clock.now() + followups.FOLLOWUP_INTERVAL
     registry.unregister("tiktok")
+
+
+def test_tiktok_direct_post_after_video_publish_was_lost_fails_permanently(app, db, clock):
+    """A Direct Post scheduled while the account had video.publish, reconnected later without it (sandbox app
+    without Direct Post): the engine fails it once, with a clear Spanish error, without calling TikTok."""
+    tid = _tiktok_target(app, db, clock)
+    row = db.get(PostTarget, tid)
+    row.account.scopes = ["user.info.basic", "video.upload"]
+    db.commit()
+    with respx.mock(assert_all_mocked=True) as r:  # no route: any request to TikTok would fail the test
+        sched = Scheduler(app.state.db, clock, inline=True, enable_jobs=False, rng=random.Random(3))
+        sched.tick()
+        sched.close()
+        assert not r.calls
+    db.expire_all()
+    row = db.get(PostTarget, tid)
+    assert row.status == TargetStatus.ERROR and row.attempts <= 1
+    assert "video.publish" in row.last_error and "borrador" in row.last_error
+    assert row.commit_phase == CommitPhase.NONE
+    detail = row.last_error_detail or {}
+    assert detail["code"] == "tiktok_mode_not_granted" and detail["kind"] == "permanent"

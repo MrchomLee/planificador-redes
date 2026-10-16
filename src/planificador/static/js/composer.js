@@ -237,6 +237,9 @@
           if (!("consent" in options)) options.consent = false;
           if (!("commercial_content" in options)) options.commercial_content = !!(options.brand_organic_toggle || options.brand_content_toggle);
           if (!options.mode) options.mode = "direct";
+          // Only the modes the account's TikTok permissions allow (no video.publish → draft to the app only).
+          const modes = this.modesOf(a);
+          if (!this.cfg.readonly && modes.length && !modes.includes(options.mode)) options.mode = modes[0];
         }
         if (a.network === "instagram" && !Array.isArray(options.collaborators)) options.collaborators = [];
         if (a.network === "youtube" && !Array.isArray(options.tags)) options.tags = [];
@@ -896,8 +899,26 @@
       },
 
       // ---------------------------------------------------------------- TikTok
+      modesOf(a) {
+        const tt = (a && a.tiktok) || null;
+        return tt && Array.isArray(tt.modes) ? tt.modes : ["direct", "inbox"];
+      },
+      ttModes(k) {
+        return this.modesOf(this.acc[k]);
+      },
+      ttCan(k, mode) {
+        return this.ttModes(k).includes(mode);
+      },
+      ttModeLocked(k) {
+        return this.ttModes(k).length < 2;
+      },
+      ttModeNote(k) {
+        const tt = (this.acc[k] || {}).tiktok;
+        return (tt && tt.note) || "";
+      },
       async loadCreator(k) {
         if (k === "demo" && !this.accountMap.demo) return;
+        if (!this.ttCan(k, "direct")) return; // creator_info belongs to Direct Post (video.publish)
         const id = this.accountId(k);
         if (!id || id === "demo") return;
         const wasClean = this.ready && !this.dirty;

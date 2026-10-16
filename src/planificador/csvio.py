@@ -598,11 +598,23 @@ def _parse_row(
             else:
                 row.add("warning", "Las historias de Instagram no admiten primer comentario: se ignora.", net)
         if net == "tiktok":
-            row.tiktok_direct = True
-            options["mode"] = "direct"
-            options["privacy_level"] = _tiktok_privacy(row, account)
-            if tiktok_consent is not None:
-                options["consent"] = bool(tiktok_consent)
+            from planificador.providers import tiktok as tiktok_provider
+
+            if tiktok_provider.account_modes(account) == ("inbox",):
+                # No Direct Post permission (video.publish): the video goes to the TikTok app as a draft.
+                options["mode"] = "inbox"
+                row.add(
+                    "warning",
+                    "Tu app de TikTok no tiene el permiso de publicación directa (video.publish): el vídeo "
+                    "se enviará como borrador a la app de TikTok y la visibilidad se elige allí.",
+                    net,
+                )
+            else:
+                row.tiktok_direct = True
+                options["mode"] = "direct"
+                options["privacy_level"] = _tiktok_privacy(row, account)
+                if tiktok_consent is not None:
+                    options["consent"] = bool(tiktok_consent)
         if net == "youtube":
             title = v.get("titulo_youtube", "")
             if title:

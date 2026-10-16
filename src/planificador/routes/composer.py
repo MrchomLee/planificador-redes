@@ -249,6 +249,9 @@ def account_json(account: Account, *, pseudo: bool = False) -> dict[str, Any]:
     meta = account.meta or {}
     creator = meta.get("creator_info") if network == Network.TIKTOK else None
     status = AccountStatus.CONNECTED.value if pseudo else str(account.status)
+    tiktok_modes: dict[str, Any] | None = None
+    if network == Network.TIKTOK:
+        tiktok_modes = tiktok_modes_json(account)
     return {
         "key": DEMO_KEY if pseudo else str(account.id),
         "id": None if pseudo else account.id,
@@ -267,7 +270,24 @@ def account_json(account: Account, *, pseudo: bool = False) -> dict[str, Any]:
         "auto_publish_default": True if pseudo else postsvc.default_auto_publish(account),
         "youtube_unlocked": postsvc.youtube_unlocked(account) if network == Network.YOUTUBE else None,
         "creator_info": creator if isinstance(creator, dict) else None,
+        "tiktok": tiktok_modes,
     }
+
+
+def tiktok_modes_json(account: Account) -> dict[str, Any]:
+    """TikTok publishing modes the account's granted scopes allow (``modes``: ``direct`` needs
+    ``video.publish``, ``inbox`` needs ``video.upload``; both when unknown) and the Spanish explanation the
+    composer shows when it has to force one of them (``note``)."""
+    from planificador.providers import tiktok
+
+    granted = tiktok.granted_scopes(account)
+    modes = list(tiktok.available_modes(granted))
+    note = None
+    if not modes:
+        note = tiktok.MSG_NO_PUBLISH_SCOPE
+    elif len(modes) == 1:
+        note = tiktok.MSG_MODE_UNAVAILABLE["direct" if modes == ["inbox"] else "inbox"]
+    return {"modes": modes, "note": note}
 
 
 def composer_accounts(
@@ -867,6 +887,19 @@ def tiktok_creator_info(
     fake = is_fake_account(account, settings)
     if fake:
         info = fake_creator_info(account)
+    elif account.network == Network.TIKTOK and "direct" not in tiktok_modes_json(account)["modes"]:
+        # creator_info is part of Direct Post (video.publish): without it there is nothing to ask TikTok.
+        return JSONResponse(
+            {
+                "ok": False,
+                "code": "tiktok_mode_not_granted",
+                "message": tiktok_modes_json(account)["note"],
+                "direct_available": False,
+                "creator_info": None,
+                "privacy_options": [],
+            },
+            headers=_NO_STORE,
+        )
     else:
         try:
             from planificador.providers import tiktok

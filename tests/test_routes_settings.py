@@ -4,6 +4,7 @@ about/logs."""
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -170,7 +171,8 @@ def test_save_tiktok_advanced(csrf_client: Any, db: Session, brand: Brand) -> No
             "client_id": "awkey123",
             "client_secret": "s3cr3t-tt",
             "pkce_encoding": "base64url",
-            "analytics_scopes": "1",
+            "scopes_form": "1",
+            "scopes": ["user.info.basic", "video.publish", "video.upload", "user.info.stats", "video.list"],
         },
         headers=HX,
     )
@@ -178,12 +180,155 @@ def test_save_tiktok_advanced(csrf_client: Any, db: Session, brand: Brand) -> No
     ps = config.provider_settings(db)
     assert ps.tiktok_client_key == "awkey123" and ps.tiktok_client_secret == "s3cr3t-tt"
     assert ps.tiktok_pkce_encoding == "base64url"
-    assert config.get_bool(db, "tiktok_analytics_scopes") is True
+    assert ps.tiktok_scopes == [
+        "user.info.basic",
+        "video.publish",
+        "video.upload",
+        "user.info.stats",
+        "video.list",
+    ]
+    # A form without the scope fields (old page, API client) leaves them alone.
     csrf_client.post(
         "/ajustes/credenciales/tiktok", data={"client_id": "awkey123", "pkce_encoding": "hex"}, headers=HX
     )
     db.expire_all()
-    assert config.get_bool(db, "tiktok_analytics_scopes") is False
+    assert "video.list" in config.tiktok_scopes(db)
+
+
+TT_SCOPE_TEXT = "Marca exactamente los permisos (scopes) que tiene tu app en el portal de TikTok"
+
+
+def _tiktok_card(html: str) -> str:
+    start = html.index('id="cred-tiktok"')
+    return html[start : html.index("</form>", start)]
+
+
+def test_tiktok_scope_checkboxes_defaults(client: TestClient, db: Session, brand: Brand) -> None:
+    card = _tiktok_card(client.get("/ajustes").text)
+    assert TT_SCOPE_TEXT in card
+    # Visible, not tucked away in the advanced options.
+    assert card.index(TT_SCOPE_TEXT) < card.index('class="advanced"')
+    assert "error «scope»" in card
+    for scope in ("user.info.basic", "video.publish", "video.upload"):
+        tag = re.search(rf'<input[^>]*id="ck-tt-scope-{scope.replace(".", "-")}"[^>]*>', card).group(0)
+        assert "checked" in tag, scope
+    for scope in ("user.info.profile", "user.info.stats", "video.list"):
+        tag = re.search(rf'<input[^>]*id="ck-tt-scope-{scope.replace(".", "-")}"[^>]*>', card).group(0)
+        assert "checked" not in tag, scope
+    basic = re.search(r'<input[^>]*id="ck-tt-scope-user-info-basic"[^>]*>', card).group(0)
+    assert "disabled" in basic
+    assert '<input type="hidden" name="scopes" value="user.info.basic">' in card  # still submitted
+    assert "Pedir permisos de estadísticas" not in card
+    assert "Publicación directa" in card and "Enviar como borrador a la app de TikTok" in card
+    assert "Estadísticas" in card
+
+
+def test_save_tiktok_scopes_inbox_only(csrf_client: Any, db: Session, brand: Brand) -> None:
+    r = csrf_client.post(
+        "/ajustes/credenciales/tiktok",
+        data={
+            "client_id": "awkey123",
+            "pkce_encoding": "hex",
+            "scopes_form": "1",
+            "scopes": ["user.info.basic", "video.upload", "not.a.scope"],
+        },
+        headers=HX,
+    )
+    assert r.status_code == 200 and toast(r)["kind"] == "success"
+    assert raw_setting(db, "tiktok_scopes") == ["user.info.basic", "video.upload"]
+    assert config.provider_settings(db).tiktok_scopes == ["user.info.basic", "video.upload"]
+    card = _tiktok_card(r.text)
+    assert "checked" not in re.search(r'<input[^>]*id="ck-tt-scope-video-publish"[^>]*>', card).group(0)
+    assert "checked" in re.search(r'<input[^>]*id="ck-tt-scope-video-upload"[^>]*>', card).group(0)
+
+
+def test_save_tiktok_scopes_needs_a_publishing_scope(csrf_client: Any, db: Session, brand: Brand) -> None:
+    config.set_setting(db, "tiktok_scopes", ["user.info.basic", "video.publish"])
+    r = csrf_client.post(
+        "/ajustes/credenciales/tiktok",
+        data={
+            "client_id": "awkey123",
+            "pkce_encoding": "hex",
+            "scopes_form": "1",
+            "scopes": ["user.info.basic", "video.list"],
+        },
+        headers=HX,
+    )
+    assert r.status_code == 422
+    assert "Marca al menos «video.publish»" in r.text
+    assert raw_setting(db, "tiktok_scopes") == ["user.info.basic", "video.publish"]  # unchanged
+    assert config.get_setting(db, "tiktok_client_key") is None  # nothing saved
+    card = _tiktok_card(r.text)  # the user's selection is kept
+    assert "checked" in re.search(r'<input[^>]*id="ck-tt-scope-video-list"[^>]*>', card).group(0)
+    assert "checked" not in re.search(r'<input[^>]*id="ck-tt-scope-video-publish"[^>]*>', card).group(0)
+    # Nothing ticked at all (only the hidden user.info.basic) is the same error.
+    r = csrf_client.post(
+        "/ajustes/credenciales/tiktok",
+        data={"client_id": "awkey123", "pkce_encoding": "hex", "scopes_form": "1"},
+        headers=HX,
+    )
+    assert r.status_code == 422 and "Marca al menos" in r.text
+
+
+def test_tiktok_scope_change_asks_to_reconnect(csrf_client: Any, db: Session, brand: Brand) -> None:
+    db.add(Account(brand_id=brand.id, network="tiktok", external_id="open-1", name="TT"))
+    db.commit()
+    data = {"client_id": "awkey123", "pkce_encoding": "hex", "scopes_form": "1"}
+    r = csrf_client.post(
+        "/ajustes/credenciales/tiktok",
+        data={**data, "scopes": ["user.info.basic", "video.publish", "video.upload"]},
+        headers=HX,
+    )
+    assert toast(r)["kind"] == "success"  # same as the defaults: nothing to reconnect
+    r = csrf_client.post(
+        "/ajustes/credenciales/tiktok",
+        data={**data, "scopes": ["user.info.basic", "video.upload"]},
+        headers=HX,
+    )
+    assert toast(r)["kind"] == "warning" and "Reconectar" in toast(r)["message"]
+
+
+@pytest.mark.parametrize(
+    ("stored", "legacy", "expected"),
+    [
+        (None, False, ["user.info.basic", "video.publish", "video.upload"]),
+        (
+            None,
+            True,
+            [
+                "user.info.basic",
+                "video.publish",
+                "video.upload",
+                "user.info.profile",
+                "user.info.stats",
+                "video.list",
+            ],
+        ),
+        (["video.upload"], True, ["user.info.basic", "video.upload"]),  # explicit list wins over the flag
+        ("user.info.basic,video.publish", False, ["user.info.basic", "video.publish"]),
+        (["user.info.basic", "video.list"], False, ["user.info.basic", "video.publish", "video.upload"]),
+        (  # unusable stored list (no publishing scope, unknown names) → the legacy flag decides
+            ["user.info.basic", "bogus"],
+            True,
+            [
+                "user.info.basic",
+                "video.publish",
+                "video.upload",
+                "user.info.profile",
+                "user.info.stats",
+                "video.list",
+            ],
+        ),
+    ],
+)
+def test_tiktok_scopes_setting_and_legacy_migration(
+    db: Session, stored: Any, legacy: bool, expected: list[str]
+) -> None:
+    if stored is not None:
+        config.set_setting(db, "tiktok_scopes", stored)
+    config.set_setting(db, "tiktok_analytics_scopes", legacy)
+    assert config.tiktok_scopes(db) == expected
+    assert config.provider_settings(db).tiktok_scopes == expected
 
 
 @pytest.mark.parametrize(

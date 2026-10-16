@@ -451,6 +451,51 @@ def test_tiktok_inbox_mode_needs_no_privacy() -> None:
     assert "tiktok_mode_invalid" in errors(check(tt({"mode": "borrador", "privacy_level": "SELF_ONLY"})))
 
 
+def test_tiktok_mode_must_match_the_granted_scopes() -> None:
+    inbox_only = rules.RuleContext(granted_scopes=frozenset({"user.info.basic", "video.upload"}), now=NOW)
+    issues = check(tt({"privacy_level": "SELF_ONLY"}), inbox_only)
+    assert errors(issues) == {"tiktok_mode_unavailable"}
+    issue = next(i for i in issues if i.code == "tiktok_mode_unavailable")
+    assert issue.field == "mode" and "video.publish" in issue.message and "borrador" in issue.message
+    # The draft mode works and needs none of the Direct Post fields (privacy, consent, interactions).
+    draft = check(tt({"mode": "inbox", "consent": False}, text=""), inbox_only)
+    assert not errors(draft)
+
+    direct_only = rules.RuleContext(granted_scopes=frozenset({"user.info.basic", "video.publish"}), now=NOW)
+    issues = check(tt({"mode": "inbox"}), direct_only)
+    assert errors(issues) == {"tiktok_mode_unavailable"} and "video.upload" in issues[0].message
+    assert not errors(check(tt({"privacy_level": "SELF_ONLY"}), direct_only))
+
+    nothing = rules.RuleContext(granted_scopes=frozenset({"user.info.basic"}), now=NOW)
+    assert errors(check(tt({"mode": "inbox"}), nothing)) == {"tiktok_no_publish_scope"}
+    # Unknown grants: no scope check at all.
+    assert not errors(check(tt({"privacy_level": "SELF_ONLY"}), rules.RuleContext(now=NOW)))
+    assert rules.tiktok_modes(None) == ("direct", "inbox")
+    assert rules.tiktok_modes(inbox_only) == ("inbox",)
+
+
+def test_context_for_account_reads_granted_scopes(db, brand) -> None:
+    from planificador.models import Account, AccountStatus, Network
+
+    account = Account(
+        brand_id=brand.id,
+        network=Network.TIKTOK,
+        external_id="tt-2",
+        name="Sandbox",
+        status=AccountStatus.CONNECTED,
+        scopes=["user.info.basic", "video.upload", "video.list"],
+    )
+    db.add(account)
+    db.commit()
+    ctx = rules.context_for_account(db, account)
+    assert ctx.granted_scopes == frozenset({"user.info.basic", "video.upload", "video.list"})
+    issues = rules.validate_for_account(db, account, tt({"privacy_level": "SELF_ONLY"}))
+    assert "tiktok_mode_unavailable" in errors(issues)
+    assert not errors(rules.validate_for_account(db, account, tt({"mode": "inbox"})))
+    legacy = Account(brand_id=brand.id, network=Network.TIKTOK, external_id="tt-3", name="Antigua")
+    assert rules.context_for_account(db, legacy).granted_scopes is None
+
+
 @pytest.mark.parametrize(
     ("clip", "code"),
     [

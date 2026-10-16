@@ -369,6 +369,21 @@ def test_consent_is_applied_on_import_preview(db, brand, clock):
     assert any("Confirmación de uso de música" in i.message for i in refused.errors)
 
 
+def test_tiktok_rows_become_drafts_without_video_publish(db, brand, clock):
+    add_account(db, brand, Network.TIKTOK, scopes=["user.info.basic", "video.upload", "video.list"])
+    add_media(db, brand, "clip.mp4", kind="video", sha="8" * 64)
+    preview = csvio.build_preview(
+        db, brand, make_csv(row(tiktok="si", medios="clip.mp4", privacidad_tiktok="solo yo")), clock
+    )
+    r1 = preview.data_rows[0]
+    assert r1.data.targets[0].options == {"mode": "inbox"}
+    assert not r1.tiktok_direct and not preview.has_tiktok_direct  # no music consent to ask
+    assert not r1.errors, [i.message for i in r1.errors]
+    assert any("video.publish" in i.message and i.level == "warning" for i in r1.issues)
+    result = csvio.import_rows(db, brand, make_csv(row(tiktok="si", medios="clip.mp4")), clock)
+    assert result.created == 1 and result.scheduled == 1, result.failed
+
+
 def test_first_comment_and_autopublish(db, brand, clock, fb):
     add_account(db, brand, Network.INSTAGRAM, account_type="business")
     preview = csvio.build_preview(

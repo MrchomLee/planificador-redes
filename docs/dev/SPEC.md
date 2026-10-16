@@ -259,6 +259,7 @@ class ProviderSettings:  # built by config.provider_settings(db)
     tiktok_pkce_encoding: str  # "hex" (default) | "base64url"
     base_url: str  # "http://localhost:8765"
     demo_mode: bool
+    tiktok_scopes: list[str] | None = None  # scopes requested at TikTok login (config.tiktok_scopes)
 
 class PublicMedia(Protocol):   # implemented by publicmedia.PublicMediaService
     def url_for(self, path: Path, mime: str, ttl_seconds: int = 3600) -> str: ...  # public HTTPS URL
@@ -454,6 +455,13 @@ Formats and options (option keys are part of the contract; providers read them f
   (bool), `brand_organic_toggle`, `brand_content_toggle` (commercial disclosure; branded content cannot be
   `SELF_ONLY`), `video_cover_timestamp_ms`, `consent` (bool, must be true for direct post — the UI shows TikTok's
   required consent sentence). Text: caption ≤ 2200 chars; newlines allowed but warn they may be flattened.
+  Scopes: `direct` needs `video.publish`, `inbox` needs `video.upload`. The user ticks the scopes their TikTok
+  app has (setting `tiktok_scopes`, list; default `user.info.basic`, `video.upload`, `video.publish`; unset →
+  derived from the legacy `tiktok_analytics_scopes` flag) and only those are requested at login
+  (`ProviderSettings.tiktok_scopes`). With known grants (`accounts.scopes`) the composer forces the only
+  available mode, `rules` rejects the other (`tiktok_mode_unavailable` / `tiktok_no_publish_scope`) and the
+  provider fails it PERMANENT before the commit point (`tiktok_mode_not_granted`). Inbox mode needs none of
+  the Direct Post fields (privacy, interactions, consent).
 - **youtube**: `video` (1 video), `short` (1 video ≤ 180 s, vertical/square). Options per report 06 §13.2:
   `title` (required ≤100, no `<`/`>`, prefill first line of text), `privacy_status` (`public`|`unlisted`|`private`),
   `native_schedule` (publishAt), `category_id` (default "22"), `tags` (list, ≤500 chars total),

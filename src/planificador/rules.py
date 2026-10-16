@@ -457,6 +457,8 @@ class RuleContext:
     account_meta: Mapping[str, Any] = field(default_factory=dict)
     public_media_mode: str | None = None
     now: datetime | None = None
+    #: OAuth scopes granted to the account (``accounts.scopes``); ``None`` = unknown (no scope checks).
+    granted_scopes: frozenset[str] | None = None
 
     def current_time(self) -> datetime:
         return self.now or datetime.now(UTC)
@@ -471,11 +473,18 @@ def context_for_account(db: Any, account: Any, clock: Any = None) -> RuleContext
         mode = str(config.get_setting(db, "public_media_mode") or "off")
     except Exception:  # pragma: no cover - settings table unavailable
         log.debug("public_media_mode unavailable", exc_info=True)
+    granted: frozenset[str] | None = None
+    if account is not None and str(getattr(account, "network", "")) == "tiktok":
+        from planificador.providers import tiktok
+
+        scopes = tiktok.granted_scopes(account)
+        granted = frozenset(scopes) if scopes is not None else None
     return RuleContext(
         account_type=getattr(account, "account_type", None) if account is not None else None,
         account_meta=dict(getattr(account, "meta", None) or {}) if account is not None else {},
         public_media_mode=mode,
         now=clock.now() if clock is not None else None,
+        granted_scopes=granted,
     )
 
 
@@ -1355,6 +1364,13 @@ def _tiktok_mode(options: Mapping[str, Any] | None) -> str:
     return "inbox" if mode == "inbox" else "direct"
 
 
+def tiktok_modes(context: RuleContext | None) -> tuple[str, ...]:
+    """TikTok publishing modes allowed by the account's granted scopes (both when unknown)."""
+    from planificador.providers import tiktok
+
+    return tiktok.available_modes(context.granted_scopes if context is not None else None)
+
+
 def _creator_info(context: RuleContext) -> Mapping[str, Any] | None:
     info = (context.account_meta or {}).get("creator_info")
     return info if isinstance(info, Mapping) else None
@@ -1402,6 +1418,22 @@ def _tiktok_checks(fmt: str, target: TargetSpec, context: RuleContext) -> list[I
     info = _creator_info(context)
     videos = [m for m in target.media if _kind(m) == "video"]
     issues.extend(_tiktok_duration_checks(videos[0] if len(videos) == 1 else None, info))
+
+    modes = tiktok_modes(context)
+    if mode not in modes:
+        # The account's grants do not cover this mode (sandbox apps often lack video.publish): the composer
+        # forces the other mode; anything else (CSV, API, scopes revoked) is refused here.
+        from planificador.providers import tiktok
+
+        issues.append(
+            Issue(
+                "error",
+                "tiktok_mode_unavailable" if modes else "tiktok_no_publish_scope",
+                tiktok.mode_unavailable_message(mode, context.granted_scopes),
+                "mode",
+            )
+        )
+        return issues
 
     if mode == "inbox":
         issues.append(

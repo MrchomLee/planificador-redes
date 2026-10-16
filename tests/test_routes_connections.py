@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -489,7 +490,11 @@ def test_callbacks_are_exempt_from_password(client: TestClient, db: Session, bra
 # ------------------------------------------------------------------------------------------- TikTok
 
 
-def mock_tiktok(router: respx.MockRouter, verifier_holder: dict[str, str]) -> dict[str, respx.Route]:
+def mock_tiktok(
+    router: respx.MockRouter,
+    verifier_holder: dict[str, str],
+    scope: str = "user.info.basic,video.publish,video.upload",
+) -> dict[str, respx.Route]:
     def token(request: httpx.Request) -> httpx.Response:
         form = dict(parse_qs(request.content.decode()))
         form = {k: v[0] for k, v in form.items()}
@@ -505,7 +510,7 @@ def mock_tiktok(router: respx.MockRouter, verifier_holder: dict[str, str]) -> di
                 "refresh_token": "rft.tt",
                 "refresh_expires_in": 31536000,
                 "open_id": "open-123",
-                "scope": "user.info.basic,video.publish,video.upload",
+                "scope": scope,
                 "token_type": "Bearer",
             },
         )
@@ -592,13 +597,87 @@ def test_tiktok_base64url_pkce_setting(client: TestClient, db: Session, brand: B
     assert q["code_challenge"] == expected
 
 
-def test_tiktok_analytics_scopes_setting(client: TestClient, db: Session, brand: Brand) -> None:
+def test_tiktok_start_requests_only_the_ticked_scopes(client: TestClient, db: Session, brand: Brand) -> None:
     set_tiktok(db)
     _, q = start(client, "/conexiones/tiktok/iniciar")
-    assert "user.info.stats" not in q["scope"]
-    config.set_setting(db, "tiktok_analytics_scopes", True)
+    assert q["scope"].split(",") == ["user.info.basic", "video.publish", "video.upload"]  # defaults
+    # A sandbox app with user.info.basic, video.upload and video.list only (no Direct Post).
+    config.set_setting(db, "tiktok_scopes", ["user.info.basic", "video.upload", "video.list"])
+    _, q = start(client, "/conexiones/tiktok/iniciar")
+    assert q["scope"] == "user.info.basic,video.upload,video.list"
+
+
+def test_tiktok_card_lists_the_scopes_it_will_request(client: TestClient, db: Session, brand: Brand) -> None:
+    set_tiktok(db)
+    config.set_setting(db, "tiktok_scopes", ["user.info.basic", "video.upload"])
+    html = client.get("/conexiones").text
+    card = html[html.index('id="conn-tiktok"') :]
+    card = card[: card.index("</article>")]
+    assert "Permisos que se pedirán a TikTok" in card
+    assert "<code>user.info.basic</code>, <code>video.upload</code>." in card
+    assert "<code>video.publish</code>" not in card
+    assert 'href="/ajustes#credenciales-tiktok"' in card and "error «scope»" in card
+
+
+def test_tiktok_legacy_analytics_flag_still_requests_stats(
+    client: TestClient, db: Session, brand: Brand
+) -> None:
+    set_tiktok(db)
+    config.set_setting(db, "tiktok_analytics_scopes", True)  # installs from before tiktok_scopes
     _, q = start(client, "/conexiones/tiktok/iniciar")
     assert "user.info.stats" in q["scope"] and "video.publish" in q["scope"]
+
+
+def test_tiktok_connect_inbox_only_app(client: TestClient, db: Session, brand: Brand) -> None:
+    """A sandbox app without video.publish connects fine: no warning, no creator_info (Direct Post), the card
+    says only the draft mode is available."""
+    set_tiktok(db)
+    config.set_setting(db, "tiktok_scopes", ["user.info.basic", "video.upload", "video.list"])
+    _, q = start(client, "/conexiones/tiktok/iniciar")
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+        routes = mock_tiktok(router, {}, scope="user.info.basic,video.upload,video.list")
+        r = client.get(
+            f"/conexiones/callback/social1?code=tt-code&state={q['state']}", follow_redirects=False
+        )
+        assert location(r) == "/conexiones"
+        assert routes["token"].called and not routes["creator"].called
+    acc = account(db, brand.id, "tiktok")
+    assert acc is not None and acc.status == AccountStatus.CONNECTED
+    assert acc.scopes == ["user.info.basic", "video.upload", "video.list"]
+    assert acc.meta["granted_scopes"] == acc.scopes and acc.meta.get("creator_info") is None
+    html = client.get("/conexiones").text
+    messages = flashes(html)
+    assert any("Conectado: TikTok" in m for m in messages)
+    assert not any("permiso" in m for m in messages)
+    card = html[html.index('id="conn-tiktok"') :]
+    card = card[: card.index("</article>")]
+    assert "Modos de publicación disponibles" in card
+    assert re.search(r'conn-tt__mode is-off">.*?Publicación directa', card, re.S)
+    assert re.search(r'conn-tt__mode">.*?Borrador en la app', card, re.S)
+    assert "video.publish" in card  # why direct posting is missing
+
+
+def test_tiktok_card_modes(client: TestClient, db: Session, brand: Brand) -> None:
+    set_tiktok(db)
+    acc = _tiktok_account(db, brand)
+
+    def card() -> str:
+        html = client.get("/conexiones").text
+        part = html[html.index('id="conn-tiktok"') :]
+        return part[: part.index("</article>")]
+
+    # Unknown grants (older connection): both offered, checked when publishing.
+    assert "is-off" not in card() and "se comprobarán al publicar" in card()
+    acc.scopes = ["user.info.basic", "video.publish", "video.upload"]
+    db.commit()
+    assert "is-off" not in card() and "se comprobarán" not in card()
+    acc.scopes = ["user.info.basic", "video.publish"]
+    db.commit()
+    html = card()
+    assert re.search(r'conn-tt__mode is-off">.*?Borrador en la app', html, re.S) and "video.upload" in html
+    acc.scopes = ["user.info.basic"]
+    db.commit()
+    assert "ningún permiso de publicación" in card()
 
 
 def test_tiktok_flow_with_monkeypatched_provider(
@@ -635,7 +714,7 @@ def test_tiktok_flow_with_monkeypatched_provider(
     acc = account(db, brand.id, "tiktok")
     assert acc is not None and acc.name == "Otra" and "creator_info" not in acc.meta
     html = client.get("/conexiones").text
-    assert any("permisos de publicación" in m for m in flashes(html))
+    assert any("ningún permiso de publicación" in m for m in flashes(html))
 
 
 def test_tiktok_exchange_error(client: TestClient, db: Session, brand: Brand) -> None:
@@ -1089,6 +1168,38 @@ def test_guide_renders_markdown_safely(
     assert "javascript:" not in html
     assert '<h2 id="crear-la-app">' in html and 'href="#crear-la-app"' in html  # table of contents
     assert "<table" in html and "<blockquote>" in html and "&lt;b&gt;no html&lt;/b&gt;" in html
+
+
+def test_tiktok_guide_follows_the_sandbox_flow(client: TestClient) -> None:
+    """The shipped docs/guia-tiktok.md: Sandbox first, Desktop URL verification, scopes, error screens."""
+    html = client.get("/ayuda/tiktok").text
+    for needle in (
+        "Production | Sandbox",
+        "Create Sandbox",
+        "Apply changes",
+        "App review",
+        "URL prefix",
+        "public_html",
+        ".github.io",
+        "Login Kit",
+        "Direct Post",
+        "Target users",
+        "error_type=client_key",
+        "unauthorized_client",
+        "error_type=scope",
+        "redirect_uri",
+        "code_challenge",
+        "Permisos (scopes) de tu app",
+        "http://localhost:8765/conexiones/callback/social1",
+    ):
+        assert needle in html, needle
+    assert "Pedir permisos de estadísticas" not in html
+    # The composer's "Ver la guía" link points at an existing section.
+    composer_tpl = (conn._PACKAGE_DIR / "templates" / "composer" / "_net_tiktok.html").read_text(
+        encoding="utf-8"
+    )
+    anchor = re.search(r'href="/ayuda/tiktok#([\w-]+)"', composer_tpl).group(1)
+    assert f'id="{anchor}"' in html
 
 
 def test_markdown_lists_and_paragraphs() -> None:

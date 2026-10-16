@@ -81,11 +81,24 @@ CALLBACK_PATH = "/conexiones/callback/social1"
 
 # --------------------------------------------------------------------------------------------- scopes
 
-#: Always requested: Login Kit identity + Content Posting (Direct Post and inbox upload). Report 03 §1.1.
-SCOPES_PUBLISH: tuple[str, ...] = ("user.info.basic", "video.publish", "video.upload")
-#: Optional Display API scopes (may not be offered to new apps, report 03 §1.1 / §14 #21). Only requested when
-#: enabled, because asking for a scope the developer app lacks breaks TikTok's consent screen.
+SCOPE_BASIC = "user.info.basic"  # Login Kit identity: always requested
+SCOPE_DIRECT = "video.publish"  # Content Posting API, Direct Post
+SCOPE_INBOX = "video.upload"  # Content Posting API, upload as a draft to the TikTok app (inbox)
+#: Publishing mode → the scope it needs.
+MODE_SCOPES: dict[str, str] = {"direct": SCOPE_DIRECT, "inbox": SCOPE_INBOX}
+PUBLISH_SCOPES: frozenset[str] = frozenset(MODE_SCOPES.values())
+
+#: Login Kit identity + Content Posting (Direct Post and inbox upload). Report 03 §1.1.
+SCOPES_PUBLISH: tuple[str, ...] = (SCOPE_BASIC, SCOPE_DIRECT, SCOPE_INBOX)
+#: Optional Display API scopes (may not be offered to new apps, report 03 §1.1 / §14 #21).
 SCOPES_ANALYTICS: tuple[str, ...] = ("user.info.profile", "user.info.stats", "video.list")
+#: Every scope the app knows, in the order the settings page lists them. TikTok rejects the whole authorize
+#: request (``error_type=scope``) when it asks for a scope the developer app does not have — sandbox apps
+#: often lack ``video.publish`` or the Display API ones — so the user ticks exactly the scopes of their app
+#: (setting ``tiktok_scopes``) and only those are requested.
+KNOWN_SCOPES: tuple[str, ...] = SCOPES_PUBLISH + SCOPES_ANALYTICS
+#: ``tiktok_scopes`` for a new install.
+DEFAULT_SCOPES: tuple[str, ...] = (SCOPE_BASIC, SCOPE_INBOX, SCOPE_DIRECT)
 SCOPE_ERROR_CODES = frozenset({"scope_not_authorized", "scope_permission_missed"})
 
 # ------------------------------------------------------------------------------------------- limits
@@ -170,14 +183,46 @@ MSG_PHOTO = (
 MSG_TEMPORARY = "TikTok tiene un problema temporal. Se reintentará."
 NOTICE_STATS_SCOPE = (
     "TikTok no ha concedido el permiso de estadísticas de la cuenta (user.info.stats), así que no se pueden "
-    "leer seguidores, «me gusta» ni número de vídeos. Añade los permisos de estadísticas (Display API) a tu "
-    "app de TikTok, actívalos en Ajustes y vuelve a conectar la cuenta."
+    "leer seguidores, «me gusta» ni número de vídeos. Si tu app de TikTok tiene ese permiso, márcalo en "
+    "Ajustes › Credenciales › TikTok y vuelve a conectar la cuenta."
 )
 NOTICE_VIDEO_SCOPE = (
     "TikTok no ha concedido el permiso para leer tus vídeos (video.list), así que no hay estadísticas por "
-    "publicación. Añade los permisos de estadísticas (Display API) a tu app de TikTok, actívalos en Ajustes "
-    "y vuelve a conectar la cuenta. TikTok solo da estadísticas de vídeos públicos."
+    "publicación. Si tu app de TikTok tiene ese permiso, márcalo en Ajustes › Credenciales › TikTok y vuelve "
+    "a conectar la cuenta. TikTok solo da estadísticas de vídeos públicos."
 )
+#: Why a publishing mode is not available for an account (Spanish, shown by the composer, the rules and the
+#: engine). Keyed by the missing mode.
+MSG_MODE_UNAVAILABLE: dict[str, str] = {
+    "direct": (
+        "Tu app de TikTok no tiene el permiso de publicación directa (video.publish), así que esta cuenta "
+        "solo puede enviar los vídeos como borrador a la app de TikTok, donde terminas la publicación. Para "
+        "publicar directamente, activa «Direct Post» en Content Posting API de tu app de TikTok, marca "
+        "video.publish en Ajustes › Credenciales › TikTok y vuelve a conectar la cuenta."
+    ),
+    "inbox": (
+        "Tu app de TikTok no tiene el permiso para enviar borradores (video.upload), así que esta cuenta "
+        "solo puede publicar directamente. Para enviar borradores, añade video.upload a tu app de TikTok, "
+        "márcalo en Ajustes › Credenciales › TikTok y vuelve a conectar la cuenta."
+    ),
+}
+MSG_NO_PUBLISH_SCOPE = (
+    "Esta cuenta de TikTok no tiene ningún permiso de publicación (ni video.publish ni video.upload). Añade "
+    "Content Posting API a tu app de TikTok, marca sus permisos en Ajustes › Credenciales › TikTok y vuelve "
+    "a conectar la cuenta."
+)
+MSG_MODE_REFUSED: dict[str, str] = {
+    "direct": (
+        "TikTok ha rechazado la publicación directa: tu app de TikTok no tiene el permiso video.publish (o "
+        "no lo aceptaste al conectar). Usa «Enviar a la app de TikTok como borrador», o activa «Direct Post» "
+        "en tu app de TikTok y vuelve a conectar la cuenta."
+    ),
+    "inbox": (
+        "TikTok ha rechazado el envío del borrador: tu app de TikTok no tiene el permiso video.upload (o no "
+        "lo aceptaste al conectar). Desactiva «Enviar a la app de TikTok como borrador», o añade "
+        "video.upload a tu app de TikTok y vuelve a conectar la cuenta."
+    ),
+}
 _INBOX_RECONCILE_MSG = (
     "El vídeo está en la bandeja de entrada de la app de TikTok: ábrela para terminar la publicación y "
     "después márcala como publicada."
@@ -521,18 +566,59 @@ def _require_token(account: AccountCreds) -> str:
     return account.access_token
 
 
-def _granted_scopes(account: AccountCreds) -> set[str] | None:
-    """Granted scopes when known — an ``AccountCreds.scopes`` attribute (if the integrator adds one) or
-    ``meta["scopes"]`` / ``meta["granted_scopes"]`` — else ``None`` (unknown: just try the API)."""
+def granted_scopes(account: Any) -> set[str] | None:
+    """Granted scopes when known — the ``scopes`` attribute (``AccountCreds`` or an ``Account`` row) or
+    ``meta["scopes"]`` / ``meta["granted_scopes"]`` — else ``None`` (unknown, e.g. an account connected before
+    scopes were stored: just try the API)."""
     raw: Any = getattr(account, "scopes", None) or None
     if raw is None:
-        meta = account.meta or {}
-        raw = meta.get("scopes", meta.get("granted_scopes"))
+        meta = getattr(account, "meta", None) or {}
+        raw = meta.get("scopes", meta.get("granted_scopes")) or None
     if raw is None:
         return None
     if isinstance(raw, str):
-        raw = raw.split(",")
-    return {str(s).strip() for s in raw if str(s).strip()}
+        raw = raw.replace(" ", ",").split(",")
+    scopes = {str(s).strip() for s in raw if str(s).strip()}
+    return scopes or None
+
+
+_granted_scopes = granted_scopes  # internal alias
+
+
+def available_modes(granted: Any) -> tuple[str, ...]:
+    """Publishing modes the granted scopes allow, in UI order: ``"direct"`` needs ``video.publish``,
+    ``"inbox"`` needs ``video.upload``. ``None`` / empty (unknown grants) allows both — TikTok decides."""
+    if not granted:
+        return tuple(MODE_SCOPES)
+    scopes = {str(s).strip() for s in granted}
+    return tuple(mode for mode, scope in MODE_SCOPES.items() if scope in scopes)
+
+
+def account_modes(account: Any) -> tuple[str, ...]:
+    """:func:`available_modes` for an ``Account`` row or :class:`AccountCreds`."""
+    return available_modes(granted_scopes(account))
+
+
+def mode_unavailable_message(mode: str, granted: Any) -> str:
+    """Spanish explanation of why ``mode`` cannot be used with these grants."""
+    if not available_modes(granted):
+        return MSG_NO_PUBLISH_SCOPE
+    return MSG_MODE_UNAVAILABLE.get(mode, MSG_NO_PUBLISH_SCOPE)
+
+
+def normalize_scopes(items: Any, *, known_only: bool = False) -> list[str]:
+    """Scopes from a list or a comma/space separated string: known ones in :data:`KNOWN_SCOPES` order with
+    ``user.info.basic`` always included, then (unless ``known_only``) any other scope in the given order."""
+    if items is None:
+        items = []
+    elif isinstance(items, str):
+        items = items.replace(" ", ",").split(",")
+    given = [str(s).strip() for s in items if str(s).strip()]
+    chosen = set(given) | {SCOPE_BASIC}
+    out = [s for s in KNOWN_SCOPES if s in chosen]
+    if not known_only:
+        out.extend(dict.fromkeys(s for s in given if s not in KNOWN_SCOPES))
+    return out
 
 
 def _transport_error(exc: httpx.HTTPError, op: str) -> ProviderError:
@@ -622,6 +708,19 @@ def classify_tiktok_error(
         code or f"http_{status_code}",
         f"TikTok ha rechazado la petición{suffix}.",
         detail=detail,
+    )
+
+
+def _mode_refused(err: ProviderError, mode: str) -> ProviderError:
+    """A scope refusal while publishing names the missing permission of ``mode``; others pass through."""
+    if err.code not in SCOPE_ERROR_CODES:
+        return err
+    return ProviderError(
+        ErrorKind.PERMANENT,
+        err.code,
+        MSG_MODE_REFUSED.get(mode, MSG_SCOPE),
+        detail={**err.detail, "mode": mode},
+        retry_after=err.retry_after,
     )
 
 
@@ -844,13 +943,13 @@ def new_pkce_pair(encoding: str = "hex") -> tuple[str, str]:
 def login_scopes(
     settings: ProviderSettings | None = None, *, include_analytics: bool | None = None
 ) -> list[str]:
-    """Scopes to request. A ``tiktok_scopes`` attribute on ``settings`` (list or comma string) wins; otherwise
-    the publishing scopes, plus the Display API ones when ``include_analytics`` (default: the
+    """Scopes to request. ``settings.tiktok_scopes`` (list or comma string: the scopes the user ticked in
+    Ajustes, see ``config.tiktok_scopes``) wins, always with ``user.info.basic``; otherwise the publishing
+    scopes, plus the Display API ones when ``include_analytics`` (default: a legacy
     ``tiktok_analytics_scopes`` attribute of ``settings``, False when absent)."""
     explicit = getattr(settings, "tiktok_scopes", None) if settings is not None else None
     if explicit:
-        items = explicit.split(",") if isinstance(explicit, str) else list(explicit)
-        return [str(s).strip() for s in items if str(s).strip()]
+        return normalize_scopes(explicit)
     if include_analytics is None:
         include_analytics = bool(getattr(settings, "tiktok_analytics_scopes", False))
     return list(SCOPES_PUBLISH) + (list(SCOPES_ANALYTICS) if include_analytics else [])
@@ -1283,6 +1382,16 @@ class TikTokProvider(Provider):
         target = ctx.target
         mode = publish_mode(target.options)
         token = _require_token(ctx.account)
+        granted = granted_scopes(ctx.account)
+        if mode not in available_modes(granted):
+            # The composer and the rules already refuse this; it still happens when the grants changed after
+            # scheduling (scopes revoked, the account reconnected with fewer permissions).
+            raise ProviderError(
+                ErrorKind.PERMANENT,
+                "tiktok_mode_not_granted",
+                mode_unavailable_message(mode, granted),
+                detail={"mode": mode, "granted_scopes": sorted(granted or [])},
+            )
 
         errors = [i for i in check_post_settings(target, None) if i.level == "error"]
         if errors:
@@ -1320,7 +1429,10 @@ class TikTokProvider(Provider):
         post_info: dict[str, Any] | None = None
         if mode == "direct":
             # Fresh creator_info right before posting (Content Sharing Guidelines, report 03 §4.2 / §11.4).
-            info = query_creator_info(ctx.account, ctx.settings, ctx.http)
+            try:
+                info = query_creator_info(ctx.account, ctx.settings, ctx.http)
+            except ProviderError as err:
+                raise _mode_refused(err, mode) from None
             errors = [i for i in check_post_settings(target, info) if i.level == "error"]
             if errors:
                 raise ProviderError(
@@ -1367,11 +1479,11 @@ class TikTokProvider(Provider):
         ctx.before_commit(st)  # --- commit point: once a publish_id exists the post can go live ---
         try:
             data = _api(ctx.http, "POST", url, token, json_body=body, op=f"{mode}_init")
-        except ProviderError:
+        except ProviderError as err:
             # No publish_id → no bytes uploaded → nothing can go live; a later attempt simply re-inits.
             st["phase"] = "new"
             ctx.save_state(st)
-            raise
+            raise _mode_refused(err, mode) from None
         publish_id = _str_or_none(data.get("publish_id"))
         upload_url = _str_or_none(data.get("upload_url"))
         if not publish_id or not upload_url:
