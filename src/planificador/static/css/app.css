@@ -662,7 +662,8 @@ button.chip:hover, a.chip:hover, label.chip:hover { background: var(--surface-2)
 .chip[aria-pressed="true"], .chip.is-active, .chip:has(> input:checked) {
   background: var(--primary-soft); border-color: color-mix(in srgb, var(--primary) 45%, transparent); color: var(--primary-fg);
 }
-.chip > input[type="checkbox"], .chip > input[type="radio"] { position: absolute; opacity: 0; pointer-events: none; }
+.chip:has(> input) { position: relative; }
+.chip > input[type="checkbox"], .chip > input[type="radio"] { position: absolute; top: 0; left: 0; opacity: 0; pointer-events: none; }
 .chip:has(> input:focus-visible) { box-shadow: var(--ring); }
 .chip-group { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 
@@ -699,7 +700,8 @@ button.chip:hover, a.chip:hover, label.chip:hover { background: var(--surface-2)
 .segmented > [aria-pressed="true"], .segmented > [aria-selected="true"], .segmented > .is-active, .segmented > label:has(input:checked) {
   background: var(--surface); color: var(--text); box-shadow: var(--shadow-sm);
 }
-.segmented input { position: absolute; opacity: 0; pointer-events: none; }
+.segmented > label { position: relative; }
+.segmented input { position: absolute; top: 0; left: 0; opacity: 0; pointer-events: none; }
 .stack > .segmented:not(.w-full) { align-self: flex-start; }
 
 /* ------------------------------------------------------------------ 9. Forms */
@@ -754,8 +756,11 @@ input[type="color"] { width: 40px; height: var(--control-h); padding: 2px; borde
 .char-counter.is-over { color: var(--danger-fg); font-weight: 650; }
 
 /* Switch */
-.switch { display: inline-flex; align-items: flex-start; gap: 10px; cursor: pointer; user-select: none; }
-.switch input { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+/* The hidden input must be positioned against its own .switch: an absolute input whose containing block sits
+   outside a scroll container escapes it, enlarges a clipped ancestor's scrollable overflow, and Chrome then
+   scrolls that ancestor when the input gets focus (the composer editor went blank on Windows). */
+.switch { position: relative; display: inline-flex; align-items: flex-start; gap: 10px; cursor: pointer; user-select: none; }
+.switch input { position: absolute; top: 0; left: 0; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
 .switch__track {
   position: relative; flex-shrink: 0; width: 36px; height: 20px; margin-top: 1px; border-radius: var(--radius-full);
   background: var(--surface-3); border: 1px solid var(--border-strong);

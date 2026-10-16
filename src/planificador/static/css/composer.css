@@ -45,8 +45,10 @@ body:has(.demo-ribbon) .composer--page { height: calc(100vh - var(--topbar-h) - 
   grid-template-columns: minmax(0, 58fr) minmax(0, 42fr);
   padding: 0 var(--cmp-pad) 20px;
 }
+/* overflow: clip (not hidden): a clipped card must never be scrollable, or focusing a control can shift the whole
+   card and leave the footer floating over an empty area. */
 .composer__card {
-  display: flex; flex-direction: column; min-height: 0; overflow: hidden;
+  display: flex; flex-direction: column; min-height: 0; overflow: hidden; overflow: clip;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--cmp-radius);
   box-shadow: var(--shadow-sm);
 }
