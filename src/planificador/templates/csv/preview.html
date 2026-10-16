@@ -24,9 +24,20 @@
 {% endcall %}
 {% else %}
 
+{#- Rows without errors that publish directly to TikTok are only scheduled when the music consent below is ticked
+    (unticked, the import saves them as drafts): the tiles and their «Resultado» follow the checkbox. -#}
+{% set tt_ok = preview.data_rows|selectattr("tiktok_direct")|rejectattr("has_errors")|list|length %}
+<div x-data="{ consent: false }">
 <div class="cv-summary" role="list" aria-label="Resumen">
+  {% if tt_ok %}
+  <div role="listitem" x-show="!consent">{{ ui.kpi_tile(preview.ok_count - tt_ok, "se programarán", color="green", title="Filas sin errores (las de TikTok necesitan la confirmación de uso de música)") }}</div>
+  <div role="listitem" x-show="consent" x-cloak>{{ ui.kpi_tile(preview.ok_count, "se programarán", color="green", title="Filas sin errores") }}</div>
+  <div role="listitem" x-show="!consent">{{ ui.kpi_tile(preview.draft_count + tt_ok, "se guardarán como borrador", color="amber", title="Filas con errores y filas de TikTok sin la confirmación de uso de música") }}</div>
+  <div role="listitem" x-show="consent" x-cloak>{{ ui.kpi_tile(preview.draft_count, "se guardarán como borrador", color="amber", title="Filas con errores") }}</div>
+  {% else %}
   <div role="listitem">{{ ui.kpi_tile(preview.ok_count, "se programarán", color="green", title="Filas sin errores") }}</div>
   <div role="listitem">{{ ui.kpi_tile(preview.draft_count, "se guardarán como borrador", color="amber", title="Filas con errores") }}</div>
+  {% endif %}
   {% if preview.empty_count %}<div role="listitem">{{ ui.kpi_tile(preview.empty_count, "filas vacías (se ignoran)", cls="kpi-tile--muted") }}</div>{% endif %}
 </div>
 
@@ -91,6 +102,10 @@
           <td>
             {% if row.has_errors %}
             {{ ui.tag("Borrador · " ~ row.errors|length ~ (" error" if row.errors|length == 1 else " errores"), tone="danger", icon_name="file-pen-line") }}
+            {% elif row.tiktok_direct %}
+            <span x-show="!consent" data-tiktok-pending>{{ ui.tag("Se guardará como borrador", tone="warning", icon_name="file-pen-line") }}
+              <span class="cv-issue cv-issue--warning cv-issue--standalone">{{ net_icon("tiktok", 16, title=False) }}<span>Falta aceptar la Confirmación de uso de música de TikTok (abajo).</span></span></span>
+            <span x-show="consent" x-cloak>{{ ui.tag("Se programará", tone="success", icon_name="clock") }}</span>
             {% else %}
             {{ ui.tag("Se programará", tone="success", icon_name="clock") }}
             {% endif %}
@@ -116,7 +131,7 @@
     <div class="cv-footer__consent">
       {% if preview.has_tiktok_direct %}
       <label class="check">
-        <input type="checkbox" name="consentimiento_tiktok" value="1">
+        <input type="checkbox" name="consentimiento_tiktok" value="1" x-model="consent">
         <span><span class="check__label">Para las publicaciones de TikTok, acepto la
           <a href="https://www.tiktok.com/legal/page/global/music-usage-confirmation/en" target="_blank" rel="noopener noreferrer">Confirmación de uso de música</a> de TikTok.</span>
           <span class="check__help">Si no la aceptas, las filas con TikTok se guardarán como borrador.</span></span>
@@ -132,5 +147,6 @@
     </div>
   </div>
 </form>
+</div>
 {% endif %}
 {% endblock %}

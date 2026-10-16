@@ -20,7 +20,14 @@ Idempotency rules (research 04 §2.3):
   ``provider.reconcile`` and only a definitive ``not_published`` re-opens the target for a new commit. An
   undeterminable outcome ends in ``unknown`` (never retried automatically).
 - A provider that returns ``wait`` after its commit point (polling IG/TikTok/FB processing) is simply
-  re-entered later; that is the provider's own re-entrant protocol.
+  re-entered later; that is the provider's own re-entrant protocol. Such a resume skips the pre-flight gates
+  (post trashed, account not connected, missing media) and a failed token refresh is only a warning: those
+  decide whether to *send*, they are not an outcome of what was already sent.
+- Token refreshes are serialised per account (:func:`credentials_lock`, shared with the scheduler's token
+  job) and always start from the tokens stored at that moment (TikTok rotates refresh tokens).
+- A Facebook/YouTube ``native_schedule`` hand-off claimed ahead of time that fails before its commit goes
+  back to ``scheduled`` (never ``error`` while the post is not due): the hand-off is retried later and, if it
+  never succeeds, the app publishes it itself at its time.
 
 Engine bookkeeping that must survive restarts lives under the reserved key ``"_engine"`` inside
 ``provider_state`` (stripped before the state is handed to providers), e.g. ``{"pending": "reconcile"}``
@@ -39,8 +46,10 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import threading
 import time
+import unicodedata
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
@@ -96,6 +105,9 @@ MAX_RETRY_AFTER_S = 48 * 3600
 MIN_WAIT_S = 1
 MAX_WAIT_S = 48 * 3600
 STALE_CLAIM_AFTER = timedelta(minutes=10)
+#: After a failed early hand-off to Facebook/YouTube's own scheduler (transient or account problem), when to
+#: try handing it off again (never later than the scheduled time, when the app publishes it itself).
+NATIVE_HANDOFF_RETRY = timedelta(hours=6)
 LATE_NOTE_AFTER = timedelta(minutes=2)
 MAX_STEPS_PER_RUN = 200
 HEARTBEAT_EVERY = timedelta(seconds=60)
@@ -147,6 +159,7 @@ OUTCOMES = (
     "paused",
     "cancelled",
     "skipped",
+    "handoff_failed",
 )
 
 
@@ -237,6 +250,38 @@ def active_runs() -> set[int]:
 def is_running(target_id: int) -> bool:
     with _active_lock:
         return target_id in _active_runs
+
+
+# Token refreshes of one account are serialised process-wide (engine runs and the hourly token job): a network
+# may rotate the refresh token on every use (TikTok), so two refreshes sent with the same one can invalidate
+# each other. Whoever holds the lock re-reads the account first (:func:`load_credentials`), so the second
+# caller sees the tokens the first one stored and usually has nothing left to refresh.
+_credentials_guard = threading.Lock()
+_credentials_locks: dict[int, Any] = {}
+
+
+def credentials_lock(account_id: int) -> Any:
+    """Re-entrant lock serialising credential refreshes (and their storage) for ``account_id``."""
+    with _credentials_guard:
+        lock = _credentials_locks.get(account_id)
+        if lock is None:
+            lock = _credentials_locks[account_id] = threading.RLock()
+        return lock
+
+
+def load_credentials(session_factory: Callable[[], Session], account_id: int) -> AccountCreds | None:
+    """The account's current credentials, read in a fresh session (never from a cached ORM object)."""
+    with session_factory() as s:
+        account = s.get(Account, account_id)
+        return account.to_creds() if account is not None else None
+
+
+def _adopt_tokens(creds: AccountCreds, latest: AccountCreds) -> None:
+    creds.access_token = latest.access_token
+    creds.refresh_token = latest.refresh_token
+    creds.token_expires_at = latest.token_expires_at
+    creds.refresh_expires_at = latest.refresh_expires_at
+    creds.scopes = list(latest.scopes or [])
 
 
 # ------------------------------------------------------------------------------------------- helpers
@@ -502,12 +547,22 @@ def _msg_error(network: str, account: str, message: str) -> tuple[str, str]:
     return f"No se pudo publicar en {network_label(network)}", f"{account}: {message}"
 
 
+_RECONNECT_ADVICE = re.compile(r"\b(?:re)?conect|\breconex")
+
+
+def _says_how_to_reconnect(message: str) -> bool:
+    """Whether a provider message already tells the user to reconnect ("Vuelve a conectarla…",
+    "Reconéctala…", "necesita reconexión"; most AUTH messages end that way). "desconectada" does not count."""
+    plain = unicodedata.normalize("NFKD", message or "").encode("ascii", "ignore").decode().lower()
+    return _RECONNECT_ADVICE.search(plain) is not None
+
+
 def _msg_reconnect(network: str, account: str, message: str) -> tuple[str, str]:
     label = network_label(network)
-    return (
-        f"Reconecta tu cuenta de {label}",
-        f"{account}: {message} Ve a Cuentas conectadas para volver a conectarla.",
-    )
+    text = (message or "").strip()
+    if not _says_how_to_reconnect(text):
+        text = f"{text} Ve a Cuentas conectadas para volver a conectarla.".strip()
+    return f"Reconecta tu cuenta de {label}", f"{account}: {text}"
 
 
 def _msg_unknown(network: str, account: str) -> tuple[str, str]:
@@ -641,26 +696,83 @@ def set_manual_pending(db: Session, target: PostTarget, now: datetime) -> bool:
     return True
 
 
+def resume_reference(target: PostTarget) -> datetime | None:
+    """When a ``publishing`` target was meant to carry on: its scheduled time, or the later end of its
+    wait/backoff (``next_attempt_at``) or of its last claim heartbeat (``claimed_at``)."""
+    moments = [m for m in (target.scheduled_at, target.next_attempt_at, target.claimed_at) if m is not None]
+    return max(moments) if moments else None
+
+
+def can_miss_while_publishing(target: PostTarget) -> bool:
+    """A ``publishing`` target that has sent nothing irreversible (waiting before a retry, paused at shutdown,
+    or abandoned by a crash before its commit) may still be declared missed."""
+    if target.status != TargetStatus.PUBLISHING or target.commit_phase == CommitPhase.COMMIT_SENT:
+        return False
+    _state, meta = split_state(target.provider_state)
+    return meta.get("pending") != "reconcile"
+
+
 def set_missed(db: Session, target: PostTarget, now: datetime, *, grace: timedelta | None = None) -> bool:
-    """Due while the app was off and beyond the grace window → ``missed`` + notification."""
-    if not _guarded_update(
-        db,
-        target.id,
-        {"status": TargetStatus.MISSED, "next_attempt_at": None, "updated_at": now},
-        status_in=TargetStatus.SCHEDULED,
-    ):
+    """Due while the app was off and beyond the grace window → ``missed`` + notification.
+
+    Also for a ``publishing`` target that has not sent anything irreversible yet (see
+    :func:`can_miss_while_publishing`): the guard is on the values the caller read (``next_attempt_at``,
+    ``claimed_at``), so a target claimed meanwhile is left alone; its partial provider state is dropped."""
+    publishing = target.status == TargetStatus.PUBLISHING
+    if publishing:
+        if not can_miss_while_publishing(target):
+            return False
+        seen_next = target.next_attempt_at
+        seen_claim = target.claimed_at
+        values: dict[str, Any] = {
+            "status": TargetStatus.MISSED,
+            "provider_state": {},
+            "commit_phase": CommitPhase.NONE,
+            "attempts": 0,
+            "next_attempt_at": None,
+            "claimed_at": None,
+            "last_error": None,
+            "last_error_detail": None,
+            "updated_at": now,
+        }
+        extra: tuple[Any, ...] = (
+            PostTarget.commit_phase != CommitPhase.COMMIT_SENT,
+            PostTarget.next_attempt_at.is_(None)
+            if seen_next is None
+            else PostTarget.next_attempt_at == seen_next,
+            PostTarget.claimed_at.is_(None) if seen_claim is None else PostTarget.claimed_at == seen_claim,
+        )
+        ok = _guarded_update(db, target.id, values, status_in=TargetStatus.PUBLISHING, extra=extra)
+    else:
+        ok = _guarded_update(
+            db,
+            target.id,
+            {"status": TargetStatus.MISSED, "next_attempt_at": None, "updated_at": now},
+            status_in=TargetStatus.SCHEDULED,
+        )
+    if not ok:
         db.rollback()
         return False
     account = target.account
     label = account.display_name if account is not None else ""
     tz = target.post.brand.timezone if target.post is not None and target.post.brand is not None else None
+    margin = format_duration_es(grace.total_seconds()) if grace is not None else "espera"
+    if publishing:
+        reason = (
+            "No se publicó: la app no estaba abierta para terminar el envío y ya ha pasado el margen de "
+            f"{margin}."
+        )
+    else:
+        reason = (
+            "No se publicó: la app no estaba abierta a la hora programada y ya ha pasado el margen de "
+            f"{margin}."
+        )
     add_event(
         db,
         target.id,
         now,
         "missed",
-        "No se publicó: la app no estaba abierta a la hora programada y ya ha pasado el margen de "
-        f"{format_duration_es(grace.total_seconds()) if grace is not None else 'espera'}.",
+        reason,
         level=EventLevel.ERROR,
         data={"grace_minutes": int(grace.total_seconds() // 60)} if grace is not None else None,
     )
@@ -776,29 +888,38 @@ class _Runner:
             self._refresh_quietly(ctx)
             return self._reconcile(ctx, cause=None)
 
-        if info.post_deleted and self.commit_phase != CommitPhase.COMMIT_SENT:
-            return self._cancel_trashed()
-        if info.account_status != AccountStatus.CONNECTED:
-            return self._account_unavailable()
-        if info.missing_media:
-            return self._fail(
-                ProviderError(
-                    ErrorKind.PERMANENT,
-                    "media_missing",
-                    "Falta un archivo de la publicación en la biblioteca ("
-                    + ", ".join(info.missing_media[:3])
-                    + "). Vuelve a añadirlo y reintenta.",
+        # After the irreversible request the provider is only following up (processing polls, extras): the
+        # pre-flight gates below are about whether to *send*, so they must not fail a post that may be live.
+        committed = self.commit_phase == CommitPhase.COMMIT_SENT
+        if not committed:
+            if info.post_deleted:
+                return self._cancel_trashed()
+            if info.account_status != AccountStatus.CONNECTED:
+                return self._account_unavailable()
+            if info.missing_media:
+                return self._fail(
+                    ProviderError(
+                        ErrorKind.PERMANENT,
+                        "media_missing",
+                        "Falta un archivo de la publicación en la biblioteca ("
+                        + ", ".join(info.missing_media[:3])
+                        + "). Vuelve a añadirlo y reintenta.",
+                    )
                 )
-            )
 
         ctx = self._context()
         first = not self.state and self.commit_phase == CommitPhase.NONE and info.attempts == 0
         try:
             self._refresh(ctx)
-        except ProviderError as exc:
-            return self._on_provider_error(exc, ctx)
         except Exception as exc:
-            return self._on_exception(exc, ctx)
+            if committed:
+                # Not an outcome of the commit: carry on with the current token and let the provider's own
+                # poll error handling decide (it retries token/network failures while polling).
+                self._refresh_failed_after_commit(exc)
+            elif isinstance(exc, ProviderError):
+                return self._on_provider_error(exc, ctx)
+            else:
+                return self._on_exception(exc, ctx)
 
         if first:
             errors = [i for i in self._validate(ctx) if i.level == "error"]
@@ -957,13 +1078,49 @@ class _Runner:
     # ---- pre-flight
 
     def _refresh(self, ctx: PublishContext) -> None:
-        try:
-            update_ = self.provider.refresh_credentials(ctx.account, ctx.settings, ctx.http, ctx.clock)
-        except NotImplementedError:
-            return
-        if update_ is None:
-            return
-        self._store_tokens(update_)
+        with credentials_lock(self.info.account_id):
+            # Another run or the token job may have refreshed (and rotated) the tokens since this run loaded
+            # them: always refresh from what is stored now.
+            latest = load_credentials(self.rt.session_factory, self.info.account_id)
+            if latest is not None:
+                _adopt_tokens(ctx.account, latest)
+            try:
+                update_ = self.provider.refresh_credentials(ctx.account, ctx.settings, ctx.http, ctx.clock)
+            except NotImplementedError:
+                update_ = None
+            if update_ is not None:
+                self._store_tokens(update_)
+        self.engine_meta.pop("refresh_error", None)
+
+    def _refresh_failed_after_commit(self, exc: Exception) -> None:
+        """A token refresh failed while resuming a target whose commit was already sent. An ``AUTH`` answer
+        still flags the account; the run goes on with the current token (logged once per error code)."""
+        if isinstance(exc, ProviderError):
+            code, message, data = exc.code, exc.message, exc.to_dict()
+        else:
+            log.warning("Token refresh crashed for committed target %s", self.target_id, exc_info=exc)
+            code, message, data = "unexpected_error", "Error inesperado.", {"exception": type(exc).__name__}
+        if isinstance(exc, ProviderError) and exc.kind == ErrorKind.AUTH:
+            now = self._now()
+            account_id = self.info.account_id
+            try:
+                _write(
+                    self.rt,
+                    lambda s: mark_account_needs_reconnect(
+                        s, account_id, message, now, target_id=self.target_id
+                    ),
+                )
+            except Exception:
+                log.warning("Could not flag account %s", account_id, exc_info=True)
+        if self.engine_meta.get("refresh_error") != code:
+            self.engine_meta["refresh_error"] = code
+            self._log_safe(
+                "token_refresh_failed",
+                f"No se pudo renovar el acceso a la cuenta ({message}). La publicación ya se envió: se sigue "
+                "comprobando con el acceso actual.",
+                data,
+                EventLevel.WARNING,
+            )
 
     def _store_tokens(self, update_: TokenUpdate) -> None:
         """Persist refreshed tokens (before the first step, or mid-run via ``ctx.update_tokens``)."""
@@ -978,7 +1135,8 @@ class _Runner:
             account.last_checked_at = now
             add_event(s, self.target_id, now, "token_refreshed", "Se ha renovado el acceso a la cuenta.")
 
-        _write(self.rt, write)
+        with credentials_lock(account_id):
+            _write(self.rt, write)
         creds = self.ctx.account if self.ctx is not None else self.info.creds
         creds.access_token = update_.access_token
         creds.token_expires_at = update_.token_expires_at
@@ -1080,6 +1238,9 @@ class _Runner:
     def _pause(self) -> str:
         now = self._now()
         persisted = merge_state(self.state, self.engine_meta)
+        message = "Publicación en pausa: la app se está cerrando. Continuará al volver a abrirla."
+        if self.commit_phase != CommitPhase.COMMIT_SENT:
+            message += " Si para entonces ha pasado el margen de espera, quedará como perdida."
 
         def write(s: Session) -> None:
             if _guarded_update(
@@ -1094,13 +1255,7 @@ class _Runner:
                 },
                 status_in=TargetStatus.PUBLISHING,
             ):
-                add_event(
-                    s,
-                    self.target_id,
-                    now,
-                    "paused",
-                    "Publicación en pausa: la app se está cerrando. Continuará al volver a abrirla.",
-                )
+                add_event(s, self.target_id, now, "paused", message)
 
         _write(self.rt, write)
         return "paused"
@@ -1160,6 +1315,8 @@ class _Runner:
                 message,
                 data={"external_id": result.external_id, "external_url": result.external_url},
             )
+            if ok:  # earlier error/missed reminders about this target are moot now
+                _resolve_notifications(s, self.target_id, now)
             if sent_to_app and ok:
                 title, body = _msg_sent_to_app(info.network, info.account_label)
                 _notify(
@@ -1176,6 +1333,8 @@ class _Runner:
         return str(status)
 
     def _fail(self, exc: ProviderError, *, exhausted: bool = False, attempts: int | None = None) -> str:
+        if self._early_handoff():
+            return self._handoff_failed(exc)
         now = self._now()
         info = self.info
         message = exc.message
@@ -1266,6 +1425,8 @@ class _Runner:
         return "retry"
 
     def _auth_error(self, exc: ProviderError) -> str:
+        if self._early_handoff():
+            return self._handoff_failed(exc)
         now = self._now()
         info = self.info
         self.engine_meta = {}
@@ -1308,6 +1469,100 @@ class _Runner:
 
         _write(self.rt, write)
         return "error"
+
+    def _early_handoff(self) -> bool:
+        """This run hands the post to the network's own scheduler (Facebook/YouTube ``native_schedule``) ahead
+        of its time, and nothing irreversible has been sent yet."""
+        info = self.info
+        return (
+            self.commit_phase != CommitPhase.COMMIT_SENT
+            and info.scheduled_at is not None
+            and info.scheduled_at > self._now()
+            and wants_native_schedule(info.network, info.options, info.format)
+        )
+
+    def _handoff_failed(self, exc: ProviderError) -> str:
+        """An early native hand-off failed before its commit. The post is not due yet, so this is no reason to
+        give up on it (an ``error`` target is never picked up again): back to ``scheduled``. Transient and
+        account problems try the hand-off again later; anything else waits for the scheduled time, when the
+        app publishes it itself (and only then reports an error if it still fails)."""
+        now = self._now()
+        info = self.info
+        label = network_label(info.network)
+        scheduled_at = info.scheduled_at
+        assert scheduled_at is not None
+        retry_later = exc.kind in (ErrorKind.TRANSIENT, ErrorKind.RATE_LIMITED, ErrorKind.AUTH)
+        next_at = min(scheduled_at, now + NATIVE_HANDOFF_RETRY) if retry_later else scheduled_at
+        if exc.kind == ErrorKind.AUTH:
+            # The account needs reconnecting (``_process_native`` skips it until then).
+            auth_message = exc.message
+            account_id = info.account_id
+            try:
+                _write(
+                    self.rt,
+                    lambda s: mark_account_needs_reconnect(
+                        s, account_id, auth_message, now, target_id=self.target_id
+                    ),
+                )
+            except Exception:
+                log.warning("Could not flag account %s", account_id, exc_info=True)
+        first_report = self.engine_meta.get("handoff_error") != exc.code
+        self.engine_meta = {"handoff_error": exc.code}
+        updates = self._take_account_updates()
+        persisted = merge_state({}, self.engine_meta)
+        when = format_dt_es(scheduled_at, info.brand_tz)
+        message = f"No se pudo dejar programada en {label}: {exc.message}"
+        if next_at < scheduled_at:
+            message += (
+                f" Se volverá a intentar a las {format_time_es(next_at, info.brand_tz)}; si no se consigue, "
+                f"la app la publicará a su hora ({when}) si el ordenador está encendido."
+            )
+        else:
+            message += f" La app intentará publicarla a su hora ({when}) si el ordenador está encendido."
+
+        def write(s: Session) -> None:
+            self._apply_account_updates(s, updates)
+            if not _guarded_update(
+                s,
+                self.target_id,
+                {
+                    "status": TargetStatus.SCHEDULED,
+                    "provider_state": persisted,
+                    "commit_phase": CommitPhase.NONE,
+                    "attempts": 0,
+                    "next_attempt_at": next_at,
+                    "claimed_at": None,
+                    "last_error": message,
+                    "last_error_detail": exc.to_dict(),
+                    "updated_at": now,
+                },
+                status_in=TargetStatus.PUBLISHING,
+            ):
+                return
+            if not first_report:
+                return
+            add_event(
+                s,
+                self.target_id,
+                now,
+                "handoff_failed",
+                message,
+                level=EventLevel.WARNING,
+                data=exc.to_dict(),
+            )
+            if not retry_later:
+                _notify(
+                    s,
+                    NotificationKind.ERROR,
+                    f"No se pudo programar en {label}",
+                    f"{info.account_label}: {message}",
+                    now=now,
+                    target_id=self.target_id,
+                    account_id=info.account_id,
+                )
+
+        _write(self.rt, write)
+        return "handoff_failed"
 
     def _cancel_trashed(self) -> str:
         now = self._now()
@@ -1639,6 +1894,7 @@ def publish_now(db: Session, post_id: int, clock: Clock) -> None:
         values["next_attempt_at"] = None
         if _guarded_update(db, target.id, values, status_in=target.status):
             add_event(db, target.id, now, "publish_now", "Publicar ahora: se envía en este momento.")
+            _resolve_notifications(db, target.id, now)
             changed.append(target)
     db.commit()
     for target in changed:
@@ -1681,9 +1937,12 @@ def retry_target(db: Session, target_id: int, clock: Clock, *, confirmed_not_pub
     _wake_scheduler()
 
 
-def cancel_target(db: Session, target_id: int, clock: Clock) -> None:
+def cancel_target(db: Session, target_id: int, clock: Clock, *, force: bool = False) -> None:
     """ "Cancelar" → ``cancelled``. A Facebook/YouTube post handed to the network's own scheduler
-    (``native_scheduled``) is also deleted there when the provider supports it (best effort)."""
+    (``native_scheduled``) is first deleted there. When that fails the post is still going to go live, so it
+    is **not** cancelled: the target stays ``published`` (natively scheduled) and :class:`EngineError`
+    (code ``native_cancel_failed``) says why and what to do — unless ``force=True`` (the user confirmed they
+    deleted it on the network themselves), which cancels it here anyway with a warning event."""
     target = _get_target(db, target_id)
     now = clock.now()
     status = target.status
@@ -1701,7 +1960,25 @@ def cancel_target(db: Session, target_id: int, clock: Clock) -> None:
                 "Esta publicación ya se ha publicado; bórrala directamente en la red si quieres retirarla.",
                 code="already_published",
             )
-        native_note = _cancel_native(db, target, clock)
+        failure = _cancel_native(db, target, clock)
+        if failure is not None:
+            label = network_label(target.network)
+            if force:
+                native_note = (
+                    f"Cancelada solo en la app: no se pudo retirar de la programación de {label}{failure}. "
+                    f"Comprueba que la has borrado en {label}."
+                )
+            else:
+                tz = target.post.brand.timezone if target.post is not None and target.post.brand else None
+                when = f" para el {format_dt_es(target.scheduled_at, tz)}" if target.scheduled_at else ""
+                message = (
+                    f"No se ha podido retirar la publicación de la programación de {label}{failure}. Sigue "
+                    f"programada allí{when}: vuelve a intentarlo o bórrala directamente en {label}."
+                )
+                db.rollback()  # nothing of the attempt is kept but the event below
+                add_event(db, target_id, now, "native_cancel_failed", message, level=EventLevel.WARNING)
+                db.commit()
+                raise EngineError(message, code="native_cancel_failed")
     elif status == TargetStatus.PUBLISHING:
         if target.next_attempt_at is None or target.commit_phase == CommitPhase.COMMIT_SENT:
             raise EngineError(
@@ -1729,21 +2006,20 @@ def cancel_target(db: Session, target_id: int, clock: Clock) -> None:
 
 
 def _cancel_native(db: Session, target: PostTarget, clock: Clock) -> str | None:
-    """Ask the provider to delete a natively scheduled post. Returns a warning note when it could not."""
+    """Ask the provider to delete a natively scheduled post. Returns ``None`` when it was withdrawn, else why
+    it could not be, as a parenthesised fragment (``" (Sin conexión)"``) for the caller's message."""
     from planificador.providers import registry
 
     label = network_label(target.network)
-    manual_note = (
-        f"Bórrala también en {label}: estaba programada allí y la app no ha podido retirarla automáticamente."
-    )
+    unsupported = " (la app no puede retirarla automáticamente)"
     try:
         provider = registry.get_provider(str(target.network))
     except Exception:
-        return manual_note
+        return unsupported
     cancel = getattr(provider, "cancel_native", None)
     delete_post = getattr(provider, "delete_post", None)
     if cancel is None and delete_post is None:
-        return manual_note
+        return unsupported
     rt = default_runtime(clock)
     own_http = rt.http is None
     http = rt.http or httpx.Client(timeout=HTTP_TIMEOUT)
@@ -1780,14 +2056,16 @@ def _cancel_native(db: Session, target: PostTarget, clock: Clock) -> str | None:
         )
         if cancel is not None:
             cancel(ctx)
-        elif not target.external_id or not delete_post(ctx.account, ctx.settings, http, target.external_id):
-            return manual_note
+        elif not target.external_id:
+            return unsupported
+        elif not delete_post(ctx.account, ctx.settings, http, target.external_id):
+            return f" ({label} no permitió borrarla)"
     except ProviderError as exc:
         log.warning("cancel_native failed for target %s: %s", target.id, exc.code)
-        return f"{manual_note} ({exc.message})"
+        return f" ({exc.message.rstrip('.')})"
     except Exception:
         log.exception("cancel_native crashed for target %s", target.id)
-        return manual_note
+        return " (error inesperado)"
     finally:
         if own_http:
             http.close()

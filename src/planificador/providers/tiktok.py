@@ -39,9 +39,11 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 import httpx
 
 from planificador.providers.base import (
+    FOLLOWUP_KEY,
     AccountCreds,
     AccountSnapshot,
     ErrorKind,
+    FollowUpResult,
     FormatSpec,
     Issue,
     MediaInfo,
@@ -111,6 +113,10 @@ POLL_GIVE_UP = timedelta(hours=24)
 POLL_ERROR_LIMIT = 8
 PUBLIC_ID_WAITS = 4  # public posts get their id after moderation (~1 min): wait a little for it
 PUBLIC_ID_WAIT_SECONDS = 30
+#: Moderation can take hours (report 03 §5.5): a public post finished without its id keeps being resolved by
+#: the follow-up job (report 03 §11.4) — hourly for 24 h, then daily up to 30 days.
+PUBLIC_ID_HOURLY_FOR = timedelta(hours=24)
+PUBLIC_ID_GIVE_UP = timedelta(days=30)
 CHUNK_RETRY_DELAYS: tuple[int, ...] = (5, 15, 30, 60)
 UPLOAD_RESTART_LIMIT = 2
 RECONCILE_DELAYS: tuple[int, ...] = (5, 10, 15)  # short blocking re-checks while TikTok is processing
@@ -1108,8 +1114,7 @@ def check_post_settings(target: TargetSpec, info: CreatorInfo | None = None) -> 
                 "brand_content_toggle",
             )
         )
-    consent = opts.get("consent")
-    if consent is not None and not _as_bool(consent, False):
+    if not _as_bool(opts.get("consent"), False):  # a missing consent is not a consent (SPEC §7)
         issues.append(
             Issue(
                 "error",
@@ -1217,6 +1222,7 @@ _ACTIVE_KEYS = (
     "id_waits",
     "last_status",
     "init_at",
+    "reassert_commit",
 )
 
 
@@ -1414,6 +1420,11 @@ class TikTokProvider(Provider):
         st = ctx.state
         plan = ChunkPlan(int(st["video_size"]), int(st["chunk_size"]), int(st["total_chunks"]))
         index = int(st.get("next_chunk") or 0)
+        if st.pop("reassert_commit", None):
+            # A reconcile answered "not_published" for this unfinished upload and the engine left the commit
+            # phase; this publish_id may now go live again, so the engine must reconcile (never resume) if
+            # the app stops from here on.
+            ctx.before_commit(st)
         if index >= plan.total_chunks:
             return self._upload_complete(ctx)
         video = self._video_for_state(ctx)
@@ -1439,6 +1450,12 @@ class TikTokProvider(Provider):
         if is_final and not st.get("final_chunk_started"):
             st["final_chunk_started"] = True
             ctx.save_state(st)  # from now on the upload may complete → status/fetch decides, never re-init
+        elif is_final and not st.get("final_chunk_uncertain"):
+            # The final chunk was already sent once (e.g. the app stopped mid-PUT): TikTok may hold every
+            # byte, so a 4xx on this re-send (upload already complete, expired upload_url…) must lead to
+            # status/fetch, never to a fresh init — that would post the video twice.
+            st["final_chunk_uncertain"] = True
+            ctx.save_state(st)
         first, last = plan.chunk_range(index)
         headers = {
             "Content-Type": _video_mime(video),
@@ -1655,16 +1672,62 @@ class TikTokProvider(Provider):
             url = post_url(username, post_id) if post_id else profile_url(username)
         else:
             url = None
+        now = ctx.clock.now()
         st.update(
             phase="done",
             result=result,
             public_post_id=post_id,
             external_id=post_id or str(st["publish_id"]),
             external_url=url,
-            finished_at=_iso(ctx.clock.now()),
+            finished_at=_iso(now),
         )
+        if (
+            result == "published"
+            and post_id is None
+            and st.get("mode") == "direct"
+            and st.get("privacy_level") == "PUBLIC_TO_EVERYONE"
+        ):
+            # Still under moderation: resolve the public id later (per-post analytics and the video link).
+            st[FOLLOWUP_KEY] = {"kind": "public_id", "next_at": _iso(now + timedelta(hours=1))}
         ctx.save_state(st)
         return self._final_result(ctx)
+
+    # -- follow-up: public post id after a slow moderation ------------------------------------------
+
+    def follow_up(self, ctx: PublishContext) -> FollowUpResult | None:
+        """``status/fetch`` again for a public post published without ``publicaly_available_post_id``
+        (report 03 §5.5/§11.4): when it appears, the target gets the real post id and video URL."""
+        st = ctx.state
+        info = st.get(FOLLOWUP_KEY) or {}
+        publish_id = st.get("publish_id")
+        if info.get("kind") != "public_id" or not publish_id or st.get("public_post_id"):
+            return None
+        now = ctx.clock.now()
+        started = _parse_iso(st.get("finished_at")) or now
+        age = now - started
+        if age >= PUBLIC_ID_GIVE_UP:
+            return None
+        next_at = now + (timedelta(hours=1) if age < PUBLIC_ID_HOURLY_FOR else timedelta(days=1))
+        try:
+            data = fetch_status(ctx.http, _require_token(ctx.account), str(publish_id))
+        except ProviderError as err:
+            log.info("TikTok public id lookup failed: %s", err.code)
+            return FollowUpResult(next_at=next_at)
+        post_id = public_post_id(data)
+        if post_id is None:
+            return FollowUpResult(next_at=next_at)
+        username = (
+            st.get("creator_username")
+            or getattr(ctx.account, "username", None)
+            or (ctx.account.meta or {}).get("username")
+        )
+        url = post_url(username, post_id)
+        st.update(public_post_id=post_id, external_id=post_id, external_url=url or st.get("external_url"))
+        return FollowUpResult(
+            external_id=post_id,
+            external_url=url,
+            message="TikTok ya muestra el vídeo públicamente: enlace y estadísticas del vídeo actualizados.",
+        )
 
     def _final_result(self, ctx: PublishContext) -> StepResult:
         st = ctx.state
@@ -1727,6 +1790,10 @@ class TikTokProvider(Provider):
                 "reintentar.",
             )
         if not st.get("final_chunk_started"):
+            # The upload resumes with this publish_id: ask for the commit phase to be re-asserted before the
+            # next chunk, because the engine treats "not_published" as "nothing was sent".
+            st["reassert_commit"] = True
+            ctx.save_state(st)
             return ReconcileResult(
                 "not_published",
                 message="La subida del vídeo a TikTok no se completó, así que no se ha publicado. Se puede "

@@ -6,6 +6,7 @@ Every test runs with an isolated environment (autouse ``_isolated_env``):
 - ``PLANIFICADOR_NO_SCHEDULER=1`` (the background scheduler never starts in tests),
 - ``PLANIFICADOR_NO_KEYRING=1`` (never touch the developer's real OS keyring; key file fallback is used),
 - ``PLANIFICADOR_NO_DESKTOP_NOTIFY=1`` (notifications are stored but never shown as desktop toasts),
+- ``PLANIFICADOR_TIMEZONE=off`` (the first brand never takes the PC's time zone; Europe/Madrid as in SPEC),
 - module singletons (crypto box, current settings/database, provider registry) reset afterwards.
 
 Main fixtures: ``app`` (``create_app`` with a :class:`ManualClock`), ``client`` (TestClient on
@@ -72,6 +73,8 @@ def _isolated_env(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[N
     monkeypatch.setenv("PLANIFICADOR_NO_KEYRING", "1")
     monkeypatch.setenv("PLANIFICADOR_NO_BROWSER", "1")
     monkeypatch.setenv("PLANIFICADOR_NO_DESKTOP_NOTIFY", "1")
+    # Never adopt the developer's PC time zone for the first brand (tests assume Europe/Madrid).
+    monkeypatch.setenv("PLANIFICADOR_TIMEZONE", "off")
     monkeypatch.delenv("PLANIFICADOR_PORT", raising=False)
     yield
     from planificador import config, crypto, db

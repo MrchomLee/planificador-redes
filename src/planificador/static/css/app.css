@@ -1089,6 +1089,12 @@ input[type="color"] { width: 40px; height: var(--control-h); padding: 2px; borde
 .auth-card { width: 100%; max-width: 400px; padding: var(--sp-6); }
 .auth-card__logo { display: flex; justify-content: center; margin-bottom: var(--sp-4); }
 .auth-card__logo svg { width: 48px; height: 48px; }
+.auth-forgot { text-align: center; }
+.auth-forgot > summary { display: inline-block; cursor: pointer; color: var(--text-muted); list-style: none; }
+.auth-forgot > summary::-webkit-details-marker { display: none; }
+.auth-forgot > summary:hover { color: var(--text); text-decoration: underline; }
+.auth-forgot > p { text-align: left; }
+.auth-forgot code { white-space: nowrap; }
 
 /* Error pages */
 .error-page { min-height: calc(100vh - var(--topbar-h) - 120px); display: grid; place-items: center; }

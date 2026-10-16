@@ -156,7 +156,8 @@ En **☰ › Importar o exportar CSV**:
 - **Publicación**: zona horaria por defecto, **Ventana de gracia** (cuánto tiempo después de la hora todavía se
   publica algo que se retrasó porque el ordenador estaba apagado; por defecto 120 minutos) y **Modo prueba**.
 - **URL pública**: necesaria para publicar **fotos** en Instagram (ver la [guía de Meta](guia-meta.md)).
-- **Seguridad**: una contraseña opcional para abrir la aplicación.
+- **Seguridad**: una contraseña opcional para abrir la aplicación. Si la olvidas, haz doble clic en
+  `quitar-contrasena.bat` (en la carpeta del programa): podrás entrar sin contraseña y poner otra.
 - **Avisos**: avisos de escritorio y del navegador.
 - **Acerca de**: versión, carpeta de datos (**Abrir carpeta**) y registros (**Ver registros**) por si algo
   falla.

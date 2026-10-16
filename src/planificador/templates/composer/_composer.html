@@ -311,6 +311,7 @@
         <div class="cmp-issues cmp-issues--error" x-show="errors().length && !ro" x-cloak role="alert">
           <button type="button" class="cmp-issues__head" @click="issuesOpen.error = !issuesOpen.error" :aria-expanded="issuesOpen.error ? 'true' : 'false'">
             {{ icon("triangle-alert", 20) }}<span x-text="issuesTitle('error')"></span>
+            <span class="cmp-issues__preview" x-show="!issuesOpen.error" x-text="errors().length ? errors()[0].message : ''"></span>
             <span class="cmp-issues__chev" :class="{'is-open': issuesOpen.error}">{{ icon("chevron-down", 18) }}</span>
           </button>
           <ul class="cmp-issues__list" x-show="issuesOpen.error">

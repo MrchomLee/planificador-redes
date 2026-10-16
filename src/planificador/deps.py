@@ -31,6 +31,8 @@ from planificador.timeutil import Clock, SystemClock
 DEFAULT_BRAND_NAME = "Mi marca"
 DEFAULT_BRAND_COLOR = "#5b4cf0"
 ACTIVE_BRAND_KEY = "active_brand_id"
+#: ``Session.info`` key set when the default brand got the time zone detected on this PC (one-time notice).
+DETECTED_TZ_INFO_KEY = "planificador_detected_timezone"
 
 # Serialises the "pick a fallback / create the default brand" path: on first run the page and the bell
 # request (or two tabs) may arrive together and must not create two "Mi marca" brands.
@@ -74,11 +76,46 @@ def list_brands(db: Session, *, include_archived: bool = False) -> list[Brand]:
     return list(db.scalars(stmt))
 
 
+def first_run_timezone(db: Session) -> str:
+    """Time zone for the default brand. Unless the user already chose a default time zone, use this PC's
+    (stored as ``default_timezone`` so new brands follow it) instead of the hardcoded Europe/Madrid: a user in
+    Mexico would otherwise schedule everything 7-8 hours off without noticing."""
+    from planificador.timeutil import is_valid_timezone, system_timezone
+
+    stored = config.get_setting(db, "default_timezone", None)
+    if is_valid_timezone(stored):
+        return str(stored)
+    detected = system_timezone()
+    if detected is None:
+        return config.default_timezone(db)
+    config.set_setting(db, "default_timezone", detected, commit=False)
+    db.info[DETECTED_TZ_INFO_KEY] = detected
+    return detected
+
+
 def create_default_brand(db: Session) -> Brand:
-    brand = Brand(name=DEFAULT_BRAND_NAME, color=DEFAULT_BRAND_COLOR, timezone=config.default_timezone(db))
+    brand = Brand(name=DEFAULT_BRAND_NAME, color=DEFAULT_BRAND_COLOR, timezone=first_run_timezone(db))
     db.add(brand)
     db.flush()
     return brand
+
+
+def announce_detected_timezone(request: Request, db: Session) -> None:
+    """One-time toast after the default brand took this PC's time zone (see :func:`first_run_timezone`)."""
+    detected = db.info.pop(DETECTED_TZ_INFO_KEY, None)
+    if not detected:
+        return
+    try:
+        from planificador.templating import flash
+
+        flash(
+            request,
+            f"Zona horaria: hemos usado la de este ordenador ({detected}). Si no es la tuya, cámbiala en "
+            "☰ › Marcas.",
+            "info",
+        )
+    except Exception:  # pragma: no cover - templating unavailable
+        pass
 
 
 def ensure_active_brand(db: Session) -> Brand:
@@ -117,6 +154,7 @@ def set_active_brand(db: Session, brand_id: int, *, commit: bool = True) -> Bran
 
 def get_active_brand(request: Request, db: Annotated[Session, Depends(get_db)]) -> Brand:
     brand = ensure_active_brand(db)
+    announce_detected_timezone(request, db)
     # Exposed for templating globals (brand switcher, display time zone).
     request.state.active_brand = brand
     request.state.active_brand_id = brand.id

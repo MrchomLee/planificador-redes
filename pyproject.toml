@@ -35,6 +35,7 @@ dependencies = [
     "keyring>=25.5",
     "tzdata>=2025.1",
     "desktop-notifier>=6.0",
+    "tzlocal>=5.2",
 ]
 
 [project.optional-dependencies]
@@ -67,7 +68,17 @@ packages = ["src/planificador"]
 "docs/guia-uso.md" = "planificador/docs/guia-uso.md"
 
 [tool.hatch.build.targets.sdist]
-include = ["src/planificador", "tests", "docs", "scripts", "LICENSE", "README.md", "iniciar.bat", "iniciar.sh"]
+include = [
+  "src/planificador",
+  "tests",
+  "docs",
+  "scripts",
+  "LICENSE",
+  "README.md",
+  "iniciar.bat",
+  "iniciar.sh",
+  "quitar-contrasena.bat",
+]
 
 [tool.uv]
 default-groups = ["dev"]

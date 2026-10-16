@@ -101,22 +101,53 @@
       </button>
       <div class="dropdown__menu dropdown__menu--end" x-ref="menu" x-show="open" x-cloak role="menu"
            x-transition:enter.duration.120ms x-transition:leave.duration.80ms
-           @click="if ($event.target.closest('button')) close()">
+           @click="if ($event.target.closest('button:not([data-keep-open])')) close()">
+        <div x-data="{ shifting: false, dias: 1, horas: 0 }" x-effect="if (!open) shifting = false">
+        <div x-show="!shifting">
         <button type="button" class="dropdown__item" role="menuitem"
                 hx-post="/planificacion/lista/acciones" hx-vals='{"accion": "duplicar"}'
                 hx-include="#plan-list input[name=ids]:checked" hx-target="#plan-list" hx-swap="innerHTML">
           {{- icon("copy", 16) }}<span>Duplicar</span></button>
+        <button type="button" class="dropdown__item" role="menuitem" data-keep-open data-bulk-shift
+                @click="shifting = true; $nextTick(() => $refs.shiftDays.focus())">
+          {{- icon("calendar-clock", 16) }}<span>Reprogramar…</span></button>
         <button type="button" class="dropdown__item dropdown__item--danger" role="menuitem"
                 hx-post="/planificacion/lista/acciones" hx-vals='{"accion": "papelera"}'
                 hx-include="#plan-list input[name=ids]:checked" hx-target="#plan-list" hx-swap="innerHTML"
                 hx-confirm="Las publicaciones seleccionadas se moverán a la papelera y se cancelará lo que estuviera pendiente de publicar. Podrás restaurarlas durante 45 días."
                 data-confirm-title="¿Mover a la papelera?" data-confirm-ok="Mover a la papelera" data-confirm-danger>
           {{- icon("trash", 16) }}<span>Mover a la papelera</span></button>
+        </div>
+        {# «Reprogramar»: move every selected post by N days / hours (brand wall time). The inputs belong to their
+           own form (form="bulk-shift") so the filters form neither submits nor reacts to them. #}
+        <div class="bulk-shift" x-show="shifting" x-cloak role="group" aria-labelledby="bulk-shift-title"
+             @keydown.enter="if ($event.target.matches('input')) { $event.preventDefault(); $refs.shiftGo.click() }">
+          <p class="dropdown__label" id="bulk-shift-title">Mover las seleccionadas</p>
+          <div class="bulk-shift__grid">
+            <label class="form-field"><span class="form-field__label">Días</span>
+              <input type="number" class="input" id="bulk-shift-dias" name="dias" form="bulk-shift" x-ref="shiftDays"
+                     x-model.number="dias" @change.stop @input.stop min="-365" max="365" step="1"></label>
+            <label class="form-field"><span class="form-field__label">Horas</span>
+              <input type="number" class="input" id="bulk-shift-horas" name="horas" form="bulk-shift"
+                     x-model.number="horas" @change.stop @input.stop min="-23" max="23" step="1"></label>
+          </div>
+          <p class="form-field__help">Usa números negativos para adelantarlas. Se mantiene la hora local de la marca;
+            solo se mueven las programadas o en borrador que queden en el futuro.</p>
+          <div class="bulk-shift__actions">
+            <button type="button" class="btn btn--ghost btn--sm" data-keep-open @click="shifting = false">Volver</button>
+            <button type="button" class="btn btn--primary btn--sm" x-ref="shiftGo" :disabled="!(dias || horas)"
+                    hx-post="/planificacion/lista/acciones" hx-vals='{"accion": "reprogramar"}'
+                    hx-include="#plan-list input[name=ids]:checked, #bulk-shift-dias, #bulk-shift-horas"
+                    hx-target="#plan-list" hx-swap="innerHTML">Reprogramar</button>
+          </div>
+        </div>
+        </div>
       </div>
     </div>
 
     {{ pm.create_button() }}
   </form>
+  <form id="bulk-shift" hidden aria-hidden="true"></form>
 
   <div id="plan-list" class="plan-list" hx-get="/planificacion/lista" hx-trigger="planner:refresh from:body"
        hx-include="#list-filters" hx-target="this" hx-swap="innerHTML" @change="onChange($event)">

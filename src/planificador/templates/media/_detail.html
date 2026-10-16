@@ -1,5 +1,5 @@
 {#- Detail side panel of one media file (swapped into #media-detail). Context: detail (asset view + usage,
-    pending), public_media_off. -#}
+    pending = posts blocking the delete, pending_summary, pending_advice), public_media_off. -#}
 {% import "components/ui.html" as ui with context %}
 {% set d = detail %}
 {% set compat_icons = {"ok": "circle-check", "warning": "triangle-alert", "error": "circle-x"} %}
@@ -35,7 +35,7 @@
     <span class="spacer"></span>
     {% if d.pending %}
     <button type="button" class="btn btn--danger-ghost btn--sm" disabled aria-disabled="true"
-            title="Se usa en {{ d.pending }} {{ 'publicación pendiente' if d.pending == 1 else 'publicaciones pendientes' }}">{{ icon("trash", 16) }}<span>Borrar</span></button>
+            title="Se usa en {{ d.pending_summary }}">{{ icon("trash", 16) }}<span>Borrar</span></button>
     {% else %}
     <button type="button" class="btn btn--danger-ghost btn--sm" hx-post="/medios/{{ d.id }}/borrar" hx-target="#media-detail" hx-swap="innerHTML"
             hx-confirm="Se quitará «{{ d.name }}» de la biblioteca. Las publicaciones ya hechas no cambian."
@@ -43,7 +43,7 @@
     {% endif %}
   </div>
   {% if d.pending %}
-  <p class="media-detail__note">{{ icon("lock", 14) }}<span>Se usa en {{ d.pending }} {{ "publicación pendiente" if d.pending == 1 else "publicaciones pendientes" }}: quítalo de ellas para poder borrarlo.</span></p>
+  <p class="media-detail__note">{{ icon("lock", 14) }}<span>Se usa en {{ d.pending_summary }}. {{ d.pending_advice }} para poder borrarlo.</span></p>
   {% endif %}
 
   <section class="media-detail__section" aria-labelledby="compat-title-{{ d.id }}">

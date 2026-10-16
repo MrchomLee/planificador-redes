@@ -418,7 +418,32 @@ def _target_actions(target: PostTarget, sets: dict[str, frozenset], post_deleted
                 danger=True,
             )
         )
+        if status == TargetStatus.PUBLISHED and _native_cancel_failed(target):
+            label = network_label(target.network)
+            actions.append(
+                Action(
+                    "cancel_app_only",
+                    "Cancelar solo en la app",
+                    f"/objetivos/{tid}/cancelar",
+                    "ban",
+                    "danger-ghost",
+                    confirm=(
+                        f"Hazlo solo si ya la has borrado tú en {label}. La app dejará de mostrarla como "
+                        f"programada, pero si sigue programada en {label} se publicará igualmente."
+                    ),
+                    confirm_title="¿Cancelar solo en la app?",
+                    confirm_ok=f"Ya la he borrado en {label}",
+                    danger=True,
+                    vals={"solo_app": "1"},
+                )
+            )
     return actions
+
+
+def _native_cancel_failed(target: PostTarget) -> bool:
+    """A natively scheduled target whose withdrawal from the network failed at least once (engine
+    ``native_cancel_failed``): the user may then cancel it here only, once they removed it there."""
+    return any(event.event == "native_cancel_failed" for event in target.events)
 
 
 def _when_label(target: PostTarget, tz: str) -> str | None:
@@ -1051,7 +1076,12 @@ def retry_target(
 
 @router.post("/objetivos/{target_id:int}/cancelar")
 def cancel_target(
-    request: Request, target_id: int, db: DbSession, clock: ClockDep, next_path: Next = None
+    request: Request,
+    target_id: int,
+    db: DbSession,
+    clock: ClockDep,
+    next_path: Next = None,
+    solo_app: Annotated[str | None, Form()] = None,
 ) -> Response:
     target = _target_or_404(db, target_id)
     post_id, network = target.post_id, network_label(target.network)
@@ -1060,10 +1090,17 @@ def cancel_target(
         engine = _engine()
     except ImportError:
         return _feature_missing(request, fallback=fallback, next_path=next_path)
-    error = _run(lambda: engine.cancel_target(db, target_id, clock))
+    # "Cancelar solo en la app" (offered only after the network refused to withdraw a natively scheduled
+    # post): the user confirmed they deleted it there themselves.
+    force = solo_app == "1"
+    if force:
+        error = _run(lambda: engine.cancel_target(db, target_id, clock, force=True))
+    else:
+        error = _run(lambda: engine.cancel_target(db, target_id, clock))
     if error:
         return _fail(request, error, fallback=fallback, next_path=next_path)
-    return _ok(request, f"Publicación cancelada en {network}.", fallback=fallback, next_path=next_path)
+    message = "Publicación cancelada en la app." if force else f"Publicación cancelada en {network}."
+    return _ok(request, message, fallback=fallback, next_path=next_path)
 
 
 @router.post("/objetivos/{target_id:int}/marcar-publicado")

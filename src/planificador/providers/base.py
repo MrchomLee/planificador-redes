@@ -227,6 +227,24 @@ class ReconcileResult:
     message: str | None = None
 
 
+#: ``provider_state`` key holding a pending follow-up check of a finished target:
+#: ``{"next_at": iso datetime, ...provider data}`` (see :meth:`Provider.follow_up`).
+FOLLOWUP_KEY = "followup"
+
+
+@dataclass
+class FollowUpResult:
+    """Outcome of :meth:`Provider.follow_up`, applied by ``providers.followups``."""
+
+    next_at: datetime | None = None  # check again at this time; None = nothing left to check
+    external_id: str | None = None  # a better id / URL for the target (e.g. TikTok's public post id)
+    external_url: str | None = None
+    message: str | None = None  # Spanish, written to post_events
+    level: Literal["info", "warning", "error"] = "info"
+    notify: str | None = None  # Spanish notification body for something the user must act on
+    failed: ProviderError | None = None  # the post is not live after all: the target becomes ``error``
+
+
 @dataclass
 class FormatSpec:
     key: str
@@ -304,6 +322,14 @@ class Provider(ABC):
     def refresh_credentials(
         self, account: AccountCreds, settings: ProviderSettings, http: httpx.Client, clock: Clock
     ) -> TokenUpdate | None:
+        return None
+
+    def follow_up(self, ctx: PublishContext) -> FollowUpResult | None:
+        """Check a target the engine already finished (``published``) again, when its state holds
+        ``state[FOLLOWUP_KEY]["next_at"]`` (set by the provider while publishing): outcomes only known later,
+        e.g. TikTok's public post id after moderation or a YouTube ``publishAt`` that should have gone public.
+        Run by the scheduler through ``providers.followups``; ``ctx.before_commit`` must not be used.
+        ``None`` = nothing to check."""
         return None
 
     def check_account(self, account: AccountCreds, settings: ProviderSettings, http: httpx.Client) -> None:

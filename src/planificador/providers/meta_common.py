@@ -75,6 +75,10 @@ THROTTLE_CODES: frozenset[int] = frozenset({4, 17, 32, 613, *range(80000, 80010)
 DEFAULT_THROTTLE_WAIT = 15 * 60
 BLOCKED_WAIT = 60 * 60
 QUOTA_WAIT = 60 * 60
+#: Instagram action block (2207051): stop and hold for 24 h (§0, §7.1–§7.2).
+ACTION_BLOCK_WAIT = 24 * 3600
+#: Instagram server error (2207001): Meta's table says "try again" (§7.2 Verificación).
+IG_SERVER_ERROR_WAIT = 5 * 60
 
 #: Background jobs pause above this usage percentage (§7.1 decision).
 BACKGROUND_PAUSE_PCT = 80.0
@@ -461,19 +465,23 @@ SUBCODE_MAP: dict[int, tuple[ErrorKind, str, str, int | None]] = {
     2207078: _TRIAL,
     2207081: _TRIAL,
     2207082: (_P, "ig_audio", "Instagram no pudo procesar el audio del vídeo.", None),
-    # Instagram — account state / spam / quota
+    # Instagram — server error. Meta's error table lists -1 / 2207001 as "Instagram server error — try
+    # again" (some tools read it as a spam filter, so the text stays neutral). Not in
+    # DEFINITE_TRANSIENT_CODES: on media_publish it is ambiguous and the container is read first.
     2207001: (
-        _P,
-        "ig_spam",
-        "Instagram ha bloqueado la publicación por posible spam. Espera unas horas o cambia el contenido.",
-        None,
+        _T,
+        "ig_server_error",
+        "Instagram tuvo un error interno al procesar la publicación. Se reintentará en unos minutos.",
+        IG_SERVER_ERROR_WAIT,
     ),
+    # Instagram — account state / spam / quota. 2207051 arrives as code 4 (the throttling code), so
+    # subcodes are checked before THROTTLE_CODES. Stop and hold 24 h (§7.2).
     2207051: (
         _P,
         "ig_activity_restricted",
-        "Instagram ha restringido temporalmente la actividad de la cuenta. Espera 24 horas antes de "
-        "reintentar.",
-        None,
+        "Instagram ha restringido temporalmente la actividad de la cuenta (posible spam). Espera 24 horas "
+        "antes de reintentar y publica con menos frecuencia.",
+        ACTION_BLOCK_WAIT,
     ),
     2207050: (_P, "ig_user_restricted", "La cuenta de Instagram está restringida y no puede publicar.", None),
     2207042: (
@@ -600,7 +608,15 @@ def classify_meta_error(status_code: int, body: dict | None, headers: object) ->
             "El acceso a Meta no es válido o ha caducado. Vuelve a conectar la cuenta en Cuentas conectadas.",
         )
 
-    # 2) throttling
+    # 2) specific subcodes: more precise than the top-level code. Meta sends the Instagram action block
+    #    (2207051) with code 4, which is also a throttling code.
+    if sub is not None and sub in SUBCODE_MAP:
+        kind, our_code, text, retry = SUBCODE_MAP[sub]
+        if kind == _R and regain:
+            retry = max(retry or 0, regain)
+        return make(kind, our_code, text, retry)
+
+    # 3) throttling
     if code in THROTTLE_CODES or status_code == 429:
         return make(
             _R,
@@ -609,12 +625,7 @@ def classify_meta_error(status_code: int, body: dict | None, headers: object) ->
             regain or DEFAULT_THROTTLE_WAIT,
         )
 
-    # 3) specific subcodes / codes
-    if sub is not None and sub in SUBCODE_MAP:
-        kind, our_code, text, retry = SUBCODE_MAP[sub]
-        if kind == _R and regain:
-            retry = max(retry or 0, regain)
-        return make(kind, our_code, text, retry)
+    # 3b) top-level codes with a fixed meaning
     if code is not None and code in CODE_MAP:
         kind, our_code, text, retry = CODE_MAP[code]
         return make(kind, our_code, text, retry)
@@ -864,11 +875,17 @@ DEFINITE_TRANSIENT_CODES: frozenset[str] = frozenset(
 )
 
 
+#: Refusals Meta also returns when the publish went through (community reports for the Instagram action
+#: block 2207051): the commit is ``AMBIGUOUS`` and the container is read before anything else (§0, §4.1).
+UNCERTAIN_COMMIT_CODES: frozenset[str] = frozenset({"ig_activity_restricted"})
+
+
 def run_commit(ctx: Any, network_label: str, call: Any, *, sent: dict | None = None) -> dict:
     """Run the single irreversible request of a publish (SPEC §5 engine/provider protocol).
 
     Persists ``stage="committing"`` + ``commit_at`` through ``ctx.before_commit`` first. A transient failure
-    whose effect is unknown becomes ``AMBIGUOUS`` (the engine reconciles, never re-sends); a definite
+    whose effect is unknown becomes ``AMBIGUOUS`` (the engine reconciles, never re-sends); so does a refusal
+    in :data:`UNCERTAIN_COMMIT_CODES` (same code and text, the original error as ``__cause__``). A definite
     rejection marks ``commit_rejected`` so :meth:`reconcile` can answer ``not_published``."""
     state = ctx.state
     if state.get("stage") != "committing":
@@ -884,6 +901,14 @@ def run_commit(ctx: Any, network_label: str, call: Any, *, sent: dict | None = N
     except ProviderError as exc:
         if exc.kind == ErrorKind.AMBIGUOUS:
             raise
+        if exc.code in UNCERTAIN_COMMIT_CODES:
+            raise ProviderError(
+                ErrorKind.AMBIGUOUS,
+                exc.code,
+                exc.message,
+                detail={**exc.detail, "refused_kind": str(exc.kind)},
+                retry_after=exc.retry_after,
+            ) from exc
         if exc.kind == ErrorKind.TRANSIENT and exc.code not in DEFINITE_TRANSIENT_CODES:
             raise ProviderError(
                 ErrorKind.AMBIGUOUS,
@@ -1142,7 +1167,10 @@ def _number(value: Any) -> float | int | None:
 
 def insight_value(entry: Mapping[str, Any], day: date | None = None) -> float | int | None:
     """Value of one insights entry: ``total_value`` first, else the value for ``day`` (``end_time`` marks the
-    end of the period) or the last one. Breakdown dicts are summed (§5 general rules)."""
+    end of the period), or the last one when no ``day`` is asked. Breakdown dicts are summed (§5 general
+    rules). With a ``day``, a series whose dated values are all for other days gives ``None``: storing a
+    neighbouring day's number under ``day`` would be wrong (and the completed-days re-read would overwrite a
+    good value with it)."""
     total = entry.get("total_value")
     if isinstance(total, dict):
         if "value" in total:
@@ -1160,11 +1188,15 @@ def insight_value(entry: Mapping[str, Any], day: date | None = None) -> float | 
     if not values_list:
         return None
     if day is not None:
+        dated = False
         for item in values_list:
             end = parse_time(item.get("end_time"))
+            dated = dated or end is not None
             # end_time is the end of the period: midnight Pacific (07/08 UTC) or UTC of the next day
             if end is not None and (end - timedelta(days=1)).date() == day:
                 return _number(item.get("value"))
+        if dated:
+            return None
     return _number(values_list[-1].get("value"))
 
 
@@ -1204,9 +1236,19 @@ def fetch_insights(
 
 
 def day_window(day: date) -> tuple[int, int]:
-    """UNIX ``since``/``until`` covering one UTC day."""
+    """UNIX ``since``/``until`` covering one UTC day (``metric_type=total_value`` sums the whole window)."""
     start = datetime(day.year, day.month, day.day, tzinfo=UTC)
     return to_unix(start), to_unix(start + timedelta(days=1))
+
+
+def series_window(day: date) -> tuple[int, int]:
+    """UNIX ``since``/``until`` for a ``period=day`` time series that surely holds ``day``'s value.
+
+    Meta closes its days at midnight Pacific (``end_time`` 07/08 UTC of the next day), so a one-UTC-day window
+    may only return the previous Pacific day. Two UTC days always include the value whose ``end_time`` closes
+    ``day``; :func:`insight_value` then picks it by date."""
+    start = datetime(day.year, day.month, day.day, tzinfo=UTC)
+    return to_unix(start), to_unix(start + timedelta(days=2))
 
 
 def engagement(metrics: Mapping[str, float | int]) -> float | None:

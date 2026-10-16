@@ -32,6 +32,8 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     event,
+    select,
+    update,
 )
 from sqlalchemy.ext.mutable import MutableDict, MutableList
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -773,6 +775,26 @@ def _install_utc_normalizers() -> None:
 
 
 _install_utc_normalizers()
+
+
+@event.listens_for(Brand, "before_delete")
+def _retire_brand_media(_mapper: Any, connection: Any, target: Brand) -> None:
+    """Deleting a brand must not leak its private library into every other brand: ``ON DELETE SET NULL``
+    would turn its assets into *shared* ones (``brand_id`` NULL = visible in every brand). They leave the
+    library instead (soft delete; files stay on disk), except those another brand's posts use, which stay
+    shared so those posts keep working."""
+    used_elsewhere = (
+        select(PostMedia.media_id).join(Post, Post.id == PostMedia.post_id).where(Post.brand_id != target.id)
+    )
+    connection.execute(
+        update(MediaAsset)
+        .where(
+            MediaAsset.brand_id == target.id,
+            MediaAsset.deleted_at.is_(None),
+            MediaAsset.id.not_in(used_elsewhere),
+        )
+        .values(deleted_at=utcnow())
+    )
 
 
 __all__ = [

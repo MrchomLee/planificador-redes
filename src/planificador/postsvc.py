@@ -27,7 +27,9 @@ Contract (shared with other modules):
 - :func:`target_text`, :func:`target_media` — the effective text/media of a target ("Común" + overrides).
 
 Editing is refused while any target is :data:`LOCKED_STATUSES` (being published, published, sent to the
-TikTok app or with an unknown outcome): those posts are shown read-only and can be duplicated instead.
+TikTok app or with an unknown outcome): those posts are shown read-only and can be duplicated instead. Edits,
+trash and reschedule re-check under the write lock that no target changed since it was read (the scheduler
+may claim one at any moment) and raise :class:`PostError` (``conflict``) otherwise.
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ from sqlalchemy.orm import Session
 
 from planificador import config, rules
 from planificador.models import (
+    NETWORK_LABELS,
     Account,
     AccountStatus,
     Brand,
@@ -95,6 +98,17 @@ MOVABLE_STATUSES = frozenset({TargetStatus.DRAFT, TargetStatus.SCHEDULED})
 
 #: provider_state key holding the status a target had before its post was trashed.
 TRASH_STATE_KEY = "_trash_prev_status"
+#: :data:`TRASH_STATE_KEY` value of a target the trash withdrew from Facebook's/YouTube's own scheduler.
+TRASH_NATIVE = "native_scheduled"
+#: Targets whose notifications (assisted reminder, error, missed) become moot once the user edits them.
+NOTIFIED_STATUSES = frozenset(
+    {TargetStatus.MANUAL_PENDING, TargetStatus.ERROR, TargetStatus.MISSED, TargetStatus.UNKNOWN}
+)
+_MOOT_NOTIFICATION_KINDS = ("manual_publish", "error", "unknown", "missed")
+CONFLICT_MESSAGE = (
+    "La publicación ha cambiado de estado mientras la modificabas (puede que se esté publicando ahora "
+    "mismo). Recarga la página y vuelve a intentarlo."
+)
 #: Option keys that are not copied by :func:`duplicate_post` (consents must be given again).
 NON_COPIED_OPTIONS = frozenset({"consent"})
 #: Issue codes about the date: they do not apply to "Publicar ahora".
@@ -298,6 +312,59 @@ def _clear_runtime(target: PostTarget) -> None:
 def _set_draft(target: PostTarget) -> None:
     target.status = TargetStatus.DRAFT
     _clear_runtime(target)
+
+
+def _ensure_unchanged(db: Session, targets: Iterable[PostTarget]) -> None:
+    """Guard against the scheduler before changing targets read in autocommit SELECTs (the checks above them
+    used that snapshot): a guarded no-op ``UPDATE … WHERE status/commit_phase/next_attempt_at = <as read>``
+    per target, which also takes SQLite's write lock, so no claim can interleave until this transaction
+    ends. Call it **before** modifying any target. Raises :class:`PostError` (``conflict``)."""
+    for target in targets:
+        if target.id is None:
+            continue
+        seen_next = target.next_attempt_at
+        stmt = (
+            update(PostTarget)
+            .where(
+                PostTarget.id == target.id,
+                PostTarget.status == target.status,
+                PostTarget.commit_phase == target.commit_phase,
+                PostTarget.next_attempt_at.is_(None)
+                if seen_next is None
+                else PostTarget.next_attempt_at == seen_next,
+            )
+            .values(updated_at=PostTarget.updated_at)
+            .execution_options(synchronize_session=False)
+        )
+        if db.execute(stmt).rowcount != 1:
+            raise PostError(CONFLICT_MESSAGE, code="conflict", status_code=409)
+
+
+def _resolve_notifications(db: Session, target_ids: Iterable[int | None], now: datetime) -> None:
+    """Mark the unread reminders/errors of these targets as read (the user has acted on them)."""
+    ids = [i for i in target_ids if i is not None]
+    if not ids:
+        return
+    db.execute(
+        update(Notification)
+        .where(
+            Notification.target_id.in_(ids),
+            Notification.read_at.is_(None),
+            Notification.kind.in_(_MOOT_NOTIFICATION_KINDS),
+        )
+        .values(read_at=now)
+        .execution_options(synchronize_session=False)
+    )
+
+
+def _forget_native(target: PostTarget) -> None:
+    """Drop everything about a hand-off to the network's scheduler that was withdrawn (the network post no
+    longer exists), so the target can be scheduled again from scratch."""
+    target.provider_state = {}
+    target.commit_phase = CommitPhase.NONE
+    target.external_id = None
+    target.external_url = None
+    target.published_at = None
 
 
 def _rollback(db: Session) -> None:
@@ -899,6 +966,8 @@ def update_post(
         if action in ("schedule", "publish_now"):
             _raise_if_blocked(validate_post(db, data, clock=clock, action=action), action)
         now = _now(clock)
+        _ensure_unchanged(db, post.targets)
+        _resolve_notifications(db, [t.id for t in post.targets if t.status in NOTIFIED_STATUSES], now)
         _post_fields(post, data, action)
         post.updated_at = now
         message = _status_message(post, action, brand.timezone)
@@ -999,9 +1068,9 @@ def _native_pending(target: PostTarget, now: datetime) -> bool:
 
 def delete_post(db: Session, post_id: int, clock: Clock, *, commit: bool = True) -> None:
     """Move a post to the trash. Pending targets (draft, scheduled, waiting to retry, assisted reminders,
-    missed, error) are cancelled and remember their status for :func:`restore_post`; posts handed to the
-    Facebook/YouTube scheduler are withdrawn there (best effort). Published history is kept."""
-    native: list[int] = []
+    missed, error) are cancelled and remember their status for :func:`restore_post`. Posts handed to the
+    Facebook/YouTube scheduler are withdrawn there first; if that fails the post is still going to go live,
+    so nothing is trashed and :class:`PostError` says why. Published history is kept."""
     try:
         post = get_post(db, post_id, include_deleted=True)
         if post.deleted_at is not None:
@@ -1011,9 +1080,23 @@ def delete_post(db: Session, post_id: int, clock: Clock, *, commit: bool = True)
                 "La publicación se está enviando en este momento; espera a que termine.", code="busy"
             )
         now = _now(clock)
+        native = [t.id for t in post.targets if _native_pending(t, now)]
+    except Exception:
+        _rollback(db)
+        raise
+    withdrawn = _withdraw_native(db, native, clock)
+    try:
+        post = get_post(db, post_id, include_deleted=True)
+        _ensure_unchanged(db, post.targets)
         cancelled: list[int] = []
         for target in post.targets:
-            if target.status in TRASH_CANCEL_FROM or target.status == TargetStatus.PUBLISHING:
+            if target.id in withdrawn and target.status == TargetStatus.CANCELLED:
+                state = dict(target.provider_state or {})
+                state[TRASH_STATE_KEY] = TRASH_NATIVE
+                target.provider_state = state
+                target.updated_at = now
+                _event(target, now, "trashed", "Publicación movida a la papelera.", {"from": TRASH_NATIVE})
+            elif target.status in TRASH_CANCEL_FROM or target.status == TargetStatus.PUBLISHING:
                 previous = str(target.status)
                 state = dict(target.provider_state or {})
                 state[TRASH_STATE_KEY] = previous
@@ -1025,8 +1108,6 @@ def delete_post(db: Session, post_id: int, clock: Clock, *, commit: bool = True)
                 _event(target, now, "trashed", "Publicación movida a la papelera.", {"from": previous})
                 if target.id is not None:
                     cancelled.append(target.id)
-            elif _native_pending(target, now):
-                native.append(target.id)
         post.deleted_at = now
         post.updated_at = now
         if cancelled:
@@ -1036,18 +1117,36 @@ def delete_post(db: Session, post_id: int, clock: Clock, *, commit: bool = True)
                 .values(read_at=now)
                 .execution_options(synchronize_session=False)
             )
-        _finish(db, commit or bool(native))
+        _finish(db, commit)
     except Exception:
         _rollback(db)
         raise
-    for target_id in native:
-        try:
-            from planificador import engine
 
+
+def _withdraw_native(db: Session, target_ids: list[int], clock: Clock) -> list[int]:
+    """Withdraw natively scheduled targets from the network's scheduler (``engine.cancel_target``, which
+    commits). Raises :class:`PostError` when one could not be withdrawn (it stays scheduled there)."""
+    if not target_ids:
+        return []
+    from planificador import engine
+
+    done: list[int] = []
+    for target_id in target_ids:
+        try:
             engine.cancel_target(db, target_id, clock)
-        except Exception:  # best effort: the post stays in the trash anyway
-            log.warning("Could not withdraw natively scheduled target %s", target_id, exc_info=True)
+        except Exception as exc:
             _rollback(db)
+            message = getattr(exc, "message", None)
+            if not message:
+                raise
+            if done:
+                message += " Las demás redes programadas allí sí se han retirado."
+            raise PostError(
+                f"{message} La publicación no se ha movido a la papelera.",
+                code=getattr(exc, "code", "native_cancel_failed"),
+            ) from exc
+        done.append(target_id)
+    return done
 
 
 def restore_post(db: Session, post_id: int, clock: Clock, *, commit: bool = True) -> None:
@@ -1066,7 +1165,21 @@ def restore_post(db: Session, post_id: int, clock: Clock, *, commit: bool = True
             target.provider_state = state
             target.updated_at = now
             future = target.scheduled_at is not None and target.scheduled_at > now
-            if previous in (TargetStatus.SCHEDULED, TargetStatus.PUBLISHING):
+            message = "Publicación restaurada de la papelera."
+            if previous == TRASH_NATIVE:
+                # It was withdrawn from the network's scheduler when trashed: schedule it again from scratch
+                # (the scheduler hands it over once more) — or keep it as a draft if its time has passed.
+                _forget_native(target)
+                label = NETWORK_LABELS.get(str(target.network), str(target.network))
+                if future and post.kind == PostKind.SCHEDULED:
+                    _reset_for_schedule(target)
+                    restored = TargetStatus.SCHEDULED
+                    message += f" Se volverá a programar en {label}."
+                else:
+                    _set_draft(target)
+                    restored = TargetStatus.DRAFT
+                    message += " Su fecha ya ha pasado: queda como borrador."
+            elif previous in (TargetStatus.SCHEDULED, TargetStatus.PUBLISHING):
                 if future and post.kind == PostKind.SCHEDULED:
                     _reset_for_schedule(target)
                     restored = TargetStatus.SCHEDULED
@@ -1079,13 +1192,7 @@ def restore_post(db: Session, post_id: int, clock: Clock, *, commit: bool = True
             else:
                 _set_draft(target)
                 restored = TargetStatus.DRAFT
-            _event(
-                target,
-                now,
-                "restored",
-                "Publicación restaurada de la papelera.",
-                {"status": str(restored)},
-            )
+            _event(target, now, "restored", message, {"status": str(restored)})
         post.deleted_at = None
         post.updated_at = now
         _finish(db, commit)
@@ -1120,6 +1227,7 @@ def reschedule_post(
                 "No se puede mover una publicación a una fecha pasada.", code="date_past", status_code=422
             )
         tz = post.brand.timezone if post.brand is not None else None
+        _ensure_unchanged(db, active)
         post.scheduled_at = when
         post.updated_at = now
         for target in active:

@@ -19,6 +19,12 @@
                        autocomplete="current-password", attrs={"autofocus": True}) }}
       {{ ui.button("Entrar", type="submit", variant="primary", size="lg", cls="btn--block", icon_right="arrow-right") }}
     </form>
+    <details class="auth-forgot mt-5">
+      <summary class="text-sm">¿Has olvidado la contraseña?</summary>
+      <p class="text-xs muted mt-2">En este ordenador, abre la carpeta del Planificador y haz doble clic en
+        <strong>quitar-contrasena.bat</strong> (en Mac o Linux: <code>uv run planificador --quitar-contrasena</code>).
+        Después vuelve a esta página: podrás entrar sin contraseña. Tus publicaciones y ajustes no se tocan.</p>
+    </details>
     <p class="text-xs subtle text-center mt-5">La aplicación solo es accesible desde este ordenador.</p>
   </div>
 </main>

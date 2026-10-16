@@ -308,6 +308,7 @@ def tile(
         "label": label,
         "value": kpi.get("value"),
         "previous": kpi.get("previous"),
+        "previous_incomplete": bool(kpi.get("previous_incomplete")),
         "delta": kpi.get("change_pct"),
         "color": color,
         "fmt": fmt,
@@ -582,9 +583,15 @@ def summary_context(
     labels = _iso_days(period)
     rows = []
     keys = ("followers", "net", "posts", "views", "interactions")
-    totals = {k: 0.0 for k in keys} | {k + "_prev": 0.0 for k in keys}
+    totals = {k: 0.0 for k in keys}
     seen = {k: False for k in ("followers", "net", "views", "interactions")}
-    seen_prev = {k: False for k in ("followers", "net", "views", "interactions")}
+    # The % change compares like with like: current and previous are summed in pairs, only over the accounts
+    # that have both (an account connected during the comparison window, or with a data gap, would otherwise
+    # add to the current total but not to the baseline and fake a huge growth).
+    paired = {k: [0.0, 0.0] for k in keys}
+    has_pair = {k: False for k in keys}
+    partial = {k: False for k in keys}
+    incomplete = {k: False for k in keys}
     posts_series = []
     views_series = []
     ordered = [accounts[n] for n in NETWORK_ORDER if n in accounts]
@@ -617,12 +624,17 @@ def summary_context(
                          ("views", views_kpi), ("interactions", inter_kpi)):  # fmt: skip
             if not kpi:
                 continue
-            if kpi.get("value") is not None:
-                totals[key] += float(kpi["value"])
+            value, previous = kpi.get("value"), kpi.get("previous")
+            incomplete[key] = incomplete[key] or bool(kpi.get("previous_incomplete"))
+            if value is not None:
+                totals[key] += float(value)
                 seen[key] = True
-            if kpi.get("previous") is not None:
-                totals[key + "_prev"] += float(kpi["previous"])
-                seen_prev[key] = True
+            if value is not None and previous is not None:
+                paired[key][0] += float(value)
+                paired[key][1] += float(previous)
+                has_pair[key] = True
+            elif value is not None or previous is not None:
+                partial[key] = True
         posts_series.append(
             {
                 "label": network_label(network),
@@ -644,19 +656,32 @@ def summary_context(
 
     def total_kpi(key: str) -> dict[str, Any]:
         value = totals[key] if seen.get(key, True) else None
-        prev = totals[key + "_prev"] if state.compare and seen_prev.get(key, True) else None
+        comparable = state.compare and has_pair[key]
+        current, prev = paired[key] if comparable else (None, None)
         return {
             "value": analytics.clean_number(value),
             "previous": analytics.clean_number(prev),
-            "change_pct": analytics.change_pct(value, prev) if state.compare else None,
+            "change_pct": analytics.change_pct(current, prev) if comparable else None,
+            "previous_incomplete": state.compare and not comparable and incomplete[key],
         }
 
+    def partial_help(key: str) -> str | None:
+        if state.compare and has_pair[key] and partial[key]:
+            return "La variación solo tiene en cuenta las redes con datos de los dos periodos."
+        return None
+
     summary_tiles = [
-        tile("followers", "Comunidad total", total_kpi("followers"), "blue"),
-        tile("net", "Nuevos seguidores", total_kpi("net"), "green", signed=True),
-        tile("posts", "Posts", total_kpi("posts"), "amber"),
-        tile("views", "Visualizaciones", total_kpi("views"), "violet"),
-        tile("interactions", "Interacciones", total_kpi("interactions"), "teal"),
+        tile("followers", "Comunidad total", total_kpi("followers"), "blue", help=partial_help("followers")),
+        tile("net", "Nuevos seguidores", total_kpi("net"), "green", signed=True, help=partial_help("net")),
+        tile("posts", "Posts", total_kpi("posts"), "amber", help=partial_help("posts")),
+        tile("views", "Visualizaciones", total_kpi("views"), "violet", help=partial_help("views")),
+        tile(
+            "interactions",
+            "Interacciones",
+            total_kpi("interactions"),
+            "teal",
+            help=partial_help("interactions"),
+        ),
     ]
     charts = {
         "summary-posts": {

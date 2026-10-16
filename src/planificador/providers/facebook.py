@@ -12,8 +12,11 @@ Publishing always uploads local bytes (no public URL is ever needed for Facebook
   finish with ``video_state=PUBLISHED`` (commit) → poll the publishing phase.
 - ``story`` → photo staged unpublished + ``/{page}/photo_stories``, or ``/{page}/video_stories`` start →
   rupload → finish.
-- ``native_schedule`` (post only, 10 min – 29 days ahead) → ``published=false`` + ``scheduled_publish_time``;
-  the step returns ``published`` immediately with ``state.native_scheduled = True`` (SPEC §10).
+- ``native_schedule`` (post only, 15 min – 29 days ahead, like ``rules.FB_NATIVE_WINDOW``) →
+  ``published=false`` + ``scheduled_publish_time``; the step returns ``published`` immediately with
+  ``state.native_scheduled = True`` (SPEC §10). The lead is checked again right before the commit: when
+  uploads or retries left less than :data:`NATIVE_COMMIT_MIN`, native scheduling is dropped and the post
+  goes out directly at its time.
 
 Every stage is persisted in ``ctx.state`` (re-entrant), ``ctx.before_commit`` runs right before the
 irreversible request (``meta_common.run_commit``) and :meth:`FacebookProvider.reconcile` checks the remote
@@ -54,9 +57,12 @@ log = logging.getLogger(__name__)
 #: §3.2 decision: re-encode to JPEG and keep files ≤ 4 MB.
 PHOTO_MAX_BYTES = 4_000_000
 MAX_PHOTOS = 10
-#: §3.7: Meta allows 10 min – 30 days; we use 10 min – 29 days to be safe.
-NATIVE_MIN = timedelta(minutes=10)
+#: §3.7: Meta allows 10 min – 30 days. We hand a post over from 15 min ahead (SPEC §7,
+#: rules.FB_NATIVE_WINDOW, the option help) up to 29 days ahead, and re-check right before the commit that
+#: ``scheduled_publish_time`` is still at least Meta's 10 min plus a margin (uploads/retries eat the lead).
+NATIVE_MIN = timedelta(minutes=15)
 NATIVE_MAX = timedelta(days=29)
+NATIVE_COMMIT_MIN = timedelta(minutes=12)
 EARLY_START_TOLERANCE_S = 5  # a non-native publish never starts more than this before its scheduled time
 UPLOAD_POLL_S = 5
 PUBLISH_POLL_S = 10
@@ -189,6 +195,51 @@ class FacebookProvider(Provider):
         if state.get("native"):
             return {"published": False, "scheduled_publish_time": state.get("native_time")}
         return {}
+
+    def _check_native_lead(self, ctx: PublishContext) -> bool:
+        """Drop native scheduling when ``scheduled_publish_time`` is now too close for Meta (§3.7: at least
+        10 min after the request; slow uploads and engine retries eat the lead fixed at planning time).
+        Returns ``True`` when it was dropped by this call; the post then goes out directly at its time."""
+        state = ctx.state
+        if not state.get("native"):
+            return False
+        try:
+            native_time = int(state.get("native_time") or 0)
+        except (TypeError, ValueError):
+            native_time = 0
+        lead = native_time - mc.to_unix(ctx.clock.now())
+        if lead >= NATIVE_COMMIT_MIN.total_seconds():
+            return False
+        state["native"] = False
+        state["native_time"] = None
+        state["native_dropped"] = True
+        ctx.save_state(state)
+        ctx.log(
+            "fb_native_dropped",
+            "Queda muy poco para la hora programada y Facebook ya no acepta programarla: se publicará desde "
+            "la app a la hora indicada.",
+            {"lead_seconds": lead},
+        )
+        return True
+
+    def _hold_until_due(self, ctx: PublishContext) -> StepResult | None:
+        """After native scheduling was dropped, never commit before the scheduled time."""
+        scheduled = ctx.target.scheduled_at
+        if not ctx.state.get("native_dropped") or scheduled is None:
+            return None
+        delta = (scheduled - ctx.clock.now()).total_seconds()
+        if delta <= EARLY_START_TOLERANCE_S:
+            return None
+        return StepResult(
+            "wait",
+            wait_seconds=max(1, math.ceil(delta)),
+            message="Esperando a la hora programada para publicar en Facebook.",
+        )
+
+    def _native_gate(self, ctx: PublishContext) -> StepResult | None:
+        """Right before a commit that may carry ``scheduled_publish_time``."""
+        self._check_native_lead(ctx)
+        return self._hold_until_due(ctx)
 
     @staticmethod
     def _post_id(page_id: str, post_id: Any) -> str | None:
@@ -368,6 +419,9 @@ class FacebookProvider(Provider):
 
     def _flow_text(self, ctx: PublishContext) -> StepResult:
         state = ctx.state
+        held = self._native_gate(ctx)
+        if held is not None:
+            return held
         state["stage"] = "commit"
         text = ctx.target.text or ""
         link = str(ctx.target.options.get("link") or "").strip() or None
@@ -440,6 +494,9 @@ class FacebookProvider(Provider):
 
     def _flow_photo_single(self, ctx: PublishContext) -> StepResult:
         state = ctx.state
+        held = self._hold_until_due(ctx)
+        if held is not None:
+            return held
         info = self._images(ctx)[0]
         path, mime = mc.prepare_image(info, PHOTO_MAX_BYTES, accept=("image/jpeg", "image/png"))
         name = path.name if path != info.path else (info.original_name or path.name)
@@ -470,6 +527,15 @@ class FacebookProvider(Provider):
     def _flow_photos(self, ctx: PublishContext) -> StepResult:
         state = ctx.state
         images = self._images(ctx)
+        if self._check_native_lead(ctx):
+            # Photos staged for a scheduled post are ``temporary``: stage them again for a direct post.
+            if any(state.get("photo_ids") or []):
+                self._discard_photos(ctx)
+            if len(images) == 1:
+                state["flow"] = "photo_single"  # a single photo only went through /feed to be scheduled
+                state["stage"] = "start"
+                ctx.save_state(state)
+                return StepResult("continue")
         ids: list[str | None] = list(state.get("photo_ids") or [])
         if len(ids) != len(images):
             ids = [None] * len(images)
@@ -486,6 +552,9 @@ class FacebookProvider(Provider):
                 {"photo_id": ids[index]},
             )
             return StepResult("continue", message="Subiendo fotos a Facebook…")
+        held = self._hold_until_due(ctx)
+        if held is not None:
+            return held
         state["stage"] = "commit"
         text = ctx.target.text or ""
         data: dict[str, Any] = {"message": text or None}
@@ -524,6 +593,10 @@ class FacebookProvider(Provider):
         info = self._videos(ctx)[0]
         page = self._page(ctx)
         stage = state.get("stage") or "start"
+        if stage in ("finish", "simple_commit"):
+            held = self._native_gate(ctx)
+            if held is not None:
+                return held
 
         if stage == "start":
             if state.get("video_mode") == "simple":
@@ -607,6 +680,9 @@ class FacebookProvider(Provider):
             state["stage"] = "finish"
             ctx.save_state(state)
             stage = "finish"
+            held = self._native_gate(ctx)
+            if held is not None:
+                return held
 
         if stage == "finish":
             text = ctx.target.text or ""
@@ -1053,13 +1129,27 @@ class FacebookProvider(Provider):
     def delete_post(
         self, account: AccountCreds, settings: ProviderSettings, http: httpx.Client, external_id: str
     ) -> bool:
-        """Delete a post (e.g. cancel a natively scheduled one, SPEC §10). Best effort: False on failure."""
+        """Delete a post (e.g. cancel a natively scheduled one, SPEC §10). False on failure.
+
+        A post the user already deleted on Facebook answers ``100/33`` ("object does not exist"): that counts
+        as withdrawn, but only when the Page itself is still readable with the same token — otherwise the
+        error may mean lost access, and the post could still go live."""
         try:
             body = mc.graph_delete(http, settings, external_id, account.access_token)
         except ProviderError as exc:
+            if exc.code == "meta_not_found" and self._page_readable(account, settings, http):
+                log.info("Facebook delete: the post no longer exists; treated as withdrawn")
+                return True
             log.info("Facebook delete failed: %s", exc.code)
             return False
         return body.get("success") is not False
+
+    def _page_readable(self, account: AccountCreds, settings: ProviderSettings, http: httpx.Client) -> bool:
+        try:
+            body = mc.graph_get(http, settings, account.external_id, account.access_token, fields="id")
+        except ProviderError:
+            return False
+        return str(body.get("id") or "") == str(account.external_id)
 
     def cancel_native(self, ctx: PublishContext) -> None:
         """Withdraw a post handed to Facebook's own scheduler (engine ``cancel_target``)."""
@@ -1105,7 +1195,7 @@ class FacebookProvider(Provider):
             followers = info.get("fan_count")
         if followers is not None:
             metrics["followers"] = int(followers)
-        since, until = mc.day_window(day)
+        since, until = mc.series_window(day)
         params = {
             **mc.auth_params(settings, account.access_token),
             "period": "day",

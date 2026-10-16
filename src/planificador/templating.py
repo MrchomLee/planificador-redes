@@ -769,11 +769,17 @@ def _db_context(request: Request) -> dict[str, Any]:
         log.debug("Template globals: cannot open session: %s", exc)
         return out
 
+    unavailable: list[str] = []
+
     def attempt(label: str, fn: Any) -> Any:
+        if unavailable:  # the database is busy/broken: do not wait again for each remaining query
+            return None
         try:
             return fn()
         except Exception as exc:  # noqa: BLE001 - tables may not exist yet
             log.debug("Template globals: %s failed: %s", label, exc)
+            if _db_unavailable(exc):
+                unavailable.append(label)
             try:
                 db.rollback()
             except Exception:  # noqa: BLE001
@@ -791,6 +797,8 @@ def _db_context(request: Request) -> dict[str, Any]:
             # Same resolution as the ActiveBrand dependency (setting ``active_brand_id``; creates the
             # default "Mi marca" on first run), so pages without that dependency agree with the others.
             active = attempt("active brand", lambda: _ensure_active_brand(db))
+            if active is not None:
+                attempt("time zone notice", lambda: _announce_detected_timezone(request, db))
             if active is not None:
                 if all(b.id != active.id for b in brands):
                     brands = sorted(
@@ -845,6 +853,16 @@ def _db_context(request: Request) -> dict[str, Any]:
     return out
 
 
+def _db_unavailable(exc: Exception) -> bool:
+    """A pool timeout or an operational error (locked/busy/missing database): skip the remaining globals."""
+    try:
+        from sqlalchemy.exc import OperationalError
+        from sqlalchemy.exc import TimeoutError as PoolTimeout
+    except Exception:  # noqa: BLE001  # pragma: no cover
+        return False
+    return isinstance(exc, PoolTimeout | OperationalError)
+
+
 def _setting(db: Any, key: str, default: Any) -> Any:
     from planificador.config import get_setting
 
@@ -855,6 +873,12 @@ def _ensure_active_brand(db: Any) -> Any:
     from planificador.deps import ensure_active_brand
 
     return ensure_active_brand(db)
+
+
+def _announce_detected_timezone(request: Request, db: Any) -> None:
+    from planificador.deps import announce_detected_timezone
+
+    announce_detected_timezone(request, db)
 
 
 def _network_order(network: str) -> int:

@@ -105,8 +105,41 @@
     true
   );
 
+  // Keyboard focus across refreshes: a refresh re-renders the list / board (htmx) or the calendar events
+  // (FullCalendar) and replaces the focused element — typically the row or event whose drawer was just closed
+  // (closeLayer gives focus back to it right before "layer:closed"). Remember how to find it and focus its new
+  // copy once the refresh has landed, so keyboard users keep their place instead of landing on <body>.
+  let pendingFocus = null;
+  function rememberFocus() {
+    const el = doc.activeElement;
+    if (!App.focusLocator || !el || el.closest("#modal-root, #drawer-root, #confirm-root")) return;
+    const loc = App.focusLocator(el);
+    if (loc) pendingFocus = { el: el, loc: loc, until: Date.now() + 8000 };
+  }
+  function restoreFocus() {
+    const p = pendingFocus;
+    if (!p) return;
+    if (Date.now() > p.until) {
+      pendingFocus = null;
+      return;
+    }
+    if (p.el.isConnected) return; // not replaced (yet)
+    const active = doc.activeElement;
+    if (active && active !== doc.body && active !== doc.documentElement) {
+      pendingFocus = null; // the user has moved on
+      return;
+    }
+    const next = App.findByLocator(p.loc);
+    if (next) {
+      pendingFocus = null;
+      next.focus({ preventScroll: true });
+    }
+  }
+  doc.addEventListener("htmx:afterSettle", restoreFocus);
+
   // One refresh signal for every planner view.
   function requestRefresh() {
+    rememberFocus();
     if (doc.body) doc.body.dispatchEvent(new CustomEvent("planner:refresh", { bubbles: true }));
   }
   doc.addEventListener("layer:closed", (e) => {
@@ -304,7 +337,10 @@
             eventDragStop: () => (dragging = false),
             eventDrop: (info) => self.onDrop(info),
             datesSet: (info) => self.onDatesSet(info),
-            loading: (isLoading) => (self.loading = isLoading),
+            loading: (isLoading) => {
+              self.loading = isLoading;
+              if (!isLoading && pendingFocus) setTimeout(restoreFocus);
+            },
           });
           cal.render();
 
@@ -319,6 +355,7 @@
           // Statuses change in the background (publishing → published): refresh every minute while visible.
           setInterval(() => {
             if (doc.hidden || dragging || (App.modal && App.modal.isOpen && App.modal.isOpen())) return;
+            rememberFocus();
             this.refetchPosts();
           }, 60000);
         },
@@ -452,6 +489,8 @@
             el.dataset.hour = p.hour;
             return;
           }
+          if (p.postId) el.dataset.postId = p.postId; // focus locator (App.findByLocator) after a refetch
+          if (pendingFocus) setTimeout(restoreFocus);
           const labels = cfg.networkLabels || {};
           const nets = (p.networks || []).map((n) => labels[n] || n).join(", ");
           const parts = [p.time, p.statusLabel, nets, p.text].filter(Boolean);
@@ -632,13 +671,18 @@
     }));
 
     // ---------------------------------------------------------------- Ideas
+    // Methods run from @input/@drop on inner elements, where this.$el is that element: query from this.$root.
     Alpine.data("ideasBoard", () => ({
       q: "",
       dragId: null,
       overCol: null,
+      init() {
+        // The board re-renders (htmx) after every change: keep the current search applied.
+        this.$el.addEventListener("htmx:afterSettle", () => this.filter());
+      },
       filter() {
         const q = norm(this.q.trim());
-        $$(".idea-card", this.$el).forEach((card) => {
+        $$(".idea-card", this.$root).forEach((card) => {
           card.hidden = !!q && !norm(card.dataset.search).includes(q);
         });
       },
@@ -680,7 +724,7 @@
         card.classList.remove("is-dragging");
         const from = card.closest("[data-stage]");
         if (!from || from.dataset.stage === col) return;
-        const list = $('[data-stage="' + col + '"] .idea-col__list', this.$el);
+        const list = $('[data-stage="' + col + '"] .idea-col__list', this.$root);
         if (!list) return;
         const parent = card.parentNode;
         const nextSibling = card.nextSibling;
@@ -699,7 +743,7 @@
         }
       },
       recount() {
-        $$("[data-stage]", this.$el).forEach((col) => {
+        $$("[data-stage]", this.$root).forEach((col) => {
           const n = $$(".idea-card", col).length;
           const count = $("[data-count]", col);
           if (count) count.textContent = n;

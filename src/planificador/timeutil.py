@@ -9,12 +9,39 @@ Spanish names are hard-coded so formatting never depends on the OS locale (Windo
 
 from __future__ import annotations
 
+import logging
+import os
 import threading
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from typing import Literal, Protocol, runtime_checkable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+log = logging.getLogger(__name__)
+
 DEFAULT_TIMEZONE = "Europe/Madrid"
+#: Overrides the detected time zone of this computer (IANA name, e.g. ``America/Mexico_City``).
+ENV_TIMEZONE = "PLANIFICADOR_TIMEZONE"
+#: What servers, containers and unconfigured VMs report: treated as "unknown" (keep the app default).
+_UNCONFIGURED_ZONES = frozenset(
+    {
+        "UTC",
+        "Etc/UTC",
+        "Etc/UCT",
+        "UCT",
+        "Etc/Universal",
+        "Universal",
+        "Etc/Zulu",
+        "Zulu",
+        "GMT",
+        "Etc/GMT",
+        "Etc/GMT0",
+        "Etc/GMT+0",
+        "Etc/GMT-0",
+        "GMT0",
+        "Etc/Greenwich",
+        "Greenwich",
+    }
+)
 
 DAY_NAMES_ES: tuple[str, ...] = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
 DAY_ABBR_ES: tuple[str, ...] = ("lun", "mar", "mié", "jue", "vie", "sáb", "dom")
@@ -123,6 +150,32 @@ def is_valid_timezone(name: str | None) -> bool:
     except (ZoneInfoNotFoundError, ValueError, TypeError):
         return False
     return True
+
+
+def system_timezone() -> str | None:
+    """IANA time zone of this computer (the browser runs on the same PC), or ``None`` when unknown.
+
+    Uses ``tzlocal`` (maps Windows zone names such as "Central Standard Time (Mexico)" to IANA). UTC-like
+    answers count as unknown (servers/containers). :data:`ENV_TIMEZONE` overrides the detection with an IANA
+    name, or turns it off with ``off`` (tests)."""
+    override = os.environ.get(ENV_TIMEZONE, "").strip()
+    if override:
+        if override.lower() in ("off", "no", "0", "false"):
+            return None
+        if is_valid_timezone(override):
+            return override
+        log.warning("%s=%r is not a valid time zone; ignoring it", ENV_TIMEZONE, override)
+        return None
+    try:
+        from tzlocal import get_localzone_name
+
+        name = get_localzone_name()
+    except Exception as exc:  # noqa: BLE001 - detection is best effort
+        log.debug("Could not detect the system time zone: %s", exc)
+        return None
+    if not name or name in _UNCONFIGURED_ZONES or not is_valid_timezone(name):
+        return None
+    return str(name)
 
 
 def get_tz(name: str | tzinfo | None = None) -> tzinfo:

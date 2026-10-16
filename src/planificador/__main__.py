@@ -5,6 +5,7 @@
 - Single instance: an OS-level lock on ``<data>/instance.lock`` (released automatically if the process dies).
   A second launch only opens the browser at the running instance (port read from ``instance.json``).
 - Uvicorn bound to **127.0.0.1** only; the browser opens ``http://localhost:<port>/`` once the server is up.
+- ``--quitar-contrasena``: removes a forgotten app password and exits (``quitar-contrasena.bat`` on Windows).
 """
 
 from __future__ import annotations
@@ -145,12 +146,90 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--data-dir", default=None, help="Carpeta de datos (base de datos, medios, registros)."
     )
+    parser.add_argument(
+        "--quitar-contrasena",
+        action="store_true",
+        help="Quita la contraseña de acceso (si la has olvidado) y sale.",
+    )
     parser.add_argument("--version", action="version", version=f"planificador {__version__}")
     return parser
 
 
+def remove_password(paths: DataPaths) -> int:
+    """``--quitar-contrasena``: clear the optional app password. Whoever can run this on the PC can already
+    read the data folder, so it grants nothing new; it also works while the app is running (the server
+    re-reads the setting within seconds)."""
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from planificador import security
+    from planificador.db import Database
+
+    if not paths.db_path.exists():
+        print("No hay datos del Planificador en esta carpeta: no hay ninguna contraseña que quitar.")
+        return 0
+    database = Database(paths.db_path)
+    try:
+        with database.session_scope() as db:
+            had_password = security.password_enabled(db)
+            if had_password:
+                security.set_password(db, None, commit=False)
+    except SQLAlchemyError as exc:
+        print(f"No se ha podido quitar la contraseña: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        database.dispose()
+    if had_password:
+        print(
+            "Contraseña quitada: ya puedes entrar sin contraseña. Puedes poner otra en Ajustes › Seguridad."
+        )
+    else:
+        print("La aplicación no tenía contraseña.")
+    return 0
+
+
 def app_url(port: int) -> str:
     return f"http://localhost:{port}/"
+
+
+STD_INPUT_HANDLE = -10
+ENABLE_QUICK_EDIT_MODE = 0x0040
+ENABLE_EXTENDED_FLAGS = 0x0080
+
+
+def disable_console_quick_edit(kernel32: Any = None) -> bool:
+    """Windows: turn off QuickEdit on this console. With it on (the conhost default on Windows 10), a click in
+    the black window starts a selection that **blocks every write to the console** until Esc/Enter, which
+    would freeze the server (access log) and the publishing threads (logging lock). Returns True when the
+    mode was changed; any failure (no console, redirected stdin, not Windows) is ignored."""
+    if kernel32 is None:
+        if sys.platform != "win32":
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+            kernel32.GetStdHandle.restype = wintypes.HANDLE
+            kernel32.GetStdHandle.argtypes = [wintypes.DWORD]
+            kernel32.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            kernel32.SetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        except Exception:  # pragma: no cover - Windows only
+            return False
+    try:
+        import ctypes
+
+        handle = kernel32.GetStdHandle(STD_INPUT_HANDLE & 0xFFFFFFFF)
+        if not handle or handle == ctypes.c_void_p(-1).value:
+            return False
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        new_mode = (mode.value | ENABLE_EXTENDED_FLAGS) & ~ENABLE_QUICK_EDIT_MODE
+        if new_mode == mode.value:
+            return False
+        return bool(kernel32.SetConsoleMode(handle, new_mode))
+    except Exception:  # pragma: no cover - best effort
+        return False
 
 
 def _configure_stdio() -> None:
@@ -161,6 +240,7 @@ def _configure_stdio() -> None:
                 reconfigure(encoding="utf-8", errors="replace")
             except (OSError, ValueError):  # pragma: no cover
                 pass
+    disable_console_quick_edit()
 
 
 def _open_browser_when_ready(server: Any, url: str, timeout: float = 30.0) -> None:
@@ -211,6 +291,8 @@ def main(argv: list[str] | None = None) -> int:
 
     settings = load_app_settings(data_dir=args.data_dir, port=args.port, log_to_console=True)
     paths = DataPaths(resolve_data_dir(settings.data_dir)).ensure()
+    if args.quitar_contrasena:
+        return remove_password(paths)
 
     lock = InstanceLock(paths.lock_file, paths.instance_info_file)
     url = app_url(settings.port)
@@ -226,8 +308,14 @@ def main(argv: list[str] | None = None) -> int:
         import uvicorn
 
         from planificador.app import create_app
+        from planificador.crypto import MasterKeyUnavailable
 
-        app = create_app(settings)
+        try:
+            app = create_app(settings)
+        except MasterKeyUnavailable as exc:
+            # The stored secrets depend on a key we cannot load right now: say so instead of a traceback.
+            print(f"\n{exc}\n", file=sys.stderr)
+            return 1
         config = uvicorn.Config(
             app,
             host="127.0.0.1",  # loopback only — never expose the app on the network

@@ -323,7 +323,9 @@ def _detail_context(db: Session, asset: MediaAsset) -> dict[str, Any]:
     pending = media.pending_usage(db, asset.id)
     usage = media.usage_counts(db, [asset.id]).get(asset.id, 0)
     view = asset_view(asset, usage=usage)
-    view["pending"] = len(pending)
+    view["pending"] = pending.total  # posts (not networks) that block the delete
+    view["pending_summary"] = pending.summary
+    view["pending_advice"] = pending.advice
     return view
 
 

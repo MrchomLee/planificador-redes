@@ -237,6 +237,11 @@ auditado. Bórralo, súbelo desde YouTube Studio y mantén YouTube en **Publicac
 guardan cifrados. Si compartes el ordenador, pon una contraseña en **Ajustes › Seguridad**. La URL pública de
 Instagram solo expone, durante unos minutos, la foto que Instagram tiene que descargar.
 
+**He olvidado la contraseña de la aplicación.** Haz doble clic en `quitar-contrasena.bat` (en la carpeta del
+programa; si usas otra carpeta de datos, `quitar-contrasena.bat --data-dir RUTA`). Funciona aunque Planificador
+esté abierto: en unos segundos podrás entrar sin contraseña y poner otra en **Ajustes › Seguridad**. Tus
+publicaciones, cuentas y ajustes no se tocan. En Linux/macOS: `uv run planificador --quitar-contrasena`.
+
 **Sale «puerto ocupado» o no se abre.** Puede que Planificador ya esté abierto (mira la barra de tareas) o que
 otro programa use el puerto 8765. Puedes arrancar en otro puerto con `iniciar.bat --port 8799`, pero entonces
 las direcciones de redirección de tus apps cambian (`http://localhost:8799/...`) y tendrás que registrarlas
@@ -276,7 +281,8 @@ uv run planificador          # arranca en http://localhost:8765 y abre el navega
 
 Opciones de `planificador`: `--port 8799`, `--no-browser`, `--data-dir <carpeta>`. Solo se ejecuta una
 instancia por carpeta de datos: si ya está abierta, un segundo arranque solo abre el navegador. `iniciar.bat` e
-`iniciar.sh` hacen `uv sync --frozen --no-dev` y `uv run --frozen --no-dev planificador`.
+`iniciar.sh` hacen `uv sync --frozen --no-dev --extra heic` y `uv run --frozen --no-dev --extra heic planificador`
+con `UV_PYTHON_PREFERENCE=only-managed` (siempre el Python que descarga uv, nunca el de Microsoft Store).
 
 Carpeta de datos (base de datos SQLite, medios, registros en `logs/app.log`): `PLANIFICADOR_DATA_DIR` o
 `--data-dir`; por defecto `%LOCALAPPDATA%\PlanificadorRedes` en Windows y `~/.local/share/planificador-redes`
@@ -287,7 +293,11 @@ PLANIFICADOR_DATA_DIR=/tmp/planificador-dev uv run planificador --no-browser --p
 ```
 
 Otras variables útiles: `PLANIFICADOR_NO_SCHEDULER=1` (no arranca el programador en segundo plano) y
-`PLANIFICADOR_NO_KEYRING=1` (guarda la clave de cifrado en `secret.key` en vez del almacén del sistema).
+`PLANIFICADOR_NO_KEYRING=1` (guarda la clave de cifrado en `secret.key` en vez del almacén del sistema; solo en
+una instalación nueva). Si el almacén de credenciales no responde y ya hay secretos guardados, Planificador no
+arranca en vez de crear otra clave (los perderías); `PLANIFICADOR_RESET_MASTER_KEY=1` empieza con una clave nueva
+si la original se ha perdido. `PLANIFICADOR_TIMEZONE=America/Mexico_City` fija la zona horaria que se usa en el
+primer arranque (por defecto, la de este ordenador; `off` usa Europe/Madrid).
 
 ### Pruebas y calidad
 

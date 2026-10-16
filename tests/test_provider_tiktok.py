@@ -1698,3 +1698,145 @@ def test_forward_compatible_account_fields(tmp_path, settings, http, router, clo
     ctx, _ = make_ctx(acct, make_target(make_video(tmp_path, 10)), settings, http, clock, state=state)
     step = tiktok.TikTokProvider().publish_step(ctx)
     assert step.status == "published" and step.external_url == "https://www.tiktok.com/@otra_cuenta"
+
+
+# ------------------------------------------------------------------- review regressions (tiktok-conformance)
+
+
+class _Crash(BaseException):
+    """The app dies in the middle of a request."""
+
+
+def test_resent_final_chunk_4xx_checks_status_instead_of_reinit(
+    tmp_path, settings, http, router, clock, account, small_chunks
+):
+    """The app stopped during the final-chunk PUT (TikTok may hold every byte). Re-sending it after a restart
+    and getting a 4xx (upload already complete / expired URL) must ask status/fetch, never re-init."""
+    video = make_video(tmp_path, SMALL_SIZE)
+    router.post(tiktok.CREATOR_INFO_URL).mock(return_value=httpx.Response(200, json=creator_json()))
+    init_route = router.post(tiktok.VIDEO_INIT_URL).mock(return_value=httpx.Response(200, json=init_json()))
+    sent = {"final": 0}
+
+    def put(request: httpx.Request) -> httpx.Response:
+        first, last, total = parse_range(request.headers["Content-Range"])
+        if last == total - 1:
+            sent["final"] += 1
+            if sent["final"] == 1:
+                request.read()
+                raise _Crash()
+            return httpx.Response(400)
+        return httpx.Response(206)
+
+    router.put(url__startswith=UPLOAD_HOST).mock(side_effect=put)
+    status_route = router.post(tiktok.STATUS_URL).mock(
+        return_value=httpx.Response(200, json=status_json("PUBLISH_COMPLETE"))
+    )
+    ctx, rec = make_ctx(account, make_target(video), settings, http, clock)
+    provider = tiktok.TikTokProvider()
+    with pytest.raises(_Crash):
+        for _ in range(20):
+            provider.publish_step(ctx)
+    saved = copy.deepcopy(rec.last)
+    assert saved["final_chunk_started"] is True and not saved.get("final_chunk_uncertain")
+
+    ctx2, rec2 = make_ctx(account, make_target(video), settings, http, clock, state=saved)
+    final = run_until_done(tiktok.TikTokProvider(), ctx2)[-1]
+    assert final.status == "published" and final.external_id == PUBLISH_ID
+    assert init_route.call_count == 1 and status_route.called
+    assert not rec2.last.get("abandoned")
+    assert not any(e[0] == "tiktok_upload_restart" for e in rec2.events)
+
+
+def test_reconcile_not_published_mid_upload_reasserts_commit_before_next_chunk(
+    tmp_path, settings, http, router, clock, account, small_chunks
+):
+    """The engine resets the commit phase on "not_published"; the provider re-asserts it before resuming the
+    upload of the same publish_id, so a later crash leads to a reconcile instead of a blind resume."""
+    video = make_video(tmp_path, SMALL_SIZE)
+    router.post(tiktok.CREATOR_INFO_URL).mock(return_value=httpx.Response(200, json=creator_json()))
+    init_route = router.post(tiktok.VIDEO_INIT_URL).mock(return_value=httpx.Response(200, json=init_json()))
+    put_route = router.put(url__startswith=UPLOAD_HOST).mock(return_value=httpx.Response(503))
+    router.post(tiktok.STATUS_URL).mock(
+        return_value=httpx.Response(200, json=status_json("PUBLISH_COMPLETE"))
+    )
+    ctx, rec = make_ctx(account, make_target(video), settings, http, clock)
+    provider = tiktok.TikTokProvider()
+    provider.publish_step(ctx)  # init (first before_commit)
+    for _ in tiktok.CHUNK_RETRY_DELAYS:
+        provider.publish_step(ctx)
+    with pytest.raises(ProviderError):
+        provider.publish_step(ctx)
+    assert provider.reconcile(ctx).outcome == "not_published"
+    assert ctx.state["reassert_commit"] is True and len(rec.commits) == 1
+    put_route.mock(side_effect=PutRecorder())
+    assert provider.publish_step(ctx).status == "continue"
+    assert len(rec.commits) == 2 and rec.commits[-1]["publish_id"] == PUBLISH_ID
+    assert "reassert_commit" not in rec.commits[-1] and "reassert_commit" not in ctx.state
+    final = run_until_done(provider, ctx)[-1]
+    assert final.status == "published" and init_route.call_count == 1 and len(rec.commits) == 2
+
+
+def test_public_post_without_id_is_resolved_by_the_follow_up(
+    tmp_path, settings, http, router, clock, account
+):
+    """Moderation longer than the short in-run waits: the target finishes with the publish_id, then the
+    follow-up job keeps asking status/fetch (hourly for 24 h, then daily up to 30 days)."""
+    video = make_video(tmp_path, 2000)
+    target = make_target(video, privacy_level="PUBLIC_TO_EVERYONE")
+    _, _, status_route, _, _ = mock_direct_flow(
+        router,
+        creator=creator_json(("PUBLIC_TO_EVERYONE", "SELF_ONLY")),
+        statuses=[status_json("PUBLISH_COMPLETE")] * (tiktok.PUBLIC_ID_WAITS + 1),
+    )
+    ctx, rec = make_ctx(account, target, settings, http, clock)
+    provider = tiktok.TikTokProvider()
+    for _ in range(20):
+        result = provider.publish_step(ctx)
+        if result.status == "published":
+            break
+        clock.advance(seconds=result.wait_seconds)
+    assert result.status == "published" and result.external_id == PUBLISH_ID
+    followup = ctx.state["followup"]
+    assert followup["kind"] == "public_id"
+    assert tiktok._parse_iso(followup["next_at"]) == clock.now() + timedelta(hours=1)
+
+    status_route.side_effect = [httpx.Response(200, json=status_json("PUBLISH_COMPLETE"))]
+    clock.advance(hours=1)
+    pending = provider.follow_up(ctx)
+    assert pending is not None and pending.next_at == clock.now() + timedelta(hours=1)
+    clock.advance(hours=24)
+    status_route.side_effect = [httpx.Response(200, json=status_json("PUBLISH_COMPLETE"))]
+    later = provider.follow_up(ctx)
+    assert later is not None and later.next_at == clock.now() + timedelta(days=1)  # daily after 24 h
+
+    status_route.side_effect = [
+        httpx.Response(
+            200, json=status_json("PUBLISH_COMPLETE", publicaly_available_post_id=[7300000000000000999])
+        )
+    ]
+    done = provider.follow_up(ctx)
+    assert done is not None and done.next_at is None
+    assert done.external_id == "7300000000000000999"
+    assert done.external_url == "https://www.tiktok.com/@mimarca/video/7300000000000000999"
+    assert ctx.state["public_post_id"] == "7300000000000000999"
+    assert provider.follow_up(ctx) is None  # nothing left to check
+
+
+def test_public_id_follow_up_gives_up_after_30_days(tmp_path, settings, http, router, clock, account):
+    state = {
+        "phase": "done",
+        "result": "published",
+        "publish_id": PUBLISH_ID,
+        "finished_at": (NOW - timedelta(days=31)).isoformat(),
+        "followup": {"kind": "public_id", "next_at": NOW.isoformat()},
+    }
+    ctx, _ = make_ctx(account, make_target(make_video(tmp_path, 2000)), settings, http, clock, state=state)
+    assert tiktok.TikTokProvider().follow_up(ctx) is None
+    assert not router.calls
+
+
+def test_private_posts_need_no_public_id_follow_up(tmp_path, settings, http, router, clock, account):
+    mock_direct_flow(router)
+    ctx, _ = make_ctx(account, make_target(make_video(tmp_path, 2000)), settings, http, clock)
+    results = run_until_done(tiktok.TikTokProvider(), ctx)
+    assert results[-1].status == "published" and "followup" not in ctx.state

@@ -397,6 +397,8 @@ def test_public_media_check_skipped_without_database() -> None:
 
 
 def tt(options: dict[str, Any] | None = None, media: list[MediaInfo] | None = None, **kw: Any) -> TargetSpec:
+    """A TikTok video target; the music consent is given unless ``options`` says otherwise."""
+    options = {"consent": True, **(options or {})}
     return target("tiktok", "video", media=media if media is not None else [video(30)], options=options, **kw)
 
 
@@ -440,7 +442,6 @@ def test_tiktok_unaudited_and_branded_content() -> None:
 def test_tiktok_consent_must_not_be_refused() -> None:
     assert "tiktok_consent" in errors(check(tt({"privacy_level": "SELF_ONLY", "consent": False})))
     assert not errors(check(tt({"privacy_level": "SELF_ONLY", "consent": True})))
-    assert not errors(check(tt({"privacy_level": "SELF_ONLY"})))  # not asked yet (provider contract)
 
 
 def test_tiktok_inbox_mode_needs_no_privacy() -> None:

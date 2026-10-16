@@ -9,8 +9,11 @@
   library media looked up by file name) and validate it with :func:`planificador.postsvc.validate_post`.
 - :func:`import_rows` — create the posts through :func:`planificador.postsvc.create_post` (``source="csv"``):
   ``schedule`` when the row has no errors, otherwise ``draft``.
-- :func:`export_csv` — the brand's posts in a date range, same columns (re-importable) plus ``estado``,
-  ``enlaces`` and ``id``.
+- :func:`export_csv` — the brand's posts in a date range, same columns (re-importable) plus
+  ``primer_comentario_youtube`` (each network keeps its own first comment), ``estado``, ``enlaces`` and
+  ``id``.
+  ``autopublicar`` is «si»/«no» when all networks agree, empty when each is on its import default (YouTube
+  is assisted until unlocked) and otherwise the list of networks that publish automatically.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from planificador import config, rules
+from planificador.csvsafe import protect_cell, unprotect_cell
 from planificador.models import (
     TARGET_STATUS_LABELS,
     Account,
@@ -37,6 +41,7 @@ from planificador.models import (
     MediaAsset,
     Post,
     PostKind,
+    PostTarget,
     TargetStatus,
 )
 from planificador.timeutil import (
@@ -70,8 +75,13 @@ TEMPLATE_COLUMNS: tuple[str, ...] = (
     "privacidad_youtube",
     "ninos_youtube",
 )
+#: Optional column written by the export so each network keeps its own first comment on re-import. When the
+#: header has it, it is YouTube's first comment (empty = none) and «primer_comentario» is Instagram's only.
+YT_FIRST_COMMENT_COLUMN = "primer_comentario_youtube"
 #: Extra informative columns written by the export (ignored on import).
 EXPORT_EXTRA_COLUMNS: tuple[str, ...] = ("estado", "enlaces", "id")
+#: Header of the export (re-importable).
+EXPORT_COLUMNS: tuple[str, ...] = (*TEMPLATE_COLUMNS, YT_FIRST_COMMENT_COLUMN, *EXPORT_EXTRA_COLUMNS)
 CSV_NETWORKS: tuple[str, ...] = ("facebook", "instagram", "tiktok", "youtube")
 #: Optional column ``demo`` (si/no): only read while demo mode is on and the brand has a Demo account, so the
 #: import can be tried without real accounts. Not part of the template.
@@ -189,8 +199,17 @@ COLUMN_HELP: tuple[tuple[str, str, str], ...] = (
         "foto1.jpg|foto2.jpg",
     ),
     ("privacidad_tiktok", "Quién lo ve en TikTok: público, amigos, seguidores o solo yo.", "solo yo"),
-    ("primer_comentario", "Primer comentario automático (Instagram y YouTube).", "#cafe #otoño"),
-    ("autopublicar", "«no» = Publicación asistida (te avisamos y publicas tú). Vacío = si.", "si"),
+    (
+        "primer_comentario",
+        "Primer comentario automático en Instagram (y en YouTube si no usas «primer_comentario_youtube»).",
+        "#cafe #otoño",
+    ),
+    (
+        "autopublicar",
+        "«no» = Publicación asistida (te avisamos y publicas tú). Vacío = si (en YouTube, asistida hasta "
+        "desbloquearla). Para mezclar, escribe las redes que se publican solas: «facebook, instagram».",
+        "si",
+    ),
     ("formato_youtube", "video o short. Vacío = video.", "short"),
     (
         "titulo_youtube",
@@ -199,6 +218,12 @@ COLUMN_HELP: tuple[tuple[str, str, str], ...] = (
     ),
     ("privacidad_youtube", "publica, oculto o privado. Vacío = publica.", "oculto"),
     ("ninos_youtube", "¿Es contenido creado para niños? Obligatorio si youtube = si.", "no"),
+    (
+        "primer_comentario_youtube",
+        "Opcional (la añade la exportación): primer comentario en YouTube; vacío = ninguno. Sin esta "
+        "columna, YouTube usa «primer_comentario» (salvo en vídeos para niños).",
+        "¡Gracias por verlo!",
+    ),
 )
 
 
@@ -262,16 +287,7 @@ def _clean_cell(value: Any) -> str:
     text = "" if value is None else str(value)
     text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
     # Undo the export's protection against spreadsheet formulas ('=…, '+…, '@…, '-…).
-    if len(text) > 1 and text[0] == "'" and text[1] in "=+-@":
-        text = text[1:]
-    return text
-
-
-def _protect_cell(value: str) -> str:
-    """Prefix values that a spreadsheet would run as a formula (CSV injection)."""
-    if value and (value[0] in "=+@\t\r" or (value[0] == "-" and len(value) > 1 and not value[1].isspace())):
-        return "'" + value
-    return value
+    return unprotect_cell(text)
 
 
 def decode_csv(raw: bytes) -> tuple[str, str]:
@@ -428,6 +444,26 @@ def _bool_cell(row: ImportRow, column: str, label: str | None = None) -> bool | 
         return None
 
 
+def _auto_cell(row: ImportRow, networks: Iterable[str]) -> tuple[bool | None, frozenset[str] | None]:
+    """``autopublicar``: «si»/«no»/empty for every network (``(bool | None, None)``), or the list of networks
+    that publish automatically, e.g. «facebook, instagram» (``(None, {...})``; the others are assisted)."""
+    raw = row.values.get("autopublicar", "")
+    try:
+        return parse_bool(raw), None
+    except ValueError:
+        pass
+    allowed = set(networks) | set(CSV_NETWORKS)
+    words = [w for w in re.split(r"[\s,;|/+]+", fold(raw)) if w]
+    if words and all(w in allowed for w in words):
+        return None, frozenset(words)
+    row.add(
+        "error",
+        f"Valor no válido en «autopublicar»: «{raw}». Escribe «si», «no» o las redes que se publican solas "
+        "(por ejemplo «facebook, instagram»).",
+    )
+    return None, None
+
+
 def _tiktok_privacy(row: ImportRow, account: Account) -> str | None:
     raw = row.values.get("privacidad_tiktok", "")
     word = fold(raw)
@@ -513,9 +549,12 @@ def _parse_row(
 
     # --- networks
     first_comment = v.get("primer_comentario", "")
-    auto = _bool_cell(row, "autopublicar")
-    targets: list[Any] = []
+    # A file with the YouTube column (our export, the current template) keeps both comments apart.
+    yt_column = YT_FIRST_COMMENT_COLUMN in v
+    yt_first_comment = v.get(YT_FIRST_COMMENT_COLUMN, "") if yt_column else first_comment
     networks = CSV_NETWORKS + ((DEMO_COLUMN,) if demo and DEMO_COLUMN in accounts else ())
+    auto_all, auto_networks = _auto_cell(row, networks)
+    targets: list[Any] = []
     for net in networks:
         wanted = _bool_cell(row, net)
         if not wanted:
@@ -549,7 +588,10 @@ def _parse_row(
             fmt = DEFAULT_FORMATS[net]
         row.formats[net] = fmt
         options: dict[str, Any] = {}
-        auto_publish = True if auto is None else auto
+        if auto_networks is not None:
+            auto_publish = net in auto_networks
+        else:
+            auto_publish = True if auto_all is None else auto_all
         if net == "instagram" and first_comment:
             if fmt in ("post", "reel"):
                 options["first_comment"] = first_comment
@@ -567,15 +609,27 @@ def _parse_row(
                 options["title"] = title
             options["privacy_status"] = _youtube_privacy(row)
             options["made_for_kids"] = _bool_cell(row, "ninos_youtube")
-            if first_comment:
-                options["first_comment"] = first_comment
-            if auto is None:
+            if yt_first_comment:
+                if options["made_for_kids"] and not yt_column:
+                    row.add(
+                        "warning",
+                        "Los vídeos para niños no admiten comentarios: el primer comentario no se usa en "
+                        "YouTube.",
+                        net,
+                    )
+                else:
+                    options["first_comment"] = yt_first_comment
+            if auto_all is None and auto_networks is None:
                 auto_publish = postsvc.default_auto_publish(account)
         targets.append(
             postsvc.TargetInput(account_id=account.id, format=fmt, options=options, auto_publish=auto_publish)
         )
-    if first_comment and not any(n in ("instagram", "youtube") for n in row.networks):
-        row.add("warning", "El primer comentario solo se usa en Instagram y YouTube: se ignora.")
+    comment_networks = ("instagram",) if yt_column else ("instagram", "youtube")
+    if first_comment and not any(n in comment_networks for n in row.networks):
+        where = "Instagram" if yt_column else "Instagram y YouTube"
+        row.add("warning", f"El primer comentario solo se usa en {where}: se ignora.")
+    if yt_column and yt_first_comment and "youtube" not in row.networks:
+        row.add("warning", "Hay primer comentario de YouTube pero no se publica en YouTube: se ignora.")
 
     row.data = postsvc.PostInput(
         brand_id=brand.id,
@@ -593,6 +647,8 @@ def _validate_row(db: Session, row: ImportRow, accounts: Mapping[str, Account], 
     if row.data is None:
         return
     by_id = {a.id: str(a.network) for a in accounts.values()}
+    # TikTok music consent not asked yet (preview): the confirmation footer asks for it on import.
+    consent_pending = {t.account_id for t in row.data.targets if "consent" not in (t.options or {})}
     try:
         result = postsvc.validate_post(db, row.data, clock=clock, action="schedule")
     except Exception:  # pragma: no cover - a validation bug must not break the preview
@@ -603,6 +659,8 @@ def _validate_row(db: Session, row: ImportRow, accounts: Mapping[str, Account], 
         network = by_id.get(account_id)
         for issue in issues:
             if account_id == postsvc.GENERAL and issue.code == "date_required" and row.date_problem:
+                continue
+            if issue.code == "tiktok_consent" and account_id in consent_pending:
                 continue
             row.add(issue.level, issue.message, network)
     row.issues.sort(key=lambda i: 0 if i.level == "error" else 1)
@@ -629,6 +687,10 @@ def read_table(text: str) -> tuple[list[str], list[tuple[int, dict[str, str]]], 
     return header or [], rows, delimiter
 
 
+def _is_blank_record(values: Mapping[str, str]) -> bool:
+    return not any(values.get(c, "") for c in TEMPLATE_COLUMNS)
+
+
 def build_preview(
     db: Session,
     brand: Brand,
@@ -652,7 +714,7 @@ def build_preview(
         preview.file_errors.append(f"No se ha podido leer el CSV: {exc}.")
         return preview
     demo = config.is_demo_mode(db)
-    known = set(TEMPLATE_COLUMNS) | set(EXPORT_EXTRA_COLUMNS) | ({DEMO_COLUMN} if demo else set())
+    known = set(EXPORT_COLUMNS) | ({DEMO_COLUMN} if demo else set())
     if not header or not (set(header) & set(TEMPLATE_COLUMNS)):
         preview.file_errors.append(
             "No se reconocen las columnas. Usa la plantilla: la primera fila debe tener los nombres de las "
@@ -667,15 +729,20 @@ def build_preview(
     unknown = [c for c in header if c and c not in known]
     if unknown:
         preview.notices.append("Se ignoran las columnas: " + ", ".join(unknown) + ".")
-    if len(records) > MAX_ROWS:
-        preview.file_errors.append(f"Demasiadas filas ({len(records)}). El máximo es {MAX_ROWS} por archivo.")
+    # Excel keeps ";;;;" lines for rows that once held content or formatting: drop the trailing ones and never
+    # count blank rows toward the limit.
+    while records and _is_blank_record(records[-1][1]):
+        records.pop()
+    data_count = sum(1 for _, values in records if not _is_blank_record(values))
+    if data_count > MAX_ROWS:
+        preview.file_errors.append(f"Demasiadas filas ({data_count}). El máximo es {MAX_ROWS} por archivo.")
         return preview
 
     accounts = _brand_accounts(db, brand.id)
     library = _library(db, brand.id)
     for line, values in records:
         row = ImportRow(line=line, values=values)
-        if not any(values.get(c, "") for c in TEMPLATE_COLUMNS):
+        if _is_blank_record(values):
             row.empty = True
             preview.rows.append(row)
             continue
@@ -755,7 +822,7 @@ def _write_csv(header: Iterable[str], rows: Iterable[Iterable[str]]) -> bytes:
     writer = csv.writer(buf, delimiter=TEMPLATE_DELIMITER, lineterminator="\r\n", quoting=csv.QUOTE_MINIMAL)
     writer.writerow(list(header))
     for row in rows:
-        writer.writerow([_protect_cell(str(v)) for v in row])
+        writer.writerow([protect_cell(str(v)) for v in row])
     return ("﻿" + buf.getvalue()).encode("utf-8")
 
 
@@ -807,6 +874,36 @@ def _yes(value: bool) -> str:
     return "si" if value else "no"
 
 
+def _import_default_auto(target: PostTarget) -> bool:
+    """What an empty «autopublicar» gives this target on import."""
+    if str(target.network) != "youtube":
+        return True
+    from planificador import postsvc
+
+    account = target.account
+    return postsvc.default_auto_publish(account) if account is not None else False
+
+
+def _auto_export(targets: list[PostTarget]) -> str:
+    """«si»/«no» when every network agrees; empty when each one is on its import default (YouTube is
+    assisted until unlocked); otherwise the networks that publish automatically («facebook, instagram»)."""
+    if not targets:
+        return ""
+    autos = [bool(t.auto_publish) for t in targets]
+    if all(autos):
+        return "si"
+    if not any(autos):
+        return "no"
+    if all(bool(t.auto_publish) == _import_default_auto(t) for t in targets):
+        return ""
+    return ", ".join(sorted({str(t.network) for t in targets if t.auto_publish}, key=_network_order))
+
+
+def _network_order(net: str) -> tuple[int, str]:
+    order = (*CSV_NETWORKS, DEMO_COLUMN)
+    return (order.index(net) if net in order else len(order), net)
+
+
 def post_row(post: Post, tz: str | None) -> list[str]:
     """One export row (template columns + estado, enlaces, id)."""
     local = to_brand_local(post.scheduled_at, tz) if post.scheduled_at else None
@@ -817,7 +914,7 @@ def post_row(post: Post, tz: str | None) -> list[str]:
         "hora": local.strftime("%H:%M") if local else "",
         "texto": post.text or "",
         "medios": MEDIA_SEPARATOR.join(m.original_name for m in post.media if m is not None),
-        "autopublicar": _yes(all(t.auto_publish for t in targets)) if targets else "",
+        "autopublicar": _auto_export(targets),
     }
     for net in CSV_NETWORKS:
         target = by_net.get(net)
@@ -829,11 +926,12 @@ def post_row(post: Post, tz: str | None) -> list[str]:
         level = (tt.options or {}).get("privacy_level")
         values["privacidad_tiktok"] = TIKTOK_PRIVACY_EXPORT.get(str(level), "") if level else ""
     ig, yt = by_net.get("instagram"), by_net.get("youtube")
-    first = ((ig.options or {}).get("first_comment") if ig else None) or (
-        (yt.options or {}).get("first_comment") if yt else None
-    )
-    values["primer_comentario"] = str(first or "")
+    ig_first = str((ig.options or {}).get("first_comment") or "") if ig else ""
+    yt_first = str((yt.options or {}).get("first_comment") or "") if yt else ""
+    # Each network keeps its own first comment on re-import (YouTube has its own column).
+    values["primer_comentario"] = ig_first if ig is not None else yt_first
     if yt is not None:
+        values[YT_FIRST_COMMENT_COLUMN] = yt_first
         opts = yt.options or {}
         values["titulo_youtube"] = str(opts.get("title") or "")
         privacy = rules.YT_PRIVACY_ALIASES.get(str(opts.get("privacy_status") or "").lower(), "")
@@ -844,7 +942,7 @@ def post_row(post: Post, tz: str | None) -> list[str]:
     values["estado"] = TARGET_STATUS_LABELS.get(status, str(status))
     values["enlaces"] = " | ".join(t.external_url for t in targets if t.external_url)
     values["id"] = str(post.id)
-    return [values.get(c, "") for c in TEMPLATE_COLUMNS + EXPORT_EXTRA_COLUMNS]
+    return [values.get(c, "") for c in EXPORT_COLUMNS]
 
 
 def export_posts(db: Session, brand: Brand, start: date, end: date) -> list[Post]:
@@ -868,7 +966,7 @@ def export_posts(db: Session, brand: Brand, start: date, end: date) -> list[Post
 
 def export_csv(db: Session, brand: Brand, start: date, end: date) -> bytes:
     rows = [post_row(p, brand.timezone) for p in export_posts(db, brand, start, end)]
-    return _write_csv(TEMPLATE_COLUMNS + EXPORT_EXTRA_COLUMNS, rows)
+    return _write_csv(EXPORT_COLUMNS, rows)
 
 
 def export_filename(brand: Brand, start: date, end: date) -> str:
@@ -878,6 +976,7 @@ def export_filename(brand: Brand, start: date, end: date) -> str:
 
 __all__ = [
     "COLUMN_HELP",
+    "EXPORT_COLUMNS",
     "EXPORT_EXTRA_COLUMNS",
     "TEMPLATE_COLUMNS",
     "TEMPLATE_FILENAME",

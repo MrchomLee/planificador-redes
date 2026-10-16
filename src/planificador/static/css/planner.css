@@ -111,6 +111,10 @@
 
 .bulk-btn:disabled { opacity: 1; --btn-bg: var(--surface-3); --btn-fg: var(--text-subtle); border-color: transparent; box-shadow: none; }
 .bulk-btn .count-pill { background: var(--primary); color: var(--primary-contrast); }
+.bulk-shift { width: 300px; max-width: calc(100vw - 32px); padding: 0 4px 4px; }
+.bulk-shift__grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-3); padding: 4px 6px 0; }
+.bulk-shift .form-field__help { padding: 0 6px; white-space: normal; }
+.bulk-shift__actions { display: flex; justify-content: space-between; gap: var(--sp-2); padding: 10px 6px 2px; }
 
 /* Filter popover */
 .pfilter { width: 440px; max-width: calc(100vw - 32px); padding: 8px 0 0; }

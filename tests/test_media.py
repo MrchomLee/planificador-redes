@@ -514,13 +514,13 @@ def test_delete_is_blocked_while_pending_targets_use_it(
 ) -> None:
     asset = ingest_bytes(db, make_image("PNG", (12, 12)), "usada.png", brand.id)
     post, target = _post_with(db, brand, demo_account, asset, TargetStatus.SCHEDULED)
-    assert media.pending_usage(db, asset.id) == [target.id]
+    assert media.pending_usage(db, asset.id) == media.MediaUsage(posts=(post.id,))
     with pytest.raises(MediaInUseError) as exc:
         media.delete_asset(db, asset.id, clock)
     assert exc.value.status == 409 and "1 publicación pendiente" in exc.value.message
     target.status = TargetStatus.PUBLISHED
     db.commit()
-    assert media.pending_usage(db, asset.id) == []
+    assert not media.pending_usage(db, asset.id)
     assert media.usage_counts(db, [asset.id]) == {asset.id: 1}
     deleted = media.delete_asset(db, asset.id, clock)
     assert deleted.deleted_at == clock.now()
@@ -537,8 +537,8 @@ def test_usage_via_override_thumbnail_and_trash(
     other = ingest_bytes(db, make_image("PNG", (14, 14)), "base.png", brand.id)
     # Base media replaced by an override: only the override counts.
     _post_with(db, brand, demo_account, other, TargetStatus.DRAFT, override=[asset.id])
-    assert len(media.pending_usage(db, asset.id)) == 1
-    assert media.pending_usage(db, other.id) == []
+    assert media.pending_usage(db, asset.id).total == 1
+    assert not media.pending_usage(db, other.id)
     yt = Account(
         brand_id=brand.id,
         network=Network.YOUTUBE,
@@ -557,10 +557,11 @@ def test_usage_via_override_thumbnail_and_trash(
         base=False,
         options={"thumbnail_media_id": str(other.id)},
     )
-    assert len(media.pending_usage(db, other.id)) == 1
+    assert media.pending_usage(db, other.id).posts == (thumb_post.id,)
     thumb_post.deleted_at = thumb_post.created_at + timedelta(minutes=1)  # moved to the trash
     db.commit()
-    assert media.pending_usage(db, other.id) == []
+    # Still needed: restoring the post brings it back (see test_review_media for the real trash flow).
+    assert media.pending_usage(db, other.id) == media.MediaUsage(trashed=(thumb_post.id,))
 
 
 def test_usage_counts_include_ideas_without_targets(app, db: Session, brand: Brand) -> None:

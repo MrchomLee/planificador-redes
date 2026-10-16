@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import logging.handlers
+import mimetypes
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,7 +20,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from planificador import __version__, config, crypto
 from planificador.config import AppSettings
-from planificador.db import Database, set_current_database
+from planificador.db import Database, has_encrypted_values, set_current_database
 from planificador.paths import STATIC_DIR, DataPaths
 from planificador.security import (
     SESSION_COOKIE,
@@ -70,6 +71,11 @@ class RedactingFilter(logging.Filter):
         return True
 
 
+class _NotAccessLog(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not record.name.startswith("uvicorn.access")
+
+
 def setup_logging(paths: DataPaths, *, console: bool = False, level: int = logging.INFO) -> None:
     """Rotating ``<data>/logs/app.log`` (+ optional console). Idempotent: replaces our previous handlers."""
     paths.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -93,6 +99,9 @@ def setup_logging(paths: DataPaths, *, console: bool = False, level: int = loggi
         stream = logging.StreamHandler()
         stream.setFormatter(formatter)
         stream.addFilter(redactor)
+        # One line per HTTP request (htmx polling included) only goes to app.log: every console write can
+        # block while the user selects text in the window, so keep the console for meaningful events.
+        stream.addFilter(_NotAccessLog())
         stream._planificador = True  # type: ignore[attr-defined]
         root.addHandler(stream)
 
@@ -146,6 +155,34 @@ async def _unhandled_exception(request: Request, exc: Exception) -> Response:
             "Se ha producido un error inesperado. Los detalles están en el registro (logs/app.log).",
         )
     return PlainTextResponse("Error interno. Revisa logs/app.log.", status_code=500)
+
+
+# ------------------------------------------------------------------------------------- static files
+
+#: Content types for our static assets. On Windows ``mimetypes.init()`` reads ``HKCR\\<ext>\\Content Type``
+#: from the registry, and many PCs have ``.js = text/plain`` (written by editors / Visual Studio). With our
+#: global ``X-Content-Type-Options: nosniff`` the browser then refuses to run every script.
+STATIC_MIME_TYPES: dict[str, str] = {
+    ".js": "text/javascript",
+    ".mjs": "text/javascript",
+    ".css": "text/css",
+    ".svg": "image/svg+xml",
+    ".json": "application/json",
+    ".map": "application/json",
+    ".html": "text/html",
+    ".woff2": "font/woff2",
+    ".woff": "font/woff",
+    ".png": "image/png",
+    ".webp": "image/webp",
+    ".ico": "image/vnd.microsoft.icon",
+}
+
+
+def register_static_mime_types() -> None:
+    """Force the right types after the (registry-reading) init, so local registry values cannot win."""
+    mimetypes.init()
+    for ext, mime in STATIC_MIME_TYPES.items():
+        mimetypes.add_type(mime, ext)
 
 
 # ----------------------------------------------------------------------------------------- lifespan
@@ -222,7 +259,9 @@ def create_app(
 
     paths = settings.paths.ensure()
     setup_logging(paths, console=settings.log_to_console if log_to_console is None else log_to_console)
-    crypto.init(paths.secret_key_file)
+    # Tell the key loader whether secrets are already stored, so a failing keyring never silently mints a new
+    # master key that would make them unreadable (raises crypto.MasterKeyUnavailable instead).
+    crypto.init(paths.secret_key_file, has_encrypted_data=lambda: has_encrypted_values(paths.db_path))
 
     database = Database(paths.db_path)
     database.init()
@@ -261,6 +300,7 @@ def create_app(
     app.add_exception_handler(StarletteHTTPException, _http_exception)
     app.add_exception_handler(Exception, _unhandled_exception)
 
+    register_static_mime_types()
     app.mount("/static", StaticFiles(directory=STATIC_DIR, check_dir=False), name="static")
 
     @app.get("/healthz", include_in_schema=False)

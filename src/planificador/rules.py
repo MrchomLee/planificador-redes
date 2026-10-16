@@ -731,9 +731,21 @@ def youtube_tags_length(tags: list[str]) -> int:
 # ===================================================================================== media checks
 
 
+def _too_many_message(network: str, fmt: str, rule: FormatRule, count: int, what: str) -> str:
+    """``media_too_many`` text: singular when only one file fits ("solo admite un archivo")."""
+    if rule.max_items == 1:
+        one = "una foto" if what == "fotos" else "un archivo"
+        if fmt == "video":
+            return f"{network_label(network)} solo admite {one} por publicación (hay {count})."
+        return f"{_subject(network, fmt)} solo admite {one} (hay {count})."
+    return f"{_subject(network, fmt)} admite como máximo {rule.max_items} {what} (hay {count})."
+
+
 def _check_shape(network: str, fmt: str, rule: FormatRule, media: list[MediaInfo]) -> list[Issue]:
     issues: list[Issue] = []
     subject = _subject(network, fmt)
+    # "El vídeo de TikTok necesita un vídeo" reads circular: plain video formats name the network instead.
+    plain_video = fmt == "video"
     images = [m for m in media if _kind(m) == "image"]
     videos = [m for m in media if _kind(m) == "video"]
     if len(images) + len(videos) != len(media):
@@ -745,7 +757,12 @@ def _check_shape(network: str, fmt: str, rule: FormatRule, media: list[MediaInfo
                 "image_or_video": "una foto o un vídeo",
                 "images": "al menos una foto",
             }.get(rule.media, "al menos una foto o un vídeo")
-            issues.append(Issue("error", "media_required", f"{subject} necesita {need}.", "media"))
+            message = (
+                f"Añade {need} para publicar en {network_label(network)}."
+                if plain_video
+                else f"{subject} necesita {need}."
+            )
+            issues.append(Issue("error", "media_required", message, "media"))
         return issues
     if images and rule.image is None:
         issues.append(
@@ -770,7 +787,12 @@ def _check_shape(network: str, fmt: str, rule: FormatRule, media: list[MediaInfo
             Issue("error", "media_one_item", f"{subject} lleva una sola foto o un solo vídeo.", "media")
         )
     elif rule.media == "video" and len(videos) > 1:
-        issues.append(Issue("error", "media_one_video", f"{subject} lleva un solo vídeo.", "media"))
+        message = (
+            f"{network_label(network)} solo admite un vídeo por publicación."
+            if plain_video
+            else f"{subject} lleva un solo vídeo."
+        )
+        issues.append(Issue("error", "media_one_video", message, "media"))
     elif rule.media == "images_or_video":
         if images and videos and not rule.mix:
             issues.append(
@@ -785,23 +807,11 @@ def _check_shape(network: str, fmt: str, rule: FormatRule, media: list[MediaInfo
             issues.append(Issue("error", "media_one_video", f"{subject} admite un solo vídeo.", "media"))
         if len(media) > rule.max_items:
             what = "archivos" if rule.mix else "fotos"
-            issues.append(
-                Issue(
-                    "error",
-                    "media_too_many",
-                    f"{subject} admite como máximo {rule.max_items} {what} (hay {len(media)}).",
-                    "media",
-                )
-            )
+            message = _too_many_message(network, fmt, rule, len(media), what)
+            issues.append(Issue("error", "media_too_many", message, "media"))
     elif len(media) > rule.max_items:
-        issues.append(
-            Issue(
-                "error",
-                "media_too_many",
-                f"{subject} admite como máximo {rule.max_items} archivos (hay {len(media)}).",
-                "media",
-            )
-        )
+        message = _too_many_message(network, fmt, rule, len(media), "archivos")
+        issues.append(Issue("error", "media_too_many", message, "media"))
     return issues
 
 
@@ -1457,8 +1467,9 @@ def _tiktok_checks(fmt: str, target: TargetSpec, context: RuleContext) -> list[I
                 "brand_content_toggle",
             )
         )
-    consent = opts.get("consent")
-    if consent is not None and not _as_bool(consent, False):
+    # Direct Post needs the Music Usage Confirmation of THIS post (03 §4.2, SPEC §7): a missing value
+    # (a copy, an import, an old row) is not a consent. The CSV preview asks for it in its own footer.
+    if not _as_bool(opts.get("consent"), False):
         issues.append(
             Issue(
                 "error",

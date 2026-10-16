@@ -449,9 +449,22 @@ def test_delete_post_best_effort(fake: FakeMeta, http):
     account = AccountCreds(7, "facebook", PAGE, "P", "page", "PT", None, None, None, {})
     fake.on("DELETE", f"{PAGE}_1", {"success": True})
     fake.on("DELETE", f"{PAGE}_2", error(100, 33))
+    fake.on("DELETE", f"{PAGE}_3", error(1, message="temporary"))
+    fake.on("GET", PAGE, error(10))  # the Page itself is not readable: 100/33 may mean lost access
     provider = FacebookProvider()
     assert provider.delete_post(account, SETTINGS, http, f"{PAGE}_1") is True
     assert provider.delete_post(account, SETTINGS, http, f"{PAGE}_2") is False
+    assert provider.delete_post(account, SETTINGS, http, f"{PAGE}_3") is False
+
+
+def test_delete_post_already_deleted_by_the_user_counts_as_withdrawn(fake: FakeMeta, http):
+    """The user deleted the scheduled post on Facebook first: DELETE answers 100/33 while the Page is still
+    readable with the same token, so the post is gone and a cancel in the app can go ahead."""
+    account = AccountCreds(7, "facebook", PAGE, "P", "page", "PT", None, None, None, {})
+    fake.on("DELETE", f"{PAGE}_2", error(100, 33))
+    fake.on("GET", PAGE, {"id": PAGE})
+    assert FacebookProvider().delete_post(account, SETTINGS, http, f"{PAGE}_2") is True
+    assert fake.find("GET", PAGE)
 
 
 # --------------------------------------------------------------------------------------------- video
@@ -931,6 +944,31 @@ def test_account_snapshot_with_metric_fallback(fake: FakeMeta, http):
     assert snap.metrics == {"followers": 2500, "views": 1500, "reach": 900}
 
 
+def test_account_snapshot_picks_the_requested_day_from_the_series(fake: FakeMeta, http):
+    """The two-UTC-day window returns the previous Pacific day too: only the value closing ``day`` is kept,
+    and a series without it stores no flow metric rather than a neighbouring day's number."""
+    day = date(2026, 11, 2)
+    seen: list[dict] = []
+
+    previous = {"value": 111, "end_time": "2026-11-02T08:00:00+0000"}
+    series = {
+        "page_media_view": [previous, {"value": 222, "end_time": "2026-11-03T08:00:00+0000"}],
+        "page_total_media_view_unique": [previous],  # Meta has not closed ``day`` for this one yet
+        "page_post_engagements": [{"value": 9, "end_time": "2026-11-03T08:00:00+0000"}],
+    }
+
+    def insights(request, form):
+        seen.append(form)
+        names = form["metric"].split(",")
+        return {"data": [{"name": m, "period": "day", "values": series[m]} for m in names]}
+
+    fake.on("GET", PAGE, {"followers_count": 10})
+    fake.on("GET", f"{PAGE}/insights", insights)
+    snap = FacebookProvider().fetch_account_snapshot(_account(), SETTINGS, http, day)
+    assert int(seen[0]["until"]) - int(seen[0]["since"]) == 2 * 86400
+    assert snap.metrics == {"followers": 10, "views": 222, "interactions": 9}
+
+
 def test_account_snapshot_survives_missing_insights_permission(fake: FakeMeta, http):
     fake.on("GET", PAGE, {"fan_count": 10})
     fake.on("GET", f"{PAGE}/insights", error(200, None, "(#200) Requires read_insights"))
@@ -1232,7 +1270,150 @@ def test_cancel_native_failures_raise_permanent(fake: FakeMeta, http):
         h.provider.cancel_native(h.ctx)
     assert exc.value.code == "fb_native_no_id"
     fake.on("DELETE", f"{PAGE}_921", error(100, 33))
+    fake.on("GET", PAGE, error(10))
     h = Harness(http, state={"native_scheduled": True, "result": {"external_id": f"{PAGE}_921"}})
     with pytest.raises(ProviderError) as exc:
         h.provider.cancel_native(h.ctx)
     assert exc.value.kind == ErrorKind.PERMANENT
+
+
+# ------------------------------------------------------------------- review regressions (meta-conformance)
+
+
+def test_native_min_matches_the_rules_window(fake: FakeMeta, http):
+    from planificador import rules
+    from planificador.providers import facebook
+
+    assert facebook.NATIVE_MIN == rules.FB_NATIVE_WINDOW[0]
+    assert facebook.NATIVE_COMMIT_MIN >= timedelta(minutes=10)  # Meta's own minimum (§3.7)
+    soon = Harness(http, options={"native_schedule": True}, scheduled_at=NOW + timedelta(minutes=14))
+    result = soon.step()
+    assert result.status == "wait" and "flow" not in soon.state  # told "se publicará desde la app"
+
+
+def test_native_photos_lead_too_short_after_retry_publish_directly_at_time(fake: FakeMeta, http, tmp_path):
+    """Repro: 2 photos scheduled 16 min ahead; photo 2 times out and the engine retries 5 min later. The
+    stored scheduled_publish_time would be < 12 min ahead (Meta wants ≥ 10): native is dropped, the temporary
+    photos are restaged and the post goes out directly at its time instead of failing."""
+    when = NOW + timedelta(minutes=16)
+    calls = {"n": 0}
+
+    def photos(request, form):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            return httpx.ReadTimeout("t", request=request)
+        return {"id": f"p{calls['n']}"}
+
+    fake.on("POST", f"{PAGE}/photos", photos)
+    fake.on("DELETE", "p1", {"success": True})
+    fake.on("POST", f"{PAGE}/feed", {"id": f"{PAGE}_1"})
+    fake.on("GET", f"{PAGE}_1", {})
+    h = Harness(
+        http,
+        items=[media(tmp_path, "a.jpg"), media(tmp_path, "b.jpg", index=2)],
+        options={"native_schedule": True},
+        scheduled_at=when,
+    )
+    assert h.step().status == "continue" and h.state["native"] is True
+    with pytest.raises(ProviderError):
+        h.step()
+    h.clock.advance(seconds=5 * 60)
+    result, _ = h.run()
+    assert result.status == "published" and not h.state.get("native_scheduled")
+    assert any(e[0] == "fb_native_dropped" for e in h.events)
+    assert fake.find("DELETE", "p1")  # the temporary photo was discarded
+    uploads = fake.find("POST", f"{PAGE}/photos")
+    assert [u.get("temporary") for u in uploads] == ["true", "true", None, None]
+    feed = fake.find("POST", f"{PAGE}/feed")
+    assert len(feed) == 1 and "scheduled_publish_time" not in feed[0] and "published" not in feed[0]
+    assert h.clock.now() >= when  # never before its time
+    assert len(h.commits) == 1 and mc.parse_time(h.commits[0]["commit_at"]) >= when
+
+
+def test_native_text_lead_rechecked_at_each_commit_attempt(fake: FakeMeta, http):
+    when = NOW + timedelta(minutes=16)
+    fake.on(
+        "POST",
+        f"{PAGE}/feed",
+        lambda request, form: httpx.ConnectError("down", request=request),
+        {"id": f"{PAGE}_2"},
+    )
+    fake.on("GET", f"{PAGE}_2", {})
+    h = Harness(http, options={"native_schedule": True}, scheduled_at=when)
+    with pytest.raises(ProviderError) as exc:
+        h.step()
+    assert exc.value.kind == ErrorKind.TRANSIENT and h.state.get("commit_rejected")
+    assert fake.find("POST", f"{PAGE}/feed")[0]["scheduled_publish_time"] == str(int(when.timestamp()))
+    h.clock.advance(seconds=6 * 60)  # engine retry: the lead is now 10 min
+    held = h.step()
+    assert held.status == "wait" and held.wait_seconds == 10 * 60
+    assert len(fake.find("POST", f"{PAGE}/feed")) == 1
+    h.clock.advance(seconds=held.wait_seconds)
+    result = h.step()
+    assert result.status == "published" and "Programado" not in (result.message or "")
+    assert "scheduled_publish_time" not in fake.find("POST", f"{PAGE}/feed")[1]
+
+
+def test_native_single_photo_drops_to_direct_photo_post(fake: FakeMeta, http, tmp_path):
+    when = NOW + timedelta(minutes=11)
+    fake.on("POST", f"{PAGE}/photos", {"id": "p9", "post_id": f"{PAGE}_9"})
+    fake.on("GET", f"{PAGE}_9", {})
+    h = Harness(
+        http,
+        items=[media(tmp_path, "a.jpg")],
+        options={"native_schedule": True},
+        scheduled_at=when,
+        state={
+            "v": 1,
+            "flow": "photos",
+            "stage": "start",
+            "native": True,
+            "native_time": int(when.timestamp()),
+        },
+    )
+    result, _ = h.run()
+    assert result.status == "published" and h.state["flow"] == "photo_single"
+    upload = fake.find("POST", f"{PAGE}/photos")[0]
+    assert upload["published"] == "true" and "temporary" not in upload
+    assert h.clock.now() >= when
+
+
+def test_native_video_finish_after_slow_upload_publishes_directly(fake: FakeMeta, http, tmp_path):
+    when = NOW + timedelta(minutes=20)
+    video = media(tmp_path, "clip.mp4", "video", size=2048)
+    clock = ManualClock(NOW)
+
+    def videos(request, form):
+        phase = form.get("upload_phase")
+        if phase == "start":
+            return {"video_id": "V7", "upload_session_id": "S7", "start_offset": "0", "end_offset": "1024"}
+        if phase == "transfer":
+            clock.advance(seconds=5 * 60)  # a slow connection
+            start = int(form["start_offset"]) + 1024
+            return {"start_offset": str(start), "end_offset": str(min(start + 1024, 2048))}
+        return {"success": True}
+
+    fake.on("POST", f"{PAGE}/videos", videos)
+    fake.on("GET", "V7", {"status": {"video_status": "ready", "publishing_phase": {"status": "complete"}}})
+    h = Harness(http, items=[video], options={"native_schedule": True}, scheduled_at=when, clock=clock)
+    result, _ = h.run()
+    assert result.status == "published" and not h.state.get("native_scheduled")
+    finish = [f for f in fake.find("POST", f"{PAGE}/videos") if f.get("upload_phase") == "finish"]
+    assert len(finish) == 1 and "scheduled_publish_time" not in finish[0]
+    assert h.clock.now() >= when
+
+
+def test_native_video_with_enough_lead_stays_native(fake: FakeMeta, http, tmp_path):
+    when = NOW + timedelta(minutes=40)
+    fake.on(
+        "POST",
+        f"{PAGE}/videos",
+        {"video_id": "VN2", "upload_session_id": "S", "start_offset": "0", "end_offset": "0"},
+        {"success": True},
+    )
+    h = Harness(
+        http, items=[media(tmp_path, "c.mp4", "video")], options={"native_schedule": True}, scheduled_at=when
+    )
+    result, _ = h.run()
+    assert result.status == "published" and h.state["native_scheduled"] is True
+    assert fake.find("POST", f"{PAGE}/videos")[-1]["scheduled_publish_time"] == str(int(when.timestamp()))

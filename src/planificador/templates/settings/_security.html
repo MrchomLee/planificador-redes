@@ -26,7 +26,7 @@
         {{ ui.form_field("confirm_password", "Repite la contraseña", type="password", required=True, error=err.get("confirm_password"), id="f-pw-confirm", autocomplete="new-password") }}
       </div>
       <div class="settings-section__foot settings-section__foot--inline">
-        <p class="text-xs muted">{{ icon("info", 13) }} Se guarda con un hash (scrypt), nunca en claro. Si la olvidas, borra el ajuste «password_hash» de la base de datos.</p>
+        <p class="text-xs muted">{{ icon("info", 13) }} Se guarda con un hash (scrypt), nunca en claro. Si la olvidas, haz doble clic en «quitar-contrasena.bat» en la carpeta del Planificador (o ejecuta <code>uv run planificador --quitar-contrasena</code>).</p>
         {{ sm.save_button("Cambiar contraseña" if sec.password_set else "Activar contraseña") }}
       </div>
     </form>

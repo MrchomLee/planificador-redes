@@ -89,7 +89,8 @@
         <p class="chooser__replace">{{ icon("info", 14) }}
           <span>Esta marca ya tiene conectad{{ "as" if current.facebook and current.instagram else "a" }}
           {% if current.facebook %}la página «{{ current.facebook.name }}»{% endif %}{% if current.facebook and current.instagram %} y {% endif %}{% if current.instagram %}la cuenta {{ current.instagram.display_name }}{% endif %}.
-          Si eliges otra, se sustituirá y las publicaciones programadas saldrán en la nueva.</span></p>
+          Si eliges otra, se sustituirá: las publicaciones programadas saldrán en la nueva y se borrarán las
+          estadísticas y los comentarios guardados de la anterior.</span></p>
         {% endif %}
       </div>
       <footer class="card__footer">

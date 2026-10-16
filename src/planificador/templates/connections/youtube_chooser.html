@@ -38,6 +38,12 @@
       </label>
       {% endfor %}
     </fieldset>
+    {% if current %}
+    <p class="chooser__replace">{{ icon("info", 14) }}
+      <span>Esta marca ya tiene conectado el canal «{{ current.name }}». Si eliges otro, se sustituirá: las
+        publicaciones programadas saldrán en el nuevo y se borrarán las estadísticas y los comentarios guardados
+        del anterior.</span></p>
+    {% endif %}
     <div class="chooser__actions">
       <a class="btn btn--ghost" href="/conexiones">Cancelar</a>
       <button type="submit" class="btn btn--primary">{{ icon("plug", 16) }}<span>Conectar canal</span></button>

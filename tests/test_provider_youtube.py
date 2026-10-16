@@ -1378,6 +1378,10 @@ def test_native_schedule_returns_published_after_upload(
     account: AccountCreds,
 ) -> None:
     fake.video = video_resource(privacy="private", publishAt="2026-11-03T18:00:00Z")
+    fake.processing = [
+        video_resource(privacy="private", upload_status="uploaded", publishAt="2026-11-03T18:00:00Z"),
+        video_resource(privacy="private", upload_status="processed", publishAt="2026-11-03T18:00:00Z"),
+    ]
     rec = Recorder()
     target = make_target([write_video(tmp_path)], native_schedule=True, first_comment="¡Hola!")
     target.scheduled_at = datetime(2026, 11, 3, 18, 0, tzinfo=UTC)
@@ -1389,7 +1393,14 @@ def test_native_schedule_returns_published_after_upload(
     assert "Programado en YouTube" in (results[-1].message or "")
     assert ctx.state["native_scheduled"] is True
     assert not ctx.state.get("lock_detected")
-    assert fake.videos_calls == []  # no processing poll for natively scheduled videos
+    # Processing is polled for natively scheduled videos too (a rejected video is never "programado")…
+    assert len(fake.videos_calls) == 2
+    # …and the publishAt outcome is checked afterwards by the follow-up job.
+    assert ctx.state["followup"] == {
+        "kind": "publish_at",
+        "next_at": "2026-11-03T18:16:00+00:00",
+        "attempts": 0,
+    }
     assert "youtube_first_comment_skipped" in rec.event_names()
 
 
@@ -2170,7 +2181,7 @@ def test_fetch_comments(router: respx.MockRouter, http: httpx.Client, settings: 
         },
     )
     since = datetime(2026, 11, 2, tzinfo=UTC)
-    comments = youtube.YouTubeProvider().fetch_comments(make_account(), settings, http, since)
+    comments = youtube.YouTubeProvider().fetch_comments(make_account(), settings, http, since, deep=False)
     params = qs(threads.calls.last.request)
     assert params["allThreadsRelatedToChannelId"] == CHANNEL
     assert (
@@ -2415,7 +2426,7 @@ def test_run_lock_test_unlocked(
     _no_sleep: list[float],
 ) -> None:
     routes = _lock_routes(router, "unlisted")
-    result = youtube.lock_test(make_account(), settings, http, clk)
+    result = youtube.lock_test(make_account(), settings, http, clk, keep_for_recheck=False)
     assert result.status == "unlocked" and result.deleted and result.privacy_status == "unlisted"
     init = routes["init"][0]
     params = qs(init)
@@ -2518,7 +2529,8 @@ def test_reconcile_rejected_video_is_not_reported_as_published(
         state={"video_id": VIDEO_ID},
     )
     result = youtube.YouTubeProvider().reconcile(ctx)
-    assert result.outcome == "unknown"
+    # Rejected: nothing is live, so a retry may upload again (never "published", never stuck in "unknown").
+    assert result.outcome == "not_published"
     assert "derechos de autor" in (result.message or "")
 
 
@@ -2594,3 +2606,437 @@ def test_cancel_native_deletes_the_private_video(
     with pytest.raises(ProviderError) as exc:
         youtube.YouTubeProvider().cancel_native(ctx)
     assert exc.value.code == "youtube_native_no_id"
+
+
+# ----------------------------------------------------------------- review regressions (youtube-conformance)
+
+
+def _lock_upload_routes(router: respx.MockRouter, put: Any = None, query: Any = None) -> dict[str, Any]:
+    """Lock-test session: init → PUT (or the given side effect); status queries answered by ``query``."""
+    calls: dict[str, Any] = {"puts": [], "queries": []}
+
+    def put_side(request: httpx.Request) -> httpx.Response:
+        if request.headers["Content-Range"].startswith("bytes */"):
+            calls["queries"].append(request)
+            if callable(query):
+                return query(request)
+            return query or httpx.Response(404)
+        calls["puts"].append(request)
+        if callable(put):
+            return put(request)
+        return put or httpx.Response(
+            201,
+            json={"id": "lockvid0001", "status": {"privacyStatus": "unlisted", "uploadStatus": "uploaded"}},
+        )
+
+    router.route(method="POST", host=UPLOAD_HOST, path=UPLOAD_PATH).respond(
+        200, headers={"Location": f"https://{UPLOAD_HOST}{UPLOAD_PATH}?upload_id=LOCK"}
+    )
+    router.route(method="PUT", host=UPLOAD_HOST, path=UPLOAD_PATH).mock(side_effect=put_side)
+    calls["delete"] = router.delete(f"{API}/videos").respond(204)
+    return calls
+
+
+def _lock_item(
+    privacy: str = "unlisted", upload: str = "uploaded", proc: str = "processing", **st: Any
+) -> dict:
+    return {
+        "items": [
+            {
+                "id": "lockvid0001",
+                "status": {"privacyStatus": privacy, "uploadStatus": upload, **st},
+                "processingDetails": {"processingStatus": proc},
+            }
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    ("answer", "why"),
+    [
+        (_lock_item(), "aún no ha terminado"),  # still processing after every poll
+        (_lock_item(upload="failed", proc="failed", failureReason="codec"), "no pudo procesar"),
+        (_lock_item(upload="rejected", proc="terminated", rejectionReason="duplicate"), "no pudo procesar"),
+        ({"items": []}, "aún no ha terminado"),  # never readable: only the insert answer is known
+    ],
+)
+def test_lock_test_unproven_results_are_errors_not_unlocked(
+    router: respx.MockRouter,
+    http: httpx.Client,
+    settings: ProviderSettings,
+    clk: ManualClock,
+    answer: dict,
+    why: str,
+) -> None:
+    """Only a finished processing with an unlisted read proves "unlocked"; anything else is inconclusive."""
+    calls = _lock_upload_routes(router)
+    router.get(f"{API}/videos").respond(200, json=answer)
+    result = youtube.lock_test(make_account(), settings, http, clk)
+    assert result.status == "error" and why in result.message
+    assert youtube.run_lock_test(make_account(), settings, http, clk) == "error"
+    assert result.deleted and calls["delete"].called
+
+
+def test_lock_test_unlocked_keeps_the_clip_for_the_24h_recheck(
+    router: respx.MockRouter, http: httpx.Client, settings: ProviderSettings, clk: ManualClock
+) -> None:
+    calls = _lock_upload_routes(router)
+    router.get(f"{API}/videos").respond(200, json=_lock_item(upload="processed", proc="succeeded"))
+    result = youtube.lock_test(make_account(), settings, http, clk)
+    assert result.status == "unlocked" and result.video_id == "lockvid0001"
+    assert not result.deleted and not calls["delete"].called
+    assert result.recheck_at == clk.now() + youtube.LOCK_RECHECK_AFTER
+    assert "24 horas" in result.message
+
+
+def test_lock_test_private_read_during_processing_is_locked(
+    router: respx.MockRouter, http: httpx.Client, settings: ProviderSettings, clk: ManualClock
+) -> None:
+    _lock_upload_routes(router)
+    router.get(f"{API}/videos").mock(
+        side_effect=[
+            httpx.Response(200, json=_lock_item()),
+            httpx.Response(200, json=_lock_item(privacy="private")),
+        ]
+    )
+    result = youtube.lock_test(make_account(), settings, http, clk)
+    assert result.status == "locked" and result.deleted
+
+
+@pytest.mark.parametrize(("privacy", "status"), [("private", "locked"), ("unlisted", "unlocked")])
+def test_confirm_lock_test_rereads_then_deletes(
+    router: respx.MockRouter,
+    http: httpx.Client,
+    settings: ProviderSettings,
+    clk: ManualClock,
+    privacy: str,
+    status: str,
+) -> None:
+    router.get(f"{API}/videos").respond(200, json=_lock_item(privacy=privacy, upload="processed"))
+    delete = router.delete(f"{API}/videos").respond(204)
+    result = youtube.confirm_lock_test(make_account(), settings, http, clk, "lockvid0001")
+    assert result.status == status and result.deleted and delete.called
+
+
+def test_confirm_lock_test_finds_the_clip_by_title(
+    router: respx.MockRouter, http: httpx.Client, settings: ProviderSettings, clk: ManualClock
+) -> None:
+    router.get(f"{API}/playlistItems").respond(
+        200, json={"items": [{"contentDetails": {"videoId": "lockvid0001"}}]}
+    )
+    router.get(f"{API}/videos").respond(
+        200,
+        json={
+            "items": [
+                {
+                    "id": "lockvid0001",
+                    "snippet": {"title": youtube.LOCK_TEST_TITLE, "publishedAt": "2026-11-02T09:00:00Z"},
+                    "status": {"privacyStatus": "private"},
+                }
+            ]
+        },
+    )
+    router.delete(f"{API}/videos").respond(204)
+    result = youtube.confirm_lock_test(
+        make_account(), settings, http, clk, None, since=datetime(2026, 11, 2, 8, 0, tzinfo=UTC)
+    )
+    assert result.status == "locked" and result.video_id == "lockvid0001"
+
+
+def test_lock_test_lost_upload_answer_recovers_the_id_and_deletes(
+    router: respx.MockRouter, http: httpx.Client, settings: ProviderSettings, clk: ManualClock
+) -> None:
+    """The single PUT is the commit: when its answer is lost the session tells the id, so the clip left on
+    the channel is deleted."""
+
+    def lost(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("lost", request=request)
+
+    calls = _lock_upload_routes(
+        router,
+        put=lost,
+        query=httpx.Response(201, json={"id": "lockvid0001", "status": {"privacyStatus": "unlisted"}}),
+    )
+    router.get(f"{API}/videos").respond(200, json=_lock_item(upload="processed", proc="succeeded"))
+    result = youtube.lock_test(make_account(), settings, http, clk)
+    assert calls["queries"] and result.video_id == "lockvid0001"
+    assert result.status == "unlocked"  # the id was recovered: the test could go on
+
+
+def test_lock_test_lost_answer_unrecoverable_tells_to_delete_the_clip(
+    router: respx.MockRouter, http: httpx.Client, settings: ProviderSettings, clk: ManualClock
+) -> None:
+    def lost(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("lost", request=request)
+
+    calls = _lock_upload_routes(router, put=lost, query=lost)
+    result = youtube.lock_test(make_account(), settings, http, clk)
+    assert result.status == "error" and result.video_id is None and not result.deleted
+    assert calls["queries"] and "bórralo en YouTube Studio" in result.message
+    assert youtube.LOCK_TEST_TITLE in result.message
+
+
+def test_lock_test_answer_without_id_asks_the_session(
+    router: respx.MockRouter, http: httpx.Client, settings: ProviderSettings, clk: ManualClock
+) -> None:
+    calls = _lock_upload_routes(
+        router,
+        put=httpx.Response(201, json={}),
+        query=httpx.Response(201, json={"id": "lockvid0001", "status": {"privacyStatus": "unlisted"}}),
+    )
+    router.get(f"{API}/videos").respond(200, json=_lock_item(upload="failed", proc="failed"))
+    result = youtube.lock_test(make_account(), settings, http, clk)
+    assert result.status == "error" and result.video_id == "lockvid0001"
+    assert result.deleted and calls["delete"].called
+
+
+def test_reconcile_with_video_id_retries_later_on_network_errors(
+    tmp_path: Path, router: respx.MockRouter, http: httpx.Client, settings: ProviderSettings, clk: ManualClock
+) -> None:
+    """The id came from YouTube: a failed lookup is TRANSIENT (engine re-checks later), never "unknown"."""
+    router.get(f"{API}/videos").mock(side_effect=httpx.ConnectError("no wifi"))
+    state = {"phase": "processing", "video_id": VIDEO_ID, "final_chunk_at": clk.now().isoformat()}
+    ctx = make_ctx(
+        make_account(), make_target([write_video(tmp_path)]), settings, http, clk, Recorder(), state
+    )
+    with pytest.raises(ProviderError) as exc:
+        youtube.YouTubeProvider().reconcile(ctx)
+    assert exc.value.kind == ErrorKind.TRANSIENT
+
+
+def test_reconcile_empty_list_right_after_upload_is_transient_then_unknown(
+    tmp_path: Path, router: respx.MockRouter, http: httpx.Client, settings: ProviderSettings, clk: ManualClock
+) -> None:
+    router.get(f"{API}/videos").respond(200, json={"items": []})
+    state = {"phase": "processing", "video_id": VIDEO_ID, "final_chunk_at": clk.now().isoformat()}
+    account = make_account(token_expires_at=NOW + timedelta(days=1))
+    ctx = make_ctx(account, make_target([write_video(tmp_path)]), settings, http, clk, Recorder(), state)
+    with pytest.raises(ProviderError) as exc:
+        youtube.YouTubeProvider().reconcile(ctx)
+    assert exc.value.kind == ErrorKind.TRANSIENT and exc.value.code == "youtube_video_not_listed_yet"
+    clk.advance(hours=2)
+    assert youtube.YouTubeProvider().reconcile(ctx).outcome == "unknown"
+
+
+def test_retry_after_processing_failure_uploads_again(
+    tmp_path: Path, fake: FakeYouTube, http: httpx.Client, settings: ProviderSettings, clk: ManualClock
+) -> None:
+    """Reintentar after a failed transcode: reconcile says not_published, the next step re-uploads."""
+    fake.processing = [video_resource(upload_status="failed", failureReason="codec")]
+    rec = Recorder()
+    state = {"phase": "failed", "video_id": VIDEO_ID, "requested_privacy": "public"}
+    ctx = make_ctx(make_account(), make_target([write_video(tmp_path)]), settings, http, clk, rec, state)
+    provider = youtube.YouTubeProvider()
+    assert provider.reconcile(ctx).outcome == "not_published"
+    provider.publish_step(ctx)
+    assert "youtube_retry_new_upload" in rec.event_names() and len(fake.init_requests) == 1
+
+
+def test_native_upload_rejected_while_processing_is_an_error(
+    tmp_path: Path, fake: FakeYouTube, http: httpx.Client, settings: ProviderSettings, clk: ManualClock
+) -> None:
+    fake.video = video_resource(privacy="private", publishAt="2026-11-04T18:00:00Z")
+    fake.processing = [
+        video_resource(privacy="private", upload_status="rejected", rejectionReason="duplicate")
+    ]
+    target = make_target([write_video(tmp_path)], native_schedule=True)
+    target.scheduled_at = datetime(2026, 11, 4, 18, 0, tzinfo=UTC)
+    ctx = make_ctx(make_account(), target, settings, http, clk, Recorder())
+    with pytest.raises(ProviderError) as exc:
+        run(youtube.YouTubeProvider(), ctx, clk)
+    assert exc.value.kind == ErrorKind.PERMANENT and ctx.state["phase"] == "failed"
+    assert "followup" not in ctx.state
+
+
+def _native_done_state() -> dict:
+    return {
+        "phase": "done",
+        "video_id": VIDEO_ID,
+        "requested_privacy": "public",
+        "native_scheduled": True,
+        "publish_at": "2026-11-03T08:00:00Z",
+        "followup": {"kind": "publish_at", "next_at": "2026-11-03T08:16:00+00:00", "attempts": 0},
+    }
+
+
+def test_follow_up_after_publish_at_public_is_done(
+    tmp_path: Path, fake: FakeYouTube, http: httpx.Client, settings: ProviderSettings, clk: ManualClock
+) -> None:
+    fake.processing = [video_resource(privacy="public", upload_status="processed")]
+    ctx = make_ctx(
+        make_account(),
+        make_target([write_video(tmp_path)]),
+        settings,
+        http,
+        clk,
+        Recorder(),
+        _native_done_state(),
+    )
+    result = youtube.YouTubeProvider().follow_up(ctx)
+    assert result is not None and result.next_at is None and result.failed is None
+    assert "publicado" in (result.message or "")
+
+
+def test_follow_up_still_private_after_publish_at_is_the_lock(
+    tmp_path: Path, fake: FakeYouTube, http: httpx.Client, settings: ProviderSettings, clk: ManualClock
+) -> None:
+    fake.processing = [
+        video_resource(privacy="private", upload_status="processed", publishAt="2026-11-03T08:00:00Z")
+    ]
+    rec = Recorder()
+    ctx = make_ctx(
+        make_account(), make_target([write_video(tmp_path)]), settings, http, clk, rec, _native_done_state()
+    )
+    result = youtube.YouTubeProvider().follow_up(ctx)
+    assert result is not None and result.next_at is None and result.level == "error"
+    assert result.notify == youtube.MSG_LOCKED
+    assert ctx.state[youtube.STATE_ACCOUNT_META][youtube.META_LOCK_STATUS] == "locked"
+    assert "youtube_lock_detected" in rec.event_names()
+
+
+def test_follow_up_rejected_after_upload_fails_the_target(
+    tmp_path: Path, fake: FakeYouTube, http: httpx.Client, settings: ProviderSettings, clk: ManualClock
+) -> None:
+    fake.processing = [
+        video_resource(privacy="private", upload_status="rejected", rejectionReason="copyright")
+    ]
+    ctx = make_ctx(
+        make_account(),
+        make_target([write_video(tmp_path)]),
+        settings,
+        http,
+        clk,
+        Recorder(),
+        _native_done_state(),
+    )
+    result = youtube.YouTubeProvider().follow_up(ctx)
+    assert result is not None and result.failed is not None
+    assert result.failed.kind == ErrorKind.PERMANENT and ctx.state["phase"] == "failed"
+
+
+def test_follow_up_network_error_tries_again_later(
+    tmp_path: Path, router: respx.MockRouter, http: httpx.Client, settings: ProviderSettings, clk: ManualClock
+) -> None:
+    router.get(f"{API}/videos").mock(side_effect=httpx.ConnectError("down"))
+    ctx = make_ctx(
+        make_account(),
+        make_target([write_video(tmp_path)]),
+        settings,
+        http,
+        clk,
+        Recorder(),
+        _native_done_state(),
+    )
+    result = youtube.YouTubeProvider().follow_up(ctx)
+    assert result is not None and result.next_at == clk.now() + youtube.FOLLOWUP_RETRY
+    assert ctx.state["followup"]["attempts"] == 1
+
+
+def _threads_page(thread_id: str, when: str, token: str | None) -> httpx.Response:
+    body: dict[str, Any] = {
+        "items": [
+            {
+                "id": thread_id,
+                "snippet": {
+                    "videoId": VIDEO_ID,
+                    "totalReplyCount": 1,
+                    "topLevelComment": _comment(thread_id, "ana", "Hola", when),
+                },
+                "replies": {
+                    "comments": [
+                        _comment(
+                            f"{thread_id}.r1",
+                            "eva",
+                            "Respuesta nueva",
+                            "2026-11-03T08:00:00Z",
+                            parentId=thread_id,
+                        )
+                    ]
+                },
+            }
+        ]
+    }
+    if token:
+        body["nextPageToken"] = token
+    return httpx.Response(200, json=body)
+
+
+def test_fetch_comments_deep_sweep_finds_new_replies_on_old_threads(
+    router: respx.MockRouter, http: httpx.Client, settings: ProviderSettings
+) -> None:
+    """order=time sorts by the top-level comment: a new reply on an old thread sits behind newer threads.
+    The first poll of a channel (and then weekly) reads on without the early stop."""
+    youtube.reset_deep_sweeps()
+    pages = [
+        _threads_page("Old1", "2026-09-01T08:00:00Z", "P2"),
+        _threads_page("Old2", "2026-08-01T08:00:00Z", None),
+    ]
+    threads = router.get(f"{API}/commentThreads").mock(side_effect=list(pages))
+    since = datetime(2026, 11, 2, tzinfo=UTC)
+    provider = youtube.YouTubeProvider()
+    found = {c.external_id for c in provider.fetch_comments(make_account(), settings, http, since)}
+    assert found == {"Old1.r1", "Old2.r1"} and threads.call_count == 2
+    threads.mock(side_effect=[_threads_page("Old1", "2026-09-01T08:00:00Z", "P2")])
+    found = {c.external_id for c in provider.fetch_comments(make_account(), settings, http, since)}
+    assert found == {"Old1.r1"} and threads.call_count == 3  # regular poll: early stop again
+    youtube.reset_deep_sweeps()
+
+
+def test_extra_quota_exceeded_does_not_promise_a_retry(
+    tmp_path: Path,
+    fake: FakeYouTube,
+    router: respx.MockRouter,
+    http: httpx.Client,
+    settings: ProviderSettings,
+    clk: ManualClock,
+) -> None:
+    route = router.post(f"{API}/playlistItems").respond(403, json=gerr(403, "quotaExceeded"))
+    router.get(f"{API}/playlistItems").respond(200, json={"items": []})
+    rec = Recorder()
+    state = {"phase": "post", "video_id": VIDEO_ID, "requested_privacy": "public"}
+    ctx = make_ctx(
+        make_account(),
+        make_target([write_video(tmp_path)], playlist_id="PL1"),
+        settings,
+        http,
+        clk,
+        rec,
+        state,
+    )
+    results = run(youtube.YouTubeProvider(), ctx, clk)
+    assert results[-1].status == "published" and route.call_count == 1
+    failed = [e for e in rec.events if e[0] == "youtube_playlist_failed"]
+    assert failed and "reintentar" not in failed[0][1].lower() and "YouTube Studio" in failed[0][1]
+    assert "cuota" in failed[0][1]
+
+
+def test_extra_short_rate_limit_waits_and_retries(
+    tmp_path: Path,
+    fake: FakeYouTube,
+    router: respx.MockRouter,
+    http: httpx.Client,
+    settings: ProviderSettings,
+    clk: ManualClock,
+) -> None:
+    route = router.post(f"{API}/playlistItems").mock(
+        side_effect=[
+            httpx.Response(403, json=gerr(403, "rateLimitExceeded"), headers={"Retry-After": "120"}),
+            httpx.Response(200, json={"id": "PLI1"}),
+        ]
+    )
+    router.get(f"{API}/playlistItems").respond(200, json={"items": []})
+    state = {"phase": "post", "video_id": VIDEO_ID, "requested_privacy": "public"}
+    ctx = make_ctx(
+        make_account(),
+        make_target([write_video(tmp_path)], playlist_id="PL1"),
+        settings,
+        http,
+        clk,
+        Recorder(),
+        state,
+    )
+    provider = youtube.YouTubeProvider()
+    first = provider.publish_step(ctx)
+    assert (first.status, first.wait_seconds) == ("wait", 120)
+    results = run(provider, ctx, clk)
+    assert results[-1].status == "published" and route.call_count == 2 and ctx.state["playlist_applied"]

@@ -396,7 +396,7 @@ def test_file_level_problems(db, brand, clock):
     )
     only_header = csvio.build_preview(db, brand, make_csv(row(fecha="", hora="", texto="")), clock)
     assert only_header.file_errors == ["El archivo no tiene filas con publicaciones."]
-    assert only_header.empty_count == 1
+    assert only_header.empty_count == 0  # trailing blank lines (Excel leftovers) are dropped
     big = csvio.build_preview(db, brand, b"x" * (csvio.MAX_BYTES + 1), clock)
     assert "demasiado grande" in big.file_errors[0]
     many = csvio.build_preview(db, brand, make_csv(*[row()] * (csvio.MAX_ROWS + 1)), clock)

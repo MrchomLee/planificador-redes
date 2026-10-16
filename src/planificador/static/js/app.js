@@ -139,6 +139,30 @@
   // Each layer root holds at most one dialog. The topmost open layer receives Esc / focus trapping.
   const LAYER_IDS = ["confirm-root", "modal-root", "drawer-root"]; // priority order (top first)
   const lastFocus = {};
+  const lastFocusLoc = {};
+
+  // ------------------------------------------------------------------ focus that survives re-renders
+  // htmx swaps and FullCalendar refetches replace elements (list rows, calendar events) with new copies. A
+  // locator (id, else hx-get, else data-post-id, plus the class) finds the new copy so focus can go back to it.
+  const LOCATOR_ATTRS = ["id", "hx-get", "data-post-id"];
+  App.focusLocator = function (el) {
+    if (!el || el === doc.body || el === doc.documentElement || !el.getAttribute) return null;
+    const attr = LOCATOR_ATTRS.find((a) => el.getAttribute(a));
+    return attr ? { attr: attr, value: el.getAttribute(attr), cls: el.className || "" } : null;
+  };
+  App.findByLocator = function (loc) {
+    if (!loc) return null;
+    const value = window.CSS && CSS.escape ? CSS.escape(loc.value) : loc.value.replace(/["\\]/g, "\\$&");
+    const sel = loc.attr === "id" ? "#" + value : "[" + loc.attr + '="' + value + '"]';
+    let found = [];
+    try {
+      found = $$(sel).filter((el) => el.getClientRects().length && !el.closest("[hidden], [inert]"));
+    } catch (e) {
+      return null;
+    }
+    // Same kind of element first (the row's open button rather than a hidden menu item with the same hx-get).
+    return found.find((el) => (el.className || "") === loc.cls) || found[0] || null;
+  };
 
   function layerRoot(id) {
     return doc.getElementById(id);
@@ -171,6 +195,7 @@
     if (!lastFocus[id] || !doc.contains(lastFocus[id])) {
       const active = doc.activeElement;
       lastFocus[id] = active && !root.contains(active) ? active : null;
+      lastFocusLoc[id] = App.focusLocator(lastFocus[id]);
     }
     syncScrollLock();
     const dialog = dialogOf(root);
@@ -200,9 +225,11 @@
       root.classList.remove("layer-closing");
       root.innerHTML = "";
       syncScrollLock();
-      const back = lastFocus[id];
+      // The opener may have been re-rendered while the layer was open (a refresh after an action): use its copy.
+      const back = lastFocus[id] && doc.contains(lastFocus[id]) ? lastFocus[id] : App.findByLocator(lastFocusLoc[id]);
       lastFocus[id] = null;
-      if (back && doc.contains(back)) back.focus({ preventScroll: true });
+      lastFocusLoc[id] = null;
+      if (back) back.focus({ preventScroll: true });
       root.dispatchEvent(new CustomEvent("layer:closed", { bubbles: true }));
     };
     const reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;

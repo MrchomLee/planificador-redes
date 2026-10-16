@@ -248,6 +248,26 @@ def test_kpis_with_previous_period(db: Session, brand) -> None:
     assert no_cmp["followers"] == {"value": 107, "previous": None, "change_pct": None}
 
 
+def test_kpis_do_not_compare_flows_with_an_incomplete_previous_period(db: Session, brand) -> None:
+    """Account connected 2 days before the end of the previous week: 2 days of views there vs 7 now must not
+    read as +600 % (ui review [11]); stock metrics still compare, and a complete baseline still does."""
+    account = make_account(db, brand, Network.INSTAGRAM)
+    start = date(2026, 10, 1)
+    for d in (date(2026, 9, 29), date(2026, 9, 30)):
+        add_snapshot(db, account, d, followers=100, views=10, reach=8)
+    for i in range(7):
+        add_snapshot(db, account, start + timedelta(days=i), followers=110, views=10, reach=8)
+    db.commit()
+    k = analytics.kpis(db, account, start, start + timedelta(days=6))
+    assert k["views"] == {"value": 70, "previous": None, "change_pct": None, "previous_incomplete": True}
+    assert k["reach"]["previous_incomplete"] is True and k["reach"]["change_pct"] is None
+    assert k["followers"] == {"value": 110, "previous": 100, "change_pct": 10.0}
+    later = analytics.kpis(db, account, date(2026, 10, 8), date(2026, 10, 14))  # nothing yet: no flows
+    assert "views" not in later
+    full = analytics.kpis(db, account, date(2026, 10, 5), date(2026, 10, 7))  # Oct 2-4 fully covered
+    assert full["views"] == {"value": 30, "previous": 30, "change_pct": 0.0}
+
+
 def test_follower_balance_from_consecutive_snapshots(db: Session, brand) -> None:
     account = make_account(db, brand, Network.INSTAGRAM)
     add_snapshot(db, account, date(2026, 9, 28), followers=200)  # before the period: baseline
@@ -523,7 +543,11 @@ def test_snapshot_all_links_targets_and_merges_history(db: Session, brand, clock
     assert rows["vid-1"].target_id == t_yt.id
     assert rows["vid-1"].metrics == {"views": 90}  # native only
 
-    fb_snap = db.scalar(select(AnalyticsSnapshot).where(AnalyticsSnapshot.account_id == fb.id))
+    fb_snap = db.scalar(
+        select(AnalyticsSnapshot).where(
+            AnalyticsSnapshot.account_id == fb.id, AnalyticsSnapshot.day == date(2026, 11, 3)
+        )
+    )
     assert fb_snap.metrics == {"followers": 321, "views": 40}
     old = db.scalar(
         select(AnalyticsSnapshot).where(

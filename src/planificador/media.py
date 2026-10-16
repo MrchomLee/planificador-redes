@@ -42,7 +42,16 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from planificador.models import MediaAsset, MediaKind, Post, PostMedia, PostTarget, TargetStatus, utcnow
+from planificador.models import (
+    MediaAsset,
+    MediaKind,
+    Post,
+    PostKind,
+    PostMedia,
+    PostTarget,
+    TargetStatus,
+    utcnow,
+)
 from planificador.providers.base import MediaInfo
 
 log = logging.getLogger(__name__)
@@ -108,15 +117,71 @@ class MediaError(Exception):
         self.status = status
 
 
-class MediaInUseError(MediaError):
-    def __init__(self, count: int) -> None:
-        plural = "publicación pendiente" if count == 1 else "publicaciones pendientes"
-        super().__init__(
-            "media_in_use",
-            f"No se puede borrar: se usa en {count} {plural}. Quítalo de ellas (o bórralas) antes.",
-            409,
+def _counted(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
+@dataclass(frozen=True)
+class MediaUsage:
+    """Posts that still need a library file, so it cannot be deleted (distinct post ids, sorted).
+
+    ``posts``: not in the trash and not finished (a pending network, or no network chosen yet);
+    ``ideas``: ideas using it; ``trashed``: posts in the trash that a restore would bring back pending."""
+
+    posts: tuple[int, ...] = ()
+    ideas: tuple[int, ...] = ()
+    trashed: tuple[int, ...] = ()
+
+    @property
+    def total(self) -> int:
+        return len(self.posts) + len(self.ideas) + len(self.trashed)
+
+    def __bool__(self) -> bool:
+        return self.total > 0
+
+    @property
+    def summary(self) -> str:
+        """'1 publicación pendiente, 2 ideas y 1 publicación de la papelera'."""
+        parts = []
+        if self.posts:
+            parts.append(_counted(len(self.posts), "publicación pendiente", "publicaciones pendientes"))
+        if self.ideas:
+            parts.append(_counted(len(self.ideas), "idea", "ideas"))
+        if self.trashed:
+            parts.append(
+                _counted(len(self.trashed), "publicación de la papelera", "publicaciones de la papelera")
+            )
+        if len(parts) < 2:
+            return "".join(parts)
+        return ", ".join(parts[:-1]) + " y " + parts[-1]
+
+    @property
+    def advice(self) -> str:
+        """What to do first (no final punctuation: callers add "antes." / "para poder borrarlo.")."""
+        active = len(self.posts) + len(self.ideas)
+        one = active == 1
+        remove = f"Quítalo de {'ella' if one else 'ellas'} (o {'bórrala' if one else 'bórralas'})"
+        if not self.trashed:
+            return remove
+        one_trashed = len(self.trashed) == 1
+        if not active:
+            return (
+                f"{'Elimínala' if one_trashed else 'Elimínalas'} definitivamente de la papelera "
+                f"(o {'restáurala' if one_trashed else 'restáuralas'} y quítalo)"
+            )
+        return (
+            f"{remove}; {'la' if one_trashed else 'las'} de la papelera, "
+            f"{'elimínala' if one_trashed else 'elimínalas'} definitivamente"
         )
-        self.count = count
+
+
+class MediaInUseError(MediaError):
+    def __init__(self, usage: MediaUsage) -> None:
+        super().__init__(
+            "media_in_use", f"No se puede borrar: se usa en {usage.summary}. {usage.advice} antes.", 409
+        )
+        self.usage = usage
+        self.count = usage.total
 
 
 # ============================================================================================== paths
@@ -423,8 +488,8 @@ def sniff(head: bytes, path: Path | None = None) -> FileType:
             if not _heif_available():
                 raise MediaError(
                     "heic_unavailable",
-                    "Las fotos HEIC necesitan el complemento pillow-heif (instala el extra «heic») o "
-                    "conviértelas a JPEG.",
+                    "Las fotos HEIC necesitan el complemento pillow-heif, que no está instalado. Cierra la "
+                    "app y ábrela de nuevo con iniciar.bat (lo instala) o convierte la foto a JPEG.",
                     415,
                 )
             return TYPES["heic"]
@@ -852,19 +917,26 @@ def get_visible(db: Session, asset_id: int, brand_id: int | None = None) -> Medi
     return asset
 
 
-def _targets_using(db: Session, asset_ids: Iterable[int], statuses: Iterable[TargetStatus] | None) -> dict:
-    """``asset_id -> set(target ids)`` of non-deleted posts' targets using each asset (base media, per-network
-    override or YouTube custom thumbnail)."""
+def _targets_using(
+    db: Session,
+    asset_ids: Iterable[int],
+    statuses: Iterable[TargetStatus] | None,
+    *,
+    trashed: bool = False,
+) -> dict:
+    """``asset_id -> set(target ids)`` of the targets using each asset (base media, per-network override or
+    YouTube custom thumbnail), of posts not in the trash (``trashed=True``: of posts in the trash)."""
     ids = {int(i) for i in asset_ids}
     out: dict[int, set[int]] = {i: set() for i in ids}
     if not ids:
         return out
     status_cond = PostTarget.status.in_(list(statuses)) if statuses is not None else True
+    trash_cond = Post.deleted_at.is_not(None) if trashed else Post.deleted_at.is_(None)
     rows = db.execute(
         select(PostMedia.media_id, PostTarget.id, PostTarget.media_override)
         .join(Post, Post.id == PostMedia.post_id)
         .join(PostTarget, PostTarget.post_id == Post.id)
-        .where(PostMedia.media_id.in_(ids), Post.deleted_at.is_(None), status_cond)
+        .where(PostMedia.media_id.in_(ids), trash_cond, status_cond)
     ).all()
     for media_id, target_id, override in rows:
         if override is None:  # an override replaces the base list
@@ -872,7 +944,7 @@ def _targets_using(db: Session, asset_ids: Iterable[int], statuses: Iterable[Tar
     candidates = db.execute(
         select(PostTarget.id, PostTarget.media_override, PostTarget.options)
         .join(Post, Post.id == PostTarget.post_id)
-        .where(Post.deleted_at.is_(None), status_cond)
+        .where(trash_cond, status_cond)
         .where(or_(PostTarget.media_override.is_not(None), PostTarget.network == "youtube"))
     ).all()
     for target_id, override, options in candidates:
@@ -887,9 +959,47 @@ def _targets_using(db: Session, asset_ids: Iterable[int], statuses: Iterable[Tar
     return out
 
 
-def pending_usage(db: Session, asset_id: int) -> list[int]:
-    """Ids of targets that still need this asset (draft/scheduled/publishing/assisted/error/missed)."""
-    return sorted(_targets_using(db, [asset_id], PENDING_STATUSES)[int(asset_id)])
+def pending_usage(db: Session, asset_id: int) -> MediaUsage:
+    """The posts that still need this asset (see :class:`MediaUsage`), counted once each however many
+    networks they go to: pending targets (draft/scheduled/publishing/assisted/error/missed), posts and ideas
+    with no network yet (they use their base media), and posts in the trash whose restore would bring a
+    pending target back (the trash cancels them, remembering the status to restore)."""
+    from planificador.postsvc import TRASH_STATE_KEY  # lazy: postsvc imports this module
+
+    aid = int(asset_id)
+    active = _targets_using(db, [aid], PENDING_STATUSES)[aid]
+    in_trash = _targets_using(db, [aid], (*PENDING_STATUSES, TargetStatus.CANCELLED), trashed=True)[aid]
+    active_posts: set[int] = set()
+    trashed_posts: set[int] = set()
+    if active or in_trash:
+        rows = db.execute(
+            select(PostTarget.id, PostTarget.post_id, PostTarget.status, PostTarget.provider_state).where(
+                PostTarget.id.in_(active | in_trash)
+            )
+        ).all()
+        for target_id, post_id, status, state in rows:
+            if target_id in active:
+                active_posts.add(post_id)
+            elif status != TargetStatus.CANCELLED or TRASH_STATE_KEY in (state or {}):
+                trashed_posts.add(post_id)
+    # Ideas and drafts saved before choosing networks have no targets but still use their base media.
+    targetless = db.execute(
+        select(Post.id, Post.deleted_at)
+        .join(PostMedia, PostMedia.post_id == Post.id)
+        .where(PostMedia.media_id == aid, ~Post.targets.any())
+    ).all()
+    for post_id, deleted_at in targetless:
+        (active_posts if deleted_at is None else trashed_posts).add(post_id)
+    ideas: set[int] = set()
+    if active_posts:
+        ideas = set(
+            db.scalars(select(Post.id).where(Post.id.in_(active_posts), Post.kind == PostKind.IDEA)).all()
+        )
+    return MediaUsage(
+        posts=tuple(sorted(active_posts - ideas)),
+        ideas=tuple(sorted(ideas)),
+        trashed=tuple(sorted(trashed_posts)),
+    )
 
 
 def usage_counts(db: Session, asset_ids: Iterable[int]) -> dict[int, int]:
@@ -916,14 +1026,15 @@ def usage_counts(db: Session, asset_ids: Iterable[int]) -> dict[int, int]:
 
 
 def delete_asset(db: Session, asset_id: int, clock: Any = None, *, brand_id: int | None = None) -> MediaAsset:
-    """Soft delete (``deleted_at``). Raises :class:`MediaInUseError` while pending targets use it and
-    ``LookupError`` when it does not exist. Files stay on disk (published posts may still reference them)."""
+    """Soft delete (``deleted_at``). Raises :class:`MediaInUseError` while a post still needs it (see
+    :func:`pending_usage`: pending networks, ideas, drafts, the trash) and ``LookupError`` when it does not
+    exist. Files stay on disk (published posts may still reference them)."""
     asset = get_visible(db, asset_id, brand_id)
     if asset is None:
         raise LookupError(asset_id)
-    users = pending_usage(db, asset.id)
-    if users:
-        raise MediaInUseError(len(users))
+    usage = pending_usage(db, asset.id)
+    if usage:
+        raise MediaInUseError(usage)
     now: datetime = clock.now() if clock is not None else utcnow()
     asset.deleted_at = now
     db.commit()
@@ -949,6 +1060,7 @@ __all__ = [
     "IncomingFile",
     "MediaError",
     "MediaInUseError",
+    "MediaUsage",
     "asset_path",
     "clean_name",
     "delete_asset",

@@ -17,6 +17,7 @@ Transaction guidance for all modules (research 04 §2.7):
 from __future__ import annotations
 
 import logging
+import sqlite3
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -40,6 +41,9 @@ SCHEMA_VERSION = 1
 #: only creates *missing tables*; use the migration to add columns/indexes to existing tables, e.g.
 #: ``conn.execute(text("ALTER TABLE ..."))``).
 MIGRATIONS: dict[int, Callable[[Connection], None]] = {}
+
+#: Connections kept open in the pool (more are opened on demand and closed when returned).
+POOL_SIZE = 10
 
 PRAGMAS: tuple[str, ...] = (
     "PRAGMA journal_mode=WAL",
@@ -86,6 +90,12 @@ def make_engine(db_path: Path | str, *, echo: bool = False) -> Engine:
         path = Path(db_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         url = URL.create("sqlite", database=str(path))
+        # Never make a thread wait for a pooled connection: a page render holds the route's session while the
+        # template globals open a second one, so any *bounded* pool deadlocks once every slot is held by a
+        # request waiting for its second connection (and the scheduler stalls with them). SQLite connections
+        # are cheap; concurrency is already bounded by the worker thread pool.
+        kwargs["pool_size"] = POOL_SIZE
+        kwargs["max_overflow"] = -1
     engine = create_engine(url, **kwargs)
     event.listen(engine, "connect", _apply_pragmas)
     event.listen(engine, "savepoint", _begin_before_savepoint)
@@ -139,6 +149,32 @@ def init_db(engine: Engine, *, target: int | None = None) -> int:
         if current < target:
             return run_migrations(conn, int(current), target)
         return int(current)
+
+
+def has_encrypted_values(db_path: Path | str) -> bool:
+    """True when the SQLite file holds a value encrypted with the master key (``v1:...`` ciphertext): app
+    secrets in ``settings``, account tokens or encrypted values inside ``accounts.meta``.
+
+    Read with the plain ``sqlite3`` module before the engine exists (``crypto.init`` runs first) so the master
+    key loader can tell whether switching keys would lose data. Errors propagate (callers treat them as
+    "yes")."""
+    path = Path(db_path)
+    if str(db_path) == ":memory:" or not path.is_file():
+        return False
+    conn = sqlite3.connect(str(path), timeout=5)
+    try:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        queries: list[str] = []
+        if "settings" in tables:
+            queries.append("SELECT 1 FROM settings WHERE CAST(value AS TEXT) LIKE '%\"v1:%' LIMIT 1")
+        if "accounts" in tables:
+            queries.append(
+                "SELECT 1 FROM accounts WHERE access_token_enc LIKE 'v1:%' OR refresh_token_enc LIKE 'v1:%' "
+                "OR CAST(meta AS TEXT) LIKE '%\"v1:%' LIMIT 1"
+            )
+        return any(conn.execute(query).fetchone() is not None for query in queries)
+    finally:
+        conn.close()
 
 
 class Database:

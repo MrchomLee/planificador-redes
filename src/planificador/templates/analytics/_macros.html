@@ -23,6 +23,8 @@
   {% elif compare %}
   {% if t.previous is not none %}
   <span class="an-tile__delta an-tile__delta--empty" title="Periodo anterior">antes: {% if t.fmt == "pct" %}{{ t.previous|pct(2) }}{% else %}{{ t.previous|number_es(0, true) }}{% endif %}</span>
+  {% elif t.previous_incomplete %}
+  <span class="an-tile__delta an-tile__delta--empty" title="El periodo anterior no tiene datos de todos los días: no se compara">anterior incompleto</span>
   {% else %}
   <span class="an-tile__delta an-tile__delta--empty" title="No hay datos del periodo anterior">sin datos previos</span>
   {% endif %}

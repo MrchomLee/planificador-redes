@@ -530,16 +530,32 @@ tests). Tick every 15 s or when woken (`scheduler.wake()` after "Publicar ahora"
 2. **Waiting targets**: `status == publishing AND next_attempt_at <= now` → continue running.
 3. **Stale claims**: `publishing` with `claimed_at` older than 10 min and no `next_attempt_at` (crash) →
    if `commit_phase == commit_sent` → reconcile; else continue from saved state.
+   Before 2 and 3 continue, a target that has **sent nothing irreversible yet** (`commit_phase != commit_sent`
+   and no pending reconcile — waiting before a retry, paused at shutdown, or abandoned by a crash) follows the
+   missed rule of 1, measured from the latest of `scheduled_at`, `next_attempt_at` and `claimed_at` (a rate
+   limit that pushed the retry 3 h out is judged from the retry time): if the app was off beyond the grace
+   window → `missed` (partial provider state dropped, guarded on the values read). A target whose commit was
+   sent is always resumed/reconciled, never missed.
 4. **Periodic jobs** (tracked in settings with last-run timestamps): token refresh check (hourly; TikTok refresh
    when < 1 h left; Meta long-lived user token expiry warnings), analytics snapshot (daily after 06:00 local and
-   at startup if stale), comment polling (every 15 min), trash purge (> 45 days), public media token cleanup.
+   at startup if stale), comment polling (every 15 min), trash purge (> 45 days), public media token cleanup,
+   provider follow-ups (hourly, `providers/followups.py`: a finished target whose `provider_state` holds
+   `followup.next_at` is checked again through `Provider.follow_up` — TikTok public post id after moderation,
+   YouTube `publishAt` uploads read after their time, the YouTube lock-test re-check after 24 h).
 5. **Sleep/wake detection**: if the wall-clock gap between ticks > 2 min, log and run catch-up.
 
 Runner for one target (`engine.run_target(target_id)`), in a worker thread pool (max 2 concurrent publishes; at
 most 1 per account):
 - Build `PublishContext` (decrypt tokens, `rules`/`media` to MediaInfo, ProviderSettings, shared `httpx.Client`
   with sane timeouts: connect 15 s, read 120 s for uploads).
-- Before the first step: refresh credentials if expiring; re-validate; failure → `error`.
+- Before the first step: refresh credentials if expiring; re-validate; failure → `error`. Refreshes are
+  serialised per account by `engine.credentials_lock(account_id)` (one process-wide lock, shared by the runner's
+  refresh, its token storage and the `token_refresh` job); inside it the tokens are re-read from the DB, so a
+  second caller uses the token just stored instead of refreshing (rotating TikTok refresh tokens) again.
+- Resuming a target whose commit was already sent skips the pre-flight checks (trashed post, account status,
+  missing media): the post may be live. A failed token refresh there is not the commit's outcome (an `AUTH`
+  failure still flags the account): the run continues with the current token and the provider's own
+  status check decides.
 - Loop: `result = provider.publish_step(ctx)`:
   - `continue` → loop immediately; `wait` → set `next_attempt_at = now + wait_seconds`, release worker;
   - `published` → `published`, store ids/url, `published_at`, event, notify only if it was "Publicar ahora"?
@@ -557,10 +573,26 @@ most 1 per account):
 - Manual actions (routes): Reintentar (from `error`/`missed`: reset to `scheduled` now; from `unknown` only after
   the user confirms it did NOT publish), Marcar como publicado (`manual_pending`/`unknown`/`error` →
   `manual_done`), Cancelar (→ `cancelled`), Publicar ahora (sets `scheduled_at=now`, `scheduled`, wake).
-- Facebook `native_schedule`: provider publishes with `published=false` + `scheduled_publish_time`; result status
-  `published` is only set at the scheduled time by a periodic check — v1: the provider returns
+- Facebook/YouTube `native_schedule`: the scheduler hands the target to the network's own scheduler ahead of
+  time (Facebook `published=false` + `scheduled_publish_time`, YouTube `publishAt`); the provider returns
   `published` with `external_id` immediately and stores `state.native_scheduled = true`; the planner shows it
-  as "Programado en Facebook". Cancelling such a target calls the provider's delete (best effort).
+  as "Programado en Facebook/YouTube". Facebook re-checks the remaining lead before every commit (below 12 min
+  it drops native scheduling and publishes directly at the time); YouTube waits for processing and a follow-up
+  reads the video at `publishAt` + 16 min (failed/rejected/missing → `error` + notification; still private →
+  account locked, notification).
+  - A failed early hand-off (before its commit, post not due yet) is **not** an error: the target goes back to
+    `scheduled` with `last_error` explaining it. Transient, rate-limit and account (`AUTH`, account flagged)
+    problems retry the hand-off after 6 h (`NATIVE_HANDOFF_RETRY`), never past `scheduled_at`; anything else
+    waits for the scheduled time (one error notification). At the scheduled time the app publishes it itself.
+    Accounts that are not `connected` are not handed off.
+  - **Cancelling** such a target deletes it on the network first. When that fails the post would still go live,
+    so the cancel is **refused** (`EngineError` `native_cancel_failed`, 409 in the route, event
+    `native_cancel_failed`; the target stays `published`/natively scheduled). After such a failure the drawer
+    offers a confirmed "Cancelar solo en la app" (`cancel_target(..., force=True)`) for a post the user already
+    deleted on the network; Facebook counts `100/33` "object does not exist" as withdrawn when the Page itself is
+    still readable with the same token. Trashing a post withdraws its native targets the same way (refused if
+    that fails) and marks them `TRASH_NATIVE`; restoring it re-schedules them (`scheduled` again, native state
+    dropped, so the scheduler hands them off again) or turns them into drafts when their time has passed.
 
 ---
 
@@ -588,8 +620,13 @@ Post metric keys: `views`, `reach`, `likes`, `comments`, `shares`, `saves`, `int
 
 - `snapshot_all(db, http, clock)`: for each connected account, `fetch_account_snapshot` for today (upsert) and
   `fetch_recent_posts(since=now-30d)` (upsert into `post_metrics`, link `target_id` by `external_id`).
+  Facebook/Instagram also re-read the flow metrics of the last 3 completed days (Meta's day values are partial
+  and settle within ~48 h); a Meta `period=day` series is requested over two UTC days and only the value whose
+  `end_time` closes the requested day is kept (never a neighbouring day's number).
   Errors are recorded per account (shown in UI), never crash the scheduler.
-- Aggregations: `kpis(account, start, end)` → current vs previous period values and % change;
+- Aggregations: `kpis(account, start, end)` → current vs previous period values and % change (a flow metric is
+  not compared when the previous period has fewer days of data than the current one: `previous_incomplete`;
+  the Resumen tiles sum current/previous in pairs over the accounts that have both);
   `series(account, metric, start, end)`; `follower_balance`; `top_posts`; `best_times(brand)` → 7×24 matrix of
   average engagement of our published posts (needs ≥ 10 posts; else a default pattern labelled
   "Patrón general") used by the planner shading.

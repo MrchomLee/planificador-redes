@@ -10,11 +10,15 @@ or when :func:`wake` is called after "Publicar ahora"/save). Each tick:
    any, on the first tick after start: the single-instance lock means they belong to a dead process) are
    re-claimed: reconcile if ``commit_phase == commit_sent``, else continue from the saved provider state.
 3. **Waiting targets** — ``publishing`` with ``next_attempt_at <= now`` (provider waits and retry backoffs).
+   Stale and waiting targets that have **not** sent anything irreversible yet follow the same missed rule as
+   due ones (step 4), measured from when they should have carried on: nothing goes out hours or days late
+   just because the app was closed between two attempts.
 4. **Due targets** — ``scheduled`` with ``scheduled_at <= now`` (post not in the trash):
    auto-publish off (and not TikTok inbox mode) → ``manual_pending``; due before the current "online since"
    period and later than the grace window (``grace_minutes``) → ``missed``; otherwise claimed and run.
-   Facebook/YouTube targets with ``native_schedule`` are claimed **ahead of time** (within 28 days) so the
-   provider can hand them to the network's own scheduler.
+   Facebook/YouTube targets with ``native_schedule`` (of connected accounts) are claimed **ahead of time**
+   (within 28 days) so the provider can hand them to the network's own scheduler; a failed hand-off puts them
+   back to ``scheduled`` (``engine``), so they still publish at their time.
 5. **Periodic jobs** in their own thread (never blocking publishing): token refresh (hourly), analytics
    snapshot (daily after 06:00 local, or when older than 24 h), comment polling (15 min), trash purge
    (> 45 days, daily), public-media token / OAuth state cleanup (hourly), WAL checkpoint (daily). Last-run
@@ -36,6 +40,7 @@ import random
 import threading
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -395,18 +400,50 @@ class Scheduler:
 
     # ---- phases
 
+    def _grace(self, s: Session) -> timedelta:
+        return timedelta(minutes=max(0, config.get_int(s, "grace_minutes")))
+
+    def _is_missed(
+        self, reference: datetime | None, now: datetime, grace: timedelta
+    ) -> tuple[bool, timedelta]:
+        """The missed rule: due before the current online period and later than the grace window."""
+        reference = reference or now
+        late = now - reference
+        return late > grace and reference < (self.online_since or now), late
+
+    def _missed_while_publishing(
+        self, s: Session, target: PostTarget, now: datetime, report: TickReport
+    ) -> bool:
+        """A ``publishing`` target that sent nothing yet (retry/backoff wait, paused at shutdown, abandoned by
+        a crash) follows the same rule as a ``scheduled`` one: if the app was off beyond the grace window when
+        it should have carried on, it is ``missed`` instead of going out hours or days late."""
+        if not engine.can_miss_while_publishing(target):
+            return False
+        grace = self._grace(s)
+        missed, _late = self._is_missed(engine.resume_reference(target), now, grace)
+        if missed and engine.set_missed(s, target, now, grace=grace):
+            report.missed.append(target.id)
+            return True
+        return False
+
     def _recover_stale(self, now: datetime, report: TickReport) -> None:
         threshold = now - engine.STALE_CLAIM_AFTER
         with self.session() as s:
-            rows = s.execute(
-                select(
-                    PostTarget.id, PostTarget.account_id, PostTarget.claimed_at, PostTarget.commit_phase
-                ).where(PostTarget.status == TargetStatus.PUBLISHING, PostTarget.next_attempt_at.is_(None))
-            ).all()
-            for target_id, account_id, claimed_at, phase in rows:
+            targets = list(
+                s.scalars(
+                    select(PostTarget)
+                    .where(PostTarget.status == TargetStatus.PUBLISHING, PostTarget.next_attempt_at.is_(None))
+                    .order_by(PostTarget.id)
+                )
+            )
+            for target in targets:
+                target_id, account_id, claimed_at = target.id, target.account_id, target.claimed_at
+                phase = target.commit_phase
                 if self._busy(target_id):
                     continue
                 if not (self._first_tick or claimed_at is None or claimed_at <= threshold):
+                    continue
+                if self._missed_while_publishing(s, target, now, report):
                     continue
                 if not self._capacity(account_id):
                     report.deferred.append(target_id)
@@ -422,17 +459,22 @@ class Scheduler:
 
     def _continue_waiting(self, now: datetime, report: TickReport) -> None:
         with self.session() as s:
-            rows = s.execute(
-                select(PostTarget.id, PostTarget.account_id, PostTarget.next_attempt_at)
-                .where(
-                    PostTarget.status == TargetStatus.PUBLISHING,
-                    PostTarget.next_attempt_at.is_not(None),
-                    PostTarget.next_attempt_at <= now,
+            targets = list(
+                s.scalars(
+                    select(PostTarget)
+                    .where(
+                        PostTarget.status == TargetStatus.PUBLISHING,
+                        PostTarget.next_attempt_at.is_not(None),
+                        PostTarget.next_attempt_at <= now,
+                    )
+                    .order_by(PostTarget.next_attempt_at, PostTarget.id)
                 )
-                .order_by(PostTarget.next_attempt_at, PostTarget.id)
-            ).all()
-            for target_id, account_id, next_attempt_at in rows:
+            )
+            for target in targets:
+                target_id, account_id, next_attempt_at = target.id, target.account_id, target.next_attempt_at
                 if self._busy(target_id):
+                    continue
+                if self._missed_while_publishing(s, target, now, report):
                     continue
                 if not self._capacity(account_id):
                     report.deferred.append(target_id)
@@ -443,8 +485,7 @@ class Scheduler:
 
     def _process_due(self, now: datetime, report: TickReport) -> None:
         with self.session() as s:
-            grace = timedelta(minutes=max(0, config.get_int(s, "grace_minutes")))
-            online_since = self.online_since or now
+            grace = self._grace(s)
             targets = list(
                 s.scalars(
                     select(PostTarget)
@@ -460,9 +501,8 @@ class Scheduler:
                     if engine.set_manual_pending(s, target, now):
                         report.manual.append(target.id)
                     continue
-                reference = engine.due_reference(target) or now
-                late = now - reference
-                if late > grace and reference < online_since:
+                missed, late = self._is_missed(engine.due_reference(target), now, grace)
+                if missed:
                     if engine.set_missed(s, target, now, grace=grace):
                         report.missed.append(target.id)
                     continue
@@ -489,6 +529,9 @@ class Scheduler:
                         PostTarget.scheduled_at <= now + NATIVE_HANDOFF_WINDOW,
                         or_(PostTarget.next_attempt_at.is_(None), PostTarget.next_attempt_at <= now),
                         PostTarget.post.has(Post.deleted_at.is_(None)),
+                        # A broken account would only fail the hand-off; it waits for the reconnection (or
+                        # for its time, when the normal path reports the problem).
+                        PostTarget.account.has(Account.status == AccountStatus.CONNECTED),
                     )
                     .order_by(PostTarget.scheduled_at, PostTarget.id)
                     .limit(DUE_BATCH)
@@ -648,16 +691,26 @@ def _call_compat(fn: Callable[..., Any], *args: Any) -> Any:
 
 def job_token_refresh(sched: Scheduler, now: datetime) -> dict[str, int]:
     """Refresh expiring tokens of connected accounts; flag broken ones; warn before Meta/TikTok/YouTube
-    authorisations expire."""
+    authorisations expire.
+
+    Each account is handled under :func:`engine.credentials_lock` and re-read inside it (a publishing run may
+    have just refreshed it: TikTok rotates refresh tokens, so refreshing again from a stale copy would send a
+    superseded one and wrongly flag the account)."""
     from planificador.providers import registry
 
     summary = {"checked": 0, "refreshed": 0, "reconnect": 0, "warnings": 0}
     with sched.session() as s:
         settings = config.provider_settings(s, base_url=sched.base_url)
-        accounts = list(
-            s.scalars(select(Account).where(Account.status == AccountStatus.CONNECTED).order_by(Account.id))
+        account_ids = list(
+            s.scalars(
+                select(Account.id).where(Account.status == AccountStatus.CONNECTED).order_by(Account.id)
+            )
         )
-        for account in accounts:
+    for account_id in account_ids:
+        with engine.credentials_lock(account_id), sched.session() as s:
+            account = s.get(Account, account_id)
+            if account is None or account.status != AccountStatus.CONNECTED:
+                continue
             summary["checked"] += 1
             try:
                 provider = registry.get_provider(str(account.network))
@@ -683,13 +736,16 @@ def job_token_refresh(sched: Scheduler, now: datetime) -> dict[str, int]:
                 account.last_checked_at = now
                 s.commit()
                 summary["refreshed"] += 1
-            summary["warnings"] += _expiry_warnings(s, account, now)
+            summary["warnings"] += _expiry_warnings(
+                s, account, now, write_lock=getattr(sched.database, "write_lock", None)
+            )
     return summary
 
 
-def _expiry_warnings(s: Session, account: Account, now: datetime) -> int:
-    from planificador import notify
-
+def _expiry_warnings(s: Session, account: Account, now: datetime, *, write_lock: Any = None) -> int:
+    """Warn (once per expiry instant) before an authorisation expires. The "already warned" stamp is merged
+    into a freshly read ``accounts.meta`` under the engine's write lock, so a meta change a publishing run
+    made meanwhile (e.g. YouTube's lock status) is never overwritten with a stale copy."""
     checks: list[tuple[str, datetime, timedelta]] = []
     if account.token_expires_at is not None and not account.refresh_token_enc:
         checks.append(("token_expiry_warned", account.token_expires_at, TOKEN_WARN_WINDOW))
@@ -700,27 +756,31 @@ def _expiry_warnings(s: Session, account: Account, now: datetime) -> int:
         if expires - now > window:
             continue
         stamp = expires.isoformat()
-        if (account.meta or {}).get(key) == stamp:
-            continue
-        label = engine.network_label(account.network)
-        tz = account.brand.timezone if account.brand is not None else None
-        when = format_dt_es(expires, tz)
-        if expires <= now:
-            title = f"Tu conexión con {label} ha caducado"
-            body = f"La autorización de {account.display_name} caducó el {when}."
-        else:
-            title = f"Tu conexión con {label} caduca pronto"
-            body = f"La autorización de {account.display_name} caduca el {when}."
-        body += " Reconéctala en Cuentas conectadas para que tus publicaciones sigan saliendo."
-        notify.notify(
-            s, NotificationKind.RECONNECT, title, body, account_id=account.id, commit=False, now=now
-        )
-        meta = dict(account.meta or {})
-        meta[key] = stamp
-        account.meta = meta
-        s.commit()
-        count += 1
+        with write_lock if write_lock is not None else nullcontext():
+            s.refresh(account, attribute_names=["meta"])
+            if (account.meta or {}).get(key) == stamp:
+                continue
+            count += _warn_expiry(s, account, now, key, expires, stamp)
     return count
+
+
+def _warn_expiry(s: Session, account: Account, now: datetime, key: str, expires: datetime, stamp: str) -> int:
+    from planificador import notify
+
+    label = engine.network_label(account.network)
+    tz = account.brand.timezone if account.brand is not None else None
+    when = format_dt_es(expires, tz)
+    if expires <= now:
+        title = f"Tu conexión con {label} ha caducado"
+        body = f"La autorización de {account.display_name} caducó el {when}."
+    else:
+        title = f"Tu conexión con {label} caduca pronto"
+        body = f"La autorización de {account.display_name} caduca el {when}."
+    body += " Reconéctala en Cuentas conectadas para que tus publicaciones sigan saliendo."
+    notify.notify(s, NotificationKind.RECONNECT, title, body, account_id=account.id, commit=False, now=now)
+    account.meta = {**(account.meta or {}), key: stamp}
+    s.commit()
+    return 1
 
 
 def analytics_due(sched: Scheduler, s: Session, now: datetime, last: datetime | None) -> bool:
@@ -798,6 +858,13 @@ def job_db_checkpoint(sched: Scheduler, now: datetime) -> str:
     return "ok"
 
 
+def job_provider_followups(sched: Scheduler, now: datetime) -> Any:
+    """Checks after a target finished (TikTok public ids, YouTube publishAt, lock-test confirmation)."""
+    from planificador.providers import followups
+
+    return followups.job(sched, now)
+
+
 def default_jobs() -> list[Job]:
     return [
         Job("token_refresh", "Renovación de accesos", job_token_refresh, interval=timedelta(hours=1)),
@@ -810,6 +877,12 @@ def default_jobs() -> list[Job]:
             "Mantenimiento de la base de datos",
             job_db_checkpoint,
             interval=timedelta(hours=24),
+        ),
+        Job(
+            "provider_followups",
+            "Comprobaciones tras publicar",
+            job_provider_followups,
+            interval=timedelta(hours=1),
         ),
     ]
 

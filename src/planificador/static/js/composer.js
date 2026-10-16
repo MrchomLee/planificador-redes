@@ -24,6 +24,10 @@
   const MONTHS = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
   const MONTHS_SHORT = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic"];
   const DAY_MS = 86400000;
+  // The issue panels are pinned under the scrolling editor. Below this window height an expanded error list
+  // squeezes the text box and pushes the media toolbar out of view, so it starts collapsed there (its header
+  // still shows the count and the first error; fields keep their inline errors).
+  const ISSUES_OPEN_MIN_HEIGHT = 860;
 
   const EMOJI = [
     ["Caras", "😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 😉 😍 🥰 😘 😋 😎 🤩 🥳 😏 🤔 🤗 🤭 😴 😮 😱 😢 😭 😤 😡 🥺 🙄 😬 🤯 🥶 🤠"],
@@ -154,6 +158,7 @@
 
       // ---------------------------------------------------------------- lifecycle
       init() {
+        this.issuesOpen.error = (window.innerHeight || 0) >= ISSUES_OPEN_MIN_HEIGHT;
         const holder = this.$el.querySelector("script[data-composer-state]");
         let s = {};
         try {
@@ -325,7 +330,9 @@
             return;
           }
           this.$nextTick(() => {
-            const sec = this.$el.querySelector('[data-section="' + it.account_key + '"]');
+            // Not this.$el: called from @click on an issue button, $el is that button, not the composer.
+            const scope = this.$refs.scroll || this.$root;
+            const sec = scope && scope.querySelector('[data-section="' + it.account_key + '"]');
             if (sec) sec.scrollIntoView({ behavior: "smooth", block: "start" });
             const field = sec && sec.querySelector('[data-field="' + it.field + '"]');
             if (field) {
@@ -904,7 +911,14 @@
         const info = this.creatorInfo(k);
         const opts = this.targets[k].options;
         const choices = (info && info.privacy_level_options) || [];
-        if (choices.length === 1 && !opts.privacy_level) opts.privacy_level = choices[0];
+        // TikTok's posting UX forbids any default privacy, even when only one option is offered (research 03
+        // §4.2/§4.3): the user always picks it. A saved value the account no longer offers is cleared, so the
+        // select shows the placeholder instead of silently displaying another option the model does not hold.
+        if (choices.length && opts.privacy_level && !choices.includes(opts.privacy_level)) {
+          const label = this.cfg.privacy_labels[opts.privacy_level] || opts.privacy_level;
+          opts.privacy_level = null;
+          this.notice[k] = "La visibilidad guardada («" + label + "») ya no está disponible en tu cuenta de TikTok: elige otra.";
+        }
         if (info) {
           if (info.comment_disabled) opts.disable_comment = true;
           if (info.duet_disabled) opts.disable_duet = true;

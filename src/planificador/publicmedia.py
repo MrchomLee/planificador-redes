@@ -40,7 +40,7 @@ import sys
 import tarfile
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -68,6 +68,8 @@ WATCHDOG_INTERVAL_S = 15.0
 HOSTNAME_TIMEOUT_S = 30.0
 SELF_TEST_TIMEOUT_S = 60.0
 RATE_LIMIT_PER_MIN = 60  # requests per token per minute (04 §4.6 dampens scanning)
+RATE_WINDOW_S = 60.0
+RATE_LIMIT_MAX_KEYS = 4096  # tokens tracked at once (made-up tokens must not grow memory)
 SERVE_CHUNK = 256 * 1024
 MARKER_HEADER = "x-planificador-public"  # lets the self-test recognise our own 404 through the tunnel
 
@@ -145,23 +147,49 @@ def _aware(dt: datetime) -> datetime:
 
 
 class _RateLimiter:
-    def __init__(self, per_minute: int) -> None:
+    """``per_minute`` requests per key in a fixed one-minute window, with bounded state.
+
+    The keys are whatever a client puts in the URL, so the state must not grow with them: windows live in
+    an insertion-ordered dict whose order is their start time, expired ones are dropped from its front on
+    every call (amortised O(1), no scan), and beyond ``max_keys`` the oldest window is evicted (that key
+    simply gets a fresh budget)."""
+
+    def __init__(
+        self,
+        per_minute: int,
+        *,
+        window_s: float = RATE_WINDOW_S,
+        max_keys: int = RATE_LIMIT_MAX_KEYS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.per_minute = per_minute
-        self._hits: dict[str, deque[float]] = {}
+        self.window_s = window_s
+        self.max_keys = max(1, max_keys)
+        self._clock = clock
+        self._windows: OrderedDict[str, list[float]] = OrderedDict()  # key → [window start, hits]
         self._lock = threading.Lock()
 
+    def __len__(self) -> int:
+        return len(self._windows)
+
     def allow(self, key: str) -> bool:
-        now = time.monotonic()
+        now = self._clock()
         with self._lock:
-            hits = self._hits.setdefault(key, deque())
-            while hits and now - hits[0] > 60:
-                hits.popleft()
-            if len(hits) >= self.per_minute:
+            windows = self._windows
+            while windows:
+                start = next(iter(windows.values()))[0]
+                if now - start < self.window_s:
+                    break
+                windows.popitem(last=False)
+            entry = windows.get(key)
+            if entry is None:
+                windows[key] = [now, 1]
+                if len(windows) > self.max_keys:
+                    windows.popitem(last=False)
+                return True
+            if entry[1] >= self.per_minute:
                 return False
-            hits.append(now)
-            if len(self._hits) > 4096:  # forget idle keys
-                for k in [k for k, v in self._hits.items() if not v]:
-                    del self._hits[k]
+            entry[1] += 1
             return True
 
 

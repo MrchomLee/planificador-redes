@@ -249,19 +249,12 @@ class InstagramProvider(Provider):
             return self._after_publish(ctx)
         if not state.get("kind"):
             self._plan(ctx)
+        checked_cid: str | None = None
         if state.get("stage") == "committing":
             # A media_publish was sent without a recorded outcome: read the container before anything else.
-            check = self._remote_check(ctx)
-            if check.outcome == "published":
-                self._record_recovered(ctx, check)
+            checked_cid = state.get("commit_cid")
+            if self._recheck_commit(ctx):
                 return self._after_publish(ctx)
-            if check.outcome == "unknown":
-                raise ProviderError(
-                    ErrorKind.AMBIGUOUS,
-                    "ig_commit_unknown",
-                    "No se pudo confirmar si Instagram publicó el contenido. Revísalo en Instagram antes de "
-                    "reintentar.",
-                )
             mc.reopen_commit(ctx)
 
         if not state.get("quota_checked"):
@@ -302,6 +295,21 @@ class InstagramProvider(Provider):
                 return self._poll_result(verdict, wait)
 
         publish_container = self._publish_container(state) or {}
+        container_id = publish_container.get("container_id")
+        if (
+            container_id
+            and container_id == state.get("commit_cid")
+            and container_id != checked_cid
+            and publish_container.get("status") != "PUBLISHED"
+        ):
+            # media_publish already went out once for this container (refused, or reconciled as not
+            # published): the stored status is stale, so read it again before sending it a second time —
+            # Meta sometimes publishes despite answering with an error (§0, §4.1).
+            if self._recheck_commit(ctx):
+                return self._after_publish(ctx)
+            if not (self._publish_container(state) or {}).get("container_id"):
+                ctx.save_state(state)  # the container was ERROR/EXPIRED: start again with new ones
+                return StepResult("continue", message="Preparando la publicación en Instagram…")
         if publish_container.get("status") == "PUBLISHED":
             # Already live (e.g. an earlier attempt whose outcome was lost): never publish twice.
             media_id, permalink = self._find_published_media(ctx)
@@ -312,6 +320,23 @@ class InstagramProvider(Provider):
 
         self._release_urls(ctx)
         return self._publish(ctx)
+
+    def _recheck_commit(self, ctx: PublishContext) -> bool:
+        """Read the container of an earlier ``media_publish``: ``True`` when it is live (recorded as
+        published), ``False`` when it was not published; raises ``AMBIGUOUS`` when it cannot be told."""
+        check = self._remote_check(ctx)
+        if check.outcome == "published":
+            self._record_recovered(ctx, check)
+            ctx.log("ig_publish_recovered", "Instagram confirma que la publicación ya salió.", None)
+            return True
+        if check.outcome == "unknown":
+            raise ProviderError(
+                ErrorKind.AMBIGUOUS,
+                "ig_commit_unknown",
+                "No se pudo confirmar si Instagram publicó el contenido. Revísalo en Instagram antes de "
+                "reintentar.",
+            )
+        return False
 
     @staticmethod
     def _poll_result(verdict: str, wait: int | None) -> StepResult:
@@ -587,6 +612,8 @@ class InstagramProvider(Provider):
                 sent={"caption": ctx.target.text or ""},
             )
         except ProviderError as exc:
+            if exc.kind == ErrorKind.AMBIGUOUS and exc.code in mc.UNCERTAIN_COMMIT_CODES:
+                return self._verify_refused_commit(ctx, exc)
             if exc.code == "ig_media_not_ready":
                 count = int(state.get("not_ready") or 0) + 1
                 state["not_ready"] = count
@@ -612,6 +639,32 @@ class InstagramProvider(Provider):
         ctx.save_state(state)
         ctx.log("ig_published", "Publicado en Instagram.", {"media_id": str(media_id)})
         return self._after_publish(ctx)
+
+    def _verify_refused_commit(self, ctx: PublishContext, exc: ProviderError) -> StepResult:
+        """``media_publish`` was refused with an error Meta also returns when the post went out (action block
+        2207051): read the container before anything else (§0, §4.1). Live → recorded as published; not
+        published → the refusal stands (no retry, e.g. the 24 h hold); unreadable → ``AMBIGUOUS`` (the engine
+        reconciles later, never re-sends blindly)."""
+        refused = exc.__cause__ if isinstance(exc.__cause__, ProviderError) else exc
+        try:
+            check = self._remote_check(ctx)
+        except ProviderError as read_exc:
+            log.info("Instagram container unreadable after a refused media_publish: %s", read_exc.code)
+            raise exc from None
+        if check.outcome == "published":
+            self._record_recovered(ctx, check)
+            ctx.log(
+                "ig_publish_recovered",
+                "Instagram devolvió un error, pero confirma que la publicación salió.",
+                refused.detail,
+            )
+            return self._after_publish(ctx)
+        if check.outcome == "unknown":
+            raise exc
+        mc.mark_commit_rejected(ctx)
+        if refused.kind in (ErrorKind.PERMANENT, ErrorKind.AUTH):
+            self._release_urls(ctx)
+        raise refused
 
     def _after_publish(self, ctx: PublishContext) -> StepResult:
         state = ctx.state
@@ -898,11 +951,13 @@ class InstagramProvider(Provider):
             if info.get(field_name) is not None:
                 metrics[key] = int(info[field_name])
         since, until = mc.day_window(day)
+        series_since, series_until = mc.series_window(day)
         auth = mc.auth_params(settings, account.access_token)
         url = mc.graph_url(settings, f"{ig}/insights")
         window = {"period": "day", "since": str(since), "until": str(until)}
+        series_params = {**auth, "period": "day", "since": str(series_since), "until": str(series_until)}
         try:
-            series = mc.fetch_insights(http, url, {**auth, **window}, ["reach"])
+            series = mc.fetch_insights(http, url, series_params, ["reach"])
             totals = mc.fetch_insights(
                 http, url, {**auth, **window, "metric_type": "total_value"}, ACCOUNT_TOTAL_METRICS
             )
@@ -925,6 +980,8 @@ class InstagramProvider(Provider):
     def fetch_recent_posts(
         self, account: AccountCreds, settings: ProviderSettings, http: httpx.Client, since: datetime
     ) -> list[PostMetricData]:
+        """Feed/reels from ``/{ig}/media`` plus the live stories from ``/{ig}/stories`` — the media edge never
+        lists stories, and their insights disappear when they expire after 24 h (§0, §5.4)."""
         mc.ensure_background_budget()
         since = since if since.tzinfo else since.replace(tzinfo=UTC)
         ig = account.external_id
@@ -936,64 +993,92 @@ class InstagramProvider(Provider):
             "limit": "50",
         }
         posts: list[PostMetricData] = []
-        insights_ok = True
+        insights = {"ok": True}
         for item in mc.iter_paginated(http, mc.graph_url(settings, f"{ig}/media"), params, max_pages=5):
             published = mc.parse_time(item.get("timestamp"))
             if published is not None and published < since:
                 break  # newest first
-            media_id = str(item.get("id"))
-            product = str(item.get("media_product_type") or "").upper()
-            media_type = str(item.get("media_type") or "").upper()
-            metrics: dict[str, float | int] = {}
-            if item.get("like_count") is not None:
-                metrics["likes"] = int(item["like_count"])
-            if item.get("comments_count") is not None:
-                metrics["comments"] = int(item["comments_count"])
-            if insights_ok and not mc.background_paused():
-                wanted = STORY_METRICS if product == "STORY" else MEDIA_METRICS
-                try:
-                    entries = mc.fetch_insights(
-                        http, mc.graph_url(settings, f"{media_id}/insights"), dict(auth), wanted
-                    )
-                    for name, key in MEDIA_METRIC_KEYS.items():
-                        if name in entries:
-                            value = mc.insight_value(entries[name])
-                            if value is not None:
-                                metrics[key] = value
-                except ProviderError as exc:
-                    if mc.is_token_error(exc):
-                        raise
-                    if exc.kind == ErrorKind.RATE_LIMITED:
-                        insights_ok = False
-                    log.info("Instagram media insights unavailable: %s", exc.code)
-            if "interactions" not in metrics and any(
-                k in metrics for k in ("likes", "comments", "shares", "saves")
+            posts.append(self._post_metrics(http, settings, auth, item, published, insights))
+        seen = {p.external_id for p in posts}
+        story_params = {
+            **auth,
+            "fields": "id,caption,media_type,media_product_type,media_url,thumbnail_url,permalink,timestamp",
+            "limit": "50",
+        }
+        try:
+            for item in mc.iter_paginated(
+                http, mc.graph_url(settings, f"{ig}/stories"), story_params, max_pages=3
             ):
-                metrics["interactions"] = sum(
-                    int(metrics.get(k) or 0) for k in ("likes", "comments", "shares", "saves")
-                )
-            eng = mc.engagement(metrics)
-            if eng is not None:
-                metrics["engagement"] = eng
-            if product == "REELS":
-                kind = "REEL"
-            elif product == "STORY":
-                kind = "STORY"
-            else:
-                kind = media_type or None
-            posts.append(
-                PostMetricData(
-                    external_id=media_id,
-                    published_at=published,
-                    permalink=item.get("permalink"),
-                    caption=item.get("caption"),
-                    media_type=kind,
-                    thumbnail_url=item.get("thumbnail_url")
-                    or (item.get("media_url") if media_type == "IMAGE" else None),
-                    metrics=metrics,
-                )
-            )
+                published = mc.parse_time(item.get("timestamp"))
+                if str(item.get("id")) in seen or (published is not None and published < since):
+                    continue
+                item.setdefault("media_product_type", "STORY")
+                posts.append(self._post_metrics(http, settings, auth, item, published, insights))
+        except ProviderError as exc:
+            if mc.is_token_error(exc) or exc.kind == ErrorKind.RATE_LIMITED:
+                raise
+            log.info("Instagram stories unavailable: %s", exc.code)
         return posts
+
+    @staticmethod
+    def _post_metrics(
+        http: httpx.Client,
+        settings: ProviderSettings,
+        auth: dict,
+        item: dict,
+        published: datetime | None,
+        insights: dict[str, bool],
+    ) -> PostMetricData:
+        media_id = str(item.get("id"))
+        product = str(item.get("media_product_type") or "").upper()
+        media_type = str(item.get("media_type") or "").upper()
+        metrics: dict[str, float | int] = {}
+        if item.get("like_count") is not None:
+            metrics["likes"] = int(item["like_count"])
+        if item.get("comments_count") is not None:
+            metrics["comments"] = int(item["comments_count"])
+        if insights["ok"] and not mc.background_paused():
+            wanted = STORY_METRICS if product == "STORY" else MEDIA_METRICS
+            try:
+                entries = mc.fetch_insights(
+                    http, mc.graph_url(settings, f"{media_id}/insights"), dict(auth), wanted
+                )
+                for name, key in MEDIA_METRIC_KEYS.items():
+                    if name in entries:
+                        value = mc.insight_value(entries[name])
+                        if value is not None:
+                            metrics[key] = value
+            except ProviderError as exc:
+                if mc.is_token_error(exc):
+                    raise
+                if exc.kind == ErrorKind.RATE_LIMITED:
+                    insights["ok"] = False
+                log.info("Instagram media insights unavailable: %s", exc.code)
+        if "interactions" not in metrics and any(
+            k in metrics for k in ("likes", "comments", "shares", "saves")
+        ):
+            metrics["interactions"] = sum(
+                int(metrics.get(k) or 0) for k in ("likes", "comments", "shares", "saves")
+            )
+        eng = mc.engagement(metrics)
+        if eng is not None:
+            metrics["engagement"] = eng
+        if product == "REELS":
+            kind: str | None = "REEL"
+        elif product == "STORY":
+            kind = "STORY"
+        else:
+            kind = media_type or None
+        return PostMetricData(
+            external_id=media_id,
+            published_at=published,
+            permalink=item.get("permalink"),
+            caption=item.get("caption"),
+            media_type=kind,
+            thumbnail_url=item.get("thumbnail_url")
+            or (item.get("media_url") if media_type == "IMAGE" else None),
+            metrics=metrics,
+        )
 
     # ------------------------------------------------------------------------------------- comments
 

@@ -5,7 +5,10 @@ Data flow
 :func:`snapshot_all` runs daily (scheduler job) and on demand ("Actualizar ahora"). For every connected
 account it asks the provider for today's :class:`~planificador.providers.base.AccountSnapshot` (upserted into
 ``analytics_snapshots``; YouTube also returns a short ``history`` of daily Analytics rows that lag 2-3 days,
-which is merged into the previous days) and for the posts of the last 30 days (upserted into ``post_metrics``,
+which is merged into the previous days). Facebook and Instagram daily insights are partial for the current
+day and settle within ~48 h (report 02 §5), so every run also re-reads the *flow* metrics of the last
+:data:`FLOW_REFRESH_DAYS` completed days and overwrites them (stock metrics are only taken for today).
+Then it asks for the posts of the last 30 days (upserted into ``post_metrics``,
 linked to our ``post_targets`` by external id). Failures are recorded per account in
 ``account.meta["analytics_error"]`` and never propagate.
 
@@ -42,6 +45,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from planificador.csvsafe import protect_cell
 from planificador.models import (
     Account,
     AccountStatus,
@@ -68,6 +72,11 @@ MAX_CUSTOM_DAYS = 400
 
 #: Networks whose metrics are shown natively only (no derived interactions/engagement).
 NATIVE_ONLY_NETWORKS = frozenset({"youtube"})
+
+#: Networks whose daily flow metrics (views, reach, interactions...) are re-read for the last completed days
+#: on every run: Meta returns a partial value for a day that is still running and its insights lag ~48 h.
+FLOW_REFRESH_NETWORKS = frozenset({"facebook", "instagram"})
+FLOW_REFRESH_DAYS = 3
 
 STOCK_METRICS = frozenset(
     {"followers", "following", "posts_count", "likes_total", "video_count", "views_total"}
@@ -552,6 +561,8 @@ def snapshot_account(
         notice = getattr(snap, "notice", None)
         if notice and notice not in notices:
             notices.append(str(notice))
+    if str(account.network) in FLOW_REFRESH_NETWORKS:
+        snapshots += _refresh_completed_days(db, provider, account, creds, settings, http, today, now)
 
     posts = provider.fetch_recent_posts(creds, settings, http, now - timedelta(days=RECENT_POSTS_DAYS))
     notice = getattr(posts, "notice", None)
@@ -559,6 +570,39 @@ def snapshot_account(
         notices.append(str(notice))
     count = _upsert_posts(db, account, posts or [], now)
     return {"snapshots": snapshots, "posts": count, "notices": notices, "skipped": False}
+
+
+def _refresh_completed_days(
+    db: Session,
+    provider: Any,
+    account: Account,
+    creds: Any,
+    settings: ProviderSettings,
+    http: httpx.Client,
+    today: date,
+    now: datetime,
+) -> int:
+    """Overwrite the flow metrics of the last :data:`FLOW_REFRESH_DAYS` completed days with fresh values
+    (today's own row only holds the part of the day elapsed at fetch time). Stock metrics of past days are
+    left alone: the provider can only report their current value. Best effort: a failure keeps what we had."""
+    updated = 0
+    for back in range(1, FLOW_REFRESH_DAYS + 1):
+        day = today - timedelta(days=back)
+        try:
+            snap = provider.fetch_account_snapshot(creds, settings, http, day)
+        except (ProviderError, httpx.HTTPError) as exc:
+            log.info(
+                "Could not refresh %s analytics of account %s for %s: %s",
+                account.network,
+                account.id,
+                day,
+                getattr(exc, "code", type(exc).__name__),
+            )
+            break
+        flows = {k: v for k, v in (getattr(snap, "metrics", None) or {}).items() if k in FLOW_METRICS}
+        if _upsert_snapshot(db, account.id, day, flows, now):
+            updated += 1
+    return updated
 
 
 def snapshot_all(
@@ -757,6 +801,11 @@ def metric_value(rows: Iterable[AnalyticsSnapshot], metric: str) -> float | None
     return sum(values)
 
 
+def _days_with(rows: Iterable[AnalyticsSnapshot], metric: str) -> int:
+    """How many distinct days of ``rows`` carry a value for ``metric``."""
+    return len({r.day for r in rows if _num((r.metrics or {}).get(metric)) is not None})
+
+
 def series(
     db: Session, account: Account, metric: str, start: date, end: date
 ) -> list[tuple[date, float | None]]:
@@ -909,7 +958,9 @@ def kpis(db: Session, account: Account, start: date, end: date, *, compare: bool
 
     Keys: every snapshot metric present (stock → last value, flow → sum), ``posts`` (posts published in the
     period), ``post_<metric>`` (sums over those posts), ``followers_net`` (follower balance) and
-    ``engagement`` (weighted, not for YouTube). Each value is ``{"value", "previous", "change_pct"}``.
+    ``engagement`` (weighted, not for YouTube). Each value is ``{"value", "previous", "change_pct"}``; a flow
+    metric whose previous period has fewer days of data than the current one is not compared (``previous``
+    and ``change_pct`` are ``None`` and ``previous_incomplete`` is set).
     """
     network = str(account.network)
     period = Period(start, end)
@@ -923,7 +974,16 @@ def kpis(db: Session, account: Account, start: date, end: date, *, compare: bool
         keys.discard("interactions")
     out: dict[str, Any] = {}
     for key in sorted(keys):
-        out[key] = _kpi(metric_value(cur_rows, key), metric_value(prev_rows, key), compare)
+        previous = metric_value(prev_rows, key)
+        incomplete = False
+        if compare and previous is not None and key in FLOW_METRICS:
+            # A flow metric is a sum over days: a previous period with fewer days of data than the current
+            # one (account connected during it, PC off for days) would fake a huge growth. No comparison then.
+            if _days_with(prev_rows, key) < _days_with(cur_rows, key):
+                previous, incomplete = None, True
+        out[key] = _kpi(metric_value(cur_rows, key), previous, compare)
+        if incomplete:
+            out[key]["previous_incomplete"] = True
 
     cur_posts = posts_in(db, account, period.start, period.end)
     prev_posts = posts_in(db, account, prev.start, prev.end) if compare else []
@@ -1018,7 +1078,8 @@ def _csv_value(value: Any) -> str:
         if value.is_integer():
             return str(int(value))
         return f"{value:.2f}".rstrip("0").rstrip(".").replace(".", ",")
-    return str(value)
+    # Captions, permalinks and account names come from the networks: never let a spreadsheet run them.
+    return protect_cell(str(value))
 
 
 def _csv_text(header: list[str], rows: Iterable[list[Any]]) -> str:

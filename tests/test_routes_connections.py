@@ -969,6 +969,25 @@ def test_lock_test_runs_in_background_and_stores_result(
     assert "YouTube respetó la visibilidad." in r.text and "Subidas automáticas permitidas" in r.text
 
 
+def test_lock_test_keeps_the_clip_id_for_the_24h_recheck(
+    csrf_client: Any, db: Session, brand: Brand, inline_background: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ``unlocked`` clip kept for the re-check is stored by id, so the follow-up reads that video instead
+    of looking for it by title among the latest uploads."""
+    from planificador.providers import youtube
+
+    set_google(db)
+    acc = _yt_account(db, brand)
+    monkeypatch.setattr(
+        youtube,
+        "lock_test",
+        lambda *a, **k: youtube.LockTestResult("unlocked", "Sin bloqueo.", video_id="v9", deleted=False),
+    )
+    csrf_client.post(f"/conexiones/{acc.id}/youtube/prueba-bloqueo", headers={"HX-Request": "true"})
+    db.expire_all()
+    assert db.get(Account, acc.id).meta["youtube_lock_test"]["video_id"] == "v9"
+
+
 def test_lock_test_locked_and_error(
     csrf_client: Any, db: Session, brand: Brand, inline_background: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

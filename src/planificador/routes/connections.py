@@ -55,9 +55,12 @@ from planificador.deps import ActiveBrand, ClockDep, DbSession
 from planificador.models import (
     Account,
     AccountStatus,
+    AnalyticsSnapshot,
     Brand,
+    InboxComment,
     Network,
     OAuthState,
+    PostMetric,
     PostTarget,
     TargetStatus,
 )
@@ -416,6 +419,22 @@ def _forget_pending(request: Request, nonce: str) -> None:
 # --------------------------------------------------------------------------------------- account upsert
 
 
+def reset_account_history(db: Session, account_id: int) -> None:
+    """Forget everything stored for what the account row pointed at before: daily analytics snapshots, post
+    metrics («Mejores posts», best times, CSV), inbox comments and the inbox poll bookmark. Used when the row
+    is reused for a *different* page / Instagram account / channel (one account per network per brand), so
+    the new one neither inherits the old follower history and comments (whose replies would fail) nor starts
+    its comment import from the old bookmark instead of the full window. Flushes, does not commit."""
+    from planificador import inbox
+
+    for model in (AnalyticsSnapshot, PostMetric, InboxComment):
+        db.execute(delete(model).where(model.account_id == account_id))
+    state = inbox.poll_state(db)
+    if state.pop(str(account_id), None) is not None:
+        config.set_setting(db, inbox.STATE_KEY, state, commit=False)
+    db.flush()
+
+
 def upsert_account(
     db: Session,
     brand_id: int,
@@ -436,7 +455,11 @@ def upsert_account(
 ) -> Account:
     """Create or update the brand's account for ``network`` (one per network per brand) as ``connected``
     with freshly encrypted tokens. ``meta`` replaces the stored meta, except the ``keep_meta`` keys when the
-    same external account reconnects. Expiry-warning bookkeeping (``*_warned``) is always reset."""
+    same external account reconnects. Expiry-warning bookkeeping (``*_warned``) is always reset.
+
+    A *different* external account replacing the brand's current one keeps the row (scheduled posts follow
+    it) but drops the previous account's analytics, post metrics and comments
+    (:func:`reset_account_history`)."""
     account = _brand_account(db, brand_id, network)
     old_meta: dict[str, Any] = {}
     if account is None:
@@ -445,7 +468,14 @@ def upsert_account(
     else:
         if account.external_id == external_id:
             old_meta = dict(account.meta or {})
-        elif account.avatar_path:
+        else:
+            log.info(
+                "Account %s (%s) now points at another %s account: resetting its history",
+                account.id,
+                network,
+                network,
+            )
+            reset_account_history(db, account.id)
             account.avatar_path = None
     new_meta = {k: v for k, v in old_meta.items() if k in keep_meta}
     new_meta.update({k: v for k, v in (meta or {}).items() if v is not None})
@@ -1467,20 +1497,23 @@ def check_account(request: Request, account_id: int, db: DbSession, clock: Clock
 
 def _lock_test_call(
     creds: AccountCreds, ps: ProviderSettings, http: httpx.Client, clock: Clock
-) -> tuple[str, str]:
+) -> tuple[str, str, str | None]:
+    """``(status, message, kept clip id)``: the clip of an ``unlocked`` result is kept for the 24 h re-check
+    (``providers/followups.py``), which reads it by this id (by title among the recent uploads without it)."""
     from planificador.providers import youtube
 
     detailed = getattr(youtube, "lock_test", None)
     if callable(detailed):
         result = detailed(creds, ps, http, clock)
-        return str(result.status), str(result.message)
+        kept = getattr(result, "video_id", None) if not getattr(result, "deleted", False) else None
+        return str(result.status), str(result.message), str(kept) if kept else None
     status = str(youtube.run_lock_test(creds, ps, http, clock))
     messages = {
         "unlocked": "YouTube respetó la visibilidad del vídeo de prueba: ya puedes publicar automáticamente.",
         "locked": "YouTube dejó el vídeo de prueba como privado: usa la publicación asistida.",
         "error": "No se pudo completar la prueba.",
     }
-    return status, messages.get(status, messages["error"])
+    return status, messages.get(status, messages["error"]), None
 
 
 def run_lock_test_job(app_state: Any, account_id: int) -> None:
@@ -1498,9 +1531,10 @@ def run_lock_test_job(app_state: Any, account_id: int) -> None:
             ps = config.provider_settings(s, base_url=app_state.settings.base_url)
             creds = account.to_creds()
         before = (creds.access_token, creds.refresh_token)
+        video_id: str | None = None
         try:
             with _http_client() as http:
-                status, message = _lock_test_call(creds, ps, http, clock)
+                status, message, video_id = _lock_test_call(creds, ps, http, clock)
         except ProviderError as exc:
             status, message = "error", f"No se pudo completar la prueba: {exc.message}"
         except Exception as exc:  # noqa: BLE001 - reported to the user
@@ -1530,6 +1564,8 @@ def run_lock_test_job(app_state: Any, account_id: int) -> None:
                 "message": message,
                 "finished_at": clock.now().isoformat(),
             }
+            if video_id and status == "unlocked":
+                meta["youtube_lock_test"]["video_id"] = video_id
             account.meta = meta
             s.commit()
     finally:

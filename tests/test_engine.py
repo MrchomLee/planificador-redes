@@ -1033,16 +1033,24 @@ def test_cancel_native_scheduled_post_deletes_it_on_the_network(db, clock):
     assert events(db, target) == ["native_cancelled", "cancelled"]
 
 
-def test_cancel_native_without_provider_support_warns(db, clock):
+def test_cancel_native_without_provider_support_is_refused(db, clock):
     registry.register(NativeFacebook(supports_cancel=False))
     account = make_account(db, network="facebook")
     target = make_target(db, account, at=clock.now() + timedelta(days=1), status=TargetStatus.PUBLISHED)
     t = fresh(db, target)
     t.provider_state = {"native_scheduled": True}
     db.commit()
-    engine.cancel_target(db, target.id, clock)
+    # Still scheduled on Facebook: never reported as cancelled.
+    with pytest.raises(EngineError) as info:
+        engine.cancel_target(db, target.id, clock)
+    assert info.value.code == "native_cancel_failed"
+    assert "bórrala directamente en Facebook" in info.value.message
+    assert fresh(db, target).status == TargetStatus.PUBLISHED
+    assert events(db, target) == ["native_cancel_failed"]
+    # The user confirmed they deleted it on Facebook themselves: cancelled here, with a warning.
+    engine.cancel_target(db, target.id, clock, force=True)
     assert fresh(db, target).status == TargetStatus.CANCELLED
-    assert events(db, target) == ["cancelled", "native_cancel"]
+    assert events(db, target) == ["native_cancel_failed", "cancelled", "native_cancel"]
 
     # Once its time has passed, a natively scheduled post is live: not cancellable.
     live = make_target(db, account, at=clock.now() - timedelta(minutes=1), status=TargetStatus.PUBLISHED)
@@ -1365,8 +1373,13 @@ def test_cancel_native_falls_back_to_delete_post(db, clock, ok):
     t.provider_state = {"native_scheduled": True}
     t.external_id = "123_456"
     db.commit()
-    engine.cancel_target(db, target.id, clock)
+    if ok:
+        engine.cancel_target(db, target.id, clock)
+    else:
+        with pytest.raises(EngineError):
+            engine.cancel_target(db, target.id, clock)
     assert provider.deleted == ["123_456"]
-    assert fresh(db, target).status == TargetStatus.CANCELLED
-    expected = ["native_cancelled", "cancelled"] if ok else ["cancelled", "native_cancel"]
+    expected_status = TargetStatus.CANCELLED if ok else TargetStatus.PUBLISHED
+    assert fresh(db, target).status == expected_status
+    expected = ["native_cancelled", "cancelled"] if ok else ["native_cancel_failed"]
     assert events(db, target) == expected

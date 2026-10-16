@@ -13,7 +13,7 @@ JSON / actions:
 - ``GET  /api/planificacion/mejores-horas?red=``                  best-times matrix (7x24, Mon=0) + 5 levels
 - ``POST /api/planificacion/publicaciones/{id}/reprogramar``      drag & drop (form field ``start``)
 - ``POST /planificacion/zona-horaria``                            change the active brand's time zone
-- ``POST /planificacion/lista/acciones``                          bulk ``duplicar`` / ``papelera``
+- ``POST /planificacion/lista/acciones``                          bulk: duplicar, reprogramar, papelera
 - ``POST /ideas/{id}/etapa`` · ``POST /ideas/{id}/acciones``      Ideas column change / card menu
 - ``POST /papelera/{id}/restaurar`` · ``/papelera/{id}/eliminar`` · ``/papelera/vaciar``
 
@@ -106,6 +106,10 @@ IDEA_COLUMN_HINTS = {
     "lista": "Listas para programar",
 }
 BULK_ACTIONS = frozenset({"duplicar", "papelera"})
+#: Lista's "Acciones en bloque" (doc 05 §5c): Duplicar, Reprogramar, Mover a la papelera.
+LIST_BULK_ACTIONS = BULK_ACTIONS | {"reprogramar"}
+#: Bulk "Reprogramar" moves the selected posts by a signed number of days and hours (brand wall time).
+SHIFT_MAX_DAYS = 365
 LIST_DEFAULT_PAST_DAYS = 7
 LIST_DEFAULT_FUTURE_DAYS = 30
 LIST_MAX_SPAN_DAYS = 400
@@ -1008,6 +1012,38 @@ def change_timezone(
     return RedirectResponse(safe_next_path(next, "/planificacion"), status_code=303)
 
 
+def parse_shift(dias: str, horas: str) -> timedelta:
+    """Signed day/hour offset of the bulk «Reprogramar» (empty = 0); at least one must be non-zero.
+
+    Errors use 400, not 422: htmx swaps 422 answers into the target, which here is the list itself."""
+    try:
+        days = int((dias or "0").strip() or "0")
+        hours = int((horas or "0").strip() or "0")
+    except ValueError as exc:
+        raise PlannerError("Indica cuántos días y horas mover (números enteros).", 400) from exc
+    if abs(days) > SHIFT_MAX_DAYS or abs(hours) > 23:
+        raise PlannerError(f"Como máximo se pueden mover {SHIFT_MAX_DAYS} días y 23 horas.", 400)
+    if not days and not hours:
+        raise PlannerError("Indica cuántos días u horas quieres mover las publicaciones.", 400)
+    return timedelta(days=days, hours=hours)
+
+
+def shifted_time(post: Post, shift: timedelta, tz: str, clock: Clock) -> datetime:
+    """New UTC instant for ``post`` moved by ``shift`` in brand wall time (PlannerError if it cannot move)."""
+    name = f"«{excerpt(_post_text(post), 40) or 'Sin texto'}»"
+    if not is_movable(post):
+        raise PlannerError(
+            f"{name} no se puede mover: solo se reprograman publicaciones programadas o en borrador.", 409
+        )
+    local = to_brand_local(post.scheduled_at, tz)
+    if local is None:
+        raise PlannerError(f"{name} no tiene fecha: prográmala desde su detalle.", 409)
+    new_at = from_brand_local(local.replace(tzinfo=None) + shift, tz)
+    if new_at <= clock.now():
+        raise PlannerError(f"{name} quedaría en una fecha pasada.", 422)
+    return new_at
+
+
 @router.post("/planificacion/lista/acciones")
 def list_bulk_action(
     request: Request,
@@ -1016,19 +1052,31 @@ def list_bulk_action(
     clock: ClockDep,
     accion: Annotated[str, Form()] = "",
     ids: Annotated[list[int] | None, Form()] = None,
+    dias: Annotated[str, Form()] = "",
+    horas: Annotated[str, Form()] = "",
     q: Annotated[str | None, Form()] = None,
     desde: Annotated[str | None, Form()] = None,
     hasta: Annotated[str | None, Form()] = None,
     redes: Annotated[list[str] | None, Form()] = None,
     estados: Annotated[list[str] | None, Form()] = None,
 ) -> Response:
-    """Bulk (or single-row menu) actions of the Lista tab; answers the refreshed list + a toast."""
+    """Bulk (or single-row menu) actions of the Lista tab; answers the refreshed list + a toast.
+
+    ``reprogramar`` moves every selected post by ``dias`` days and ``horas`` hours (signed integers) in the
+    brand's wall time, so a post at 10:00 stays at 10:00 across a DST change. Posts that cannot move (already
+    published, without a date, or that would land in the past) are skipped and reported."""
     action = accion.strip().lower()
-    if action not in BULK_ACTIONS:
+    if action not in LIST_BULK_ACTIONS:
         return _error_response(request, "Acción no válida.", 422)
     wanted = list(dict.fromkeys(ids or []))
     if not wanted:
         return _error_response(request, "Selecciona al menos una publicación.", 422)
+    shift: timedelta | None = None
+    if action == "reprogramar":
+        try:
+            shift = parse_shift(dias, horas)
+        except PlannerError as exc:
+            return _error_response(request, exc.message, exc.status_code)
     posts = [db.get(Post, pid) for pid in wanted]
     if any(p is None or p.brand_id != brand.id or p.deleted_at is not None for p in posts):
         return _error_response(request, "Alguna de las publicaciones ya no existe.", 404)
@@ -1038,10 +1086,14 @@ def list_bulk_action(
         return _error_response(request, exc.message, exc.status_code)
     done = 0
     errors: list[str] = []
+    tz = brand_tz(brand)
+    by_id = {p.id: p for p in posts if p is not None}
     for pid in wanted:
         try:
             if action == "duplicar":
                 svc.duplicate_post(db, pid, clock)
+            elif shift is not None:  # reprogramar
+                svc.reschedule_post(db, pid, shifted_time(by_id[pid], shift, tz, clock), clock)
             else:
                 svc.delete_post(db, pid, clock)
             db.commit()
@@ -1052,6 +1104,8 @@ def list_bulk_action(
     db.expire_all()
     if action == "duplicar":
         message = "Publicación duplicada." if done == 1 else f"{done} publicaciones duplicadas."
+    elif action == "reprogramar":
+        message = "Publicación reprogramada." if done == 1 else f"{done} publicaciones reprogramadas."
     else:
         message = (
             "Publicación movida a la papelera."
@@ -1061,7 +1115,10 @@ def list_bulk_action(
     kind = "success"
     if errors:
         kind = "warning" if done else "error"
-        message = (message + " " if done else "") + errors[0]
+        detail = errors[0]
+        if len(errors) > 1:
+            detail = f"{len(errors)} no se han podido procesar. {detail}"
+        message = (message + " " if done else "") + detail
     if _wants_json(request):
         return JSONResponse({"ok": not errors, "done": done, "errors": errors, "message": message})
     lctx = _list_ctx(db, brand, clock, q=q, desde=desde, hasta=hasta, redes=redes, estados=estados)

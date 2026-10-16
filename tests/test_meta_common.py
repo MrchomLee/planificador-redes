@@ -185,7 +185,9 @@ def test_classify_blocked_and_quota():
         (-1, 2207018, ErrorKind.PERMANENT, "ig_collaborators"),
         (-1, 2207078, ErrorKind.PERMANENT, "ig_trial_reel_unavailable"),
         (10, 2207050, ErrorKind.PERMANENT, "ig_user_restricted"),
+        (4, 2207051, ErrorKind.PERMANENT, "ig_activity_restricted"),  # Meta sends code 4 (throttling)
         (-1, 2207051, ErrorKind.PERMANENT, "ig_activity_restricted"),
+        (-1, 2207001, ErrorKind.TRANSIENT, "ig_server_error"),
         (20, 1772107, ErrorKind.PERMANENT, "ig_comment_failed"),
         (100, 1366046, ErrorKind.PERMANENT, "fb_photo_invalid"),
         (100, 1609005, ErrorKind.PERMANENT, "fb_link_scrape"),
@@ -198,6 +200,21 @@ def test_classify_error_map(code, sub, kind, our):
     assert exc.kind == kind
     assert exc.code == our
     assert exc.message  # Spanish, user facing
+
+
+def test_classify_action_block_code_4_is_not_a_plain_rate_limit():
+    exc = mc.classify_meta_error(400, err(4, 2207051, "We restrict certain activity"), {})
+    assert exc.kind == ErrorKind.PERMANENT and exc.code == "ig_activity_restricted"
+    assert exc.retry_after == mc.ACTION_BLOCK_WAIT and "24 horas" in exc.message
+    plain = mc.classify_meta_error(400, err(4, None, "Application request limit reached"), {})
+    assert plain.kind == ErrorKind.RATE_LIMITED and plain.code == "meta_rate_limited"
+
+
+def test_classify_2207001_is_a_retryable_server_error():
+    exc = mc.classify_meta_error(400, err(-1, 2207001, "Instagram server error", is_transient=True), {})
+    assert exc.kind == ErrorKind.TRANSIENT and exc.code == "ig_server_error"
+    assert exc.retry_after == mc.IG_SERVER_ERROR_WAIT and "spam" not in exc.message
+    assert exc.code not in mc.DEFINITE_TRANSIENT_CODES  # on media_publish → AMBIGUOUS → read the container
 
 
 def test_classify_message_based_cases():
@@ -625,6 +642,20 @@ def test_insight_value_shapes():
     assert mc.day_window(date(2026, 1, 1)) == (1767225600, 1767312000)
 
 
+def test_insight_value_never_returns_another_days_number():
+    """Re-reading a completed day must not store a neighbouring day's value under it (core review [12])."""
+    day = date(2026, 11, 2)
+    only_previous = {"values": [{"value": 5, "end_time": "2026-11-02T08:00:00+0000"}]}
+    assert mc.insight_value(only_previous, day) is None
+    assert mc.insight_value(only_previous) == 5
+    utc_closed = {"values": [{"value": 7, "end_time": "2026-11-03T00:00:00+0000"}]}
+    assert mc.insight_value(utc_closed, day) == 7
+    undated = {"values": [{"value": 4}]}
+    assert mc.insight_value(undated, day) == 4
+    since, until = mc.series_window(day)
+    assert until - since == 2 * 86400 and since == mc.day_window(day)[0]
+
+
 # --------------------------------------------------------------------------------------------- images
 
 
@@ -738,6 +769,21 @@ def test_run_commit_marks_state_and_converts_errors(http):
     with pytest.raises(ProviderError) as exc:
         mc.run_commit(ctx, "Facebook", not_connected)
     assert exc.value.kind == ErrorKind.TRANSIENT and ctx.state["commit_rejected"] is True
+
+
+def test_run_commit_uncertain_refusal_is_ambiguous_keeping_the_original(http):
+    original = mc.classify_meta_error(400, err(4, 2207051, "We restrict certain activity"), {})
+
+    def blocked():
+        raise original
+
+    ctx, saved, commits = _ctx(http)
+    with pytest.raises(ProviderError) as exc:
+        mc.run_commit(ctx, "Instagram", blocked)
+    assert exc.value.kind == ErrorKind.AMBIGUOUS and exc.value.code == "ig_activity_restricted"
+    assert exc.value.__cause__ is original and exc.value.retry_after == mc.ACTION_BLOCK_WAIT
+    assert exc.value.detail["refused_kind"] == "permanent"
+    assert ctx.state["stage"] == "committing" and "commit_rejected" not in ctx.state
 
 
 def test_prepare_image_prefers_media_derived_jpeg_via_current_database(tmp_path: Path, monkeypatch):

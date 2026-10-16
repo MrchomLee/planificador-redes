@@ -47,6 +47,7 @@ import random
 import re
 import secrets
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -61,10 +62,12 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from planificador.providers.base import (
+    FOLLOWUP_KEY,
     AccountCreds,
     AccountSnapshot,
     CommentData,
     ErrorKind,
+    FollowUpResult,
     FormatSpec,
     Issue,
     MediaInfo,
@@ -146,11 +149,18 @@ POLL_GIVE_UP = timedelta(minutes=30)
 POLL_ERROR_LIMIT = 5
 EXTRA_RETRY_LIMIT = 2  # transient retries for thumbnail / playlist / first comment
 EXTRA_RETRY_WAIT = 30
+EXTRA_RATE_WAIT_MAX = 15 * 60  # a rate limit on an extra is waited out only when it is this short
 
 NATIVE_SCHEDULE_MIN_LEAD = timedelta(seconds=60)  # publishAt only when still in the future
+#: Follow-up of a natively scheduled video (report 06 §7, §14.2): read its status after publishAt (detect_lock
+#: flags a video still private more than 15 min after publishAt).
+PUBLISH_AT_CHECK_DELAY = timedelta(minutes=16)
+FOLLOWUP_RETRY = timedelta(minutes=30)
+FOLLOWUP_MAX_ATTEMPTS = 12
 EARLY_START_TOLERANCE_S = 5  # a non-native upload never starts more than this before its scheduled time
 RECONCILE_LOOKBACK = timedelta(minutes=5)
 RECONCILE_RETRY_DELAY = 5
+RECONCILE_EMPTY_GRACE = timedelta(hours=1)  # videos.list may be empty right after an upload (report 06 §8)
 
 RATE_LIMIT_RETRY = 300  # rateLimitExceeded / 429 (report 06 §9.3)
 UPLOAD_LIMIT_RETRY = 24 * 3600  # uploadLimitExceeded (per-channel daily cap)
@@ -171,6 +181,11 @@ DEFAULT_CATEGORY = "22"  # People & Blogs / "Gente y blogs"
 COMMENT_PAGES = 5
 COMMENT_EXTRA_REPLY_FETCHES = 10
 COMMENT_LOOKBACK = timedelta(hours=2)
+#: Deep sweep (report 06 §11.1): ``order=time`` sorts threads by their top-level comment, so a new reply on an
+#: older thread sits behind newer threads. Regularly read many pages with no early stop.
+DEEP_SWEEP_EVERY = timedelta(days=7)
+DEEP_SWEEP_PAGES = 50
+DEEP_SWEEP_REPLY_FETCHES = 100
 RECENT_POSTS_PAGES = 4
 ANALYTICS_HISTORY_DAYS = 7  # Analytics lags 2–3 days: re-fetch the last week every day (report 06 §10.2)
 PLAYLIST_PAGES = 10
@@ -181,6 +196,7 @@ LOCK_TEST_SIZE = (360, 640)  # vertical
 LOCK_TEST_FPS = 15
 LOCK_TEST_POLL_DELAY = 10
 LOCK_TEST_POLL_MAX = 30  # ≈ 5 minutes
+LOCK_RECHECK_AFTER = timedelta(hours=24)  # report 06 §3.7: re-read the test video after 24 h, then delete it
 
 API_TIMEOUT = httpx.Timeout(30.0, connect=15.0)
 UPLOAD_TIMEOUT = httpx.Timeout(connect=15.0, read=120.0, write=120.0, pool=30.0)
@@ -199,7 +215,7 @@ _monotonic = time.monotonic
 # ------------------------------------------------------------------------------------------ messages
 
 MSG_RECONNECT = (
-    "La sesión de YouTube ha caducado o se ha revocado. Vuelve a conectar la cuenta en Conexiones."
+    "La sesión de YouTube ha caducado o se ha revocado. Vuelve a conectar la cuenta en Cuentas conectadas."
 )
 MSG_NOT_CONFIGURED = "Configura el ID de cliente y el secreto de Google en Ajustes → YouTube."
 MSG_TESTING = (
@@ -213,6 +229,10 @@ MSG_LOCKED = (
     "verlo. Usa la Publicación asistida o solicita la auditoría."
 )
 MSG_SCOPE = "Faltan permisos de YouTube: vuelve a conectar la cuenta y marca todas las casillas."
+MSG_NATIVE_SCHEDULED = (
+    "Programado en YouTube: se subió como privado y YouTube lo hará público a la hora indicada, aunque el PC "
+    "esté apagado."
+)
 
 PRIVACY_LABELS: dict[str, str] = {
     "public": "Pública",
@@ -379,6 +399,7 @@ class LockTestResult:
     video_id: str | None = None
     privacy_status: str | None = None
     deleted: bool = False
+    recheck_at: datetime | None = None  # unlocked: the clip is kept and read again then (confirm_lock_test)
 
 
 @dataclass
@@ -2315,12 +2336,8 @@ class YouTubeProvider(Provider):
             if res is not None:
                 return res
 
-        if st.get("native_scheduled"):
-            return self._finish(
-                ctx,
-                "Programado en YouTube: se subió como privado y YouTube lo hará público a la hora indicada, "
-                "aunque el PC esté apagado.",
-            )
+        # Natively scheduled videos are polled too: processing takes minutes while publishAt is usually hours
+        # away, and a failed / rejected video must not be reported as "programado" (report 06 §8).
         st["phase"] = "processing"
         st["processing_started_at"] = _iso(ctx.clock.now())
         st["poll_count"] = 0
@@ -2338,13 +2355,17 @@ class YouTubeProvider(Provider):
         except ProviderError as err:
             tries = int(st.get(f"{key}_errors") or 0) + 1
             st[f"{key}_errors"] = tries
-            if err.kind == ErrorKind.TRANSIENT and tries <= EXTRA_RETRY_LIMIT:
+            short_rate_limit = (
+                err.kind == ErrorKind.RATE_LIMITED and (err.retry_after or 0) <= EXTRA_RATE_WAIT_MAX
+            )
+            if (err.kind == ErrorKind.TRANSIENT or short_rate_limit) and tries <= EXTRA_RETRY_LIMIT:
                 ctx.save_state(st)
                 return StepResult("wait", wait_seconds=err.retry_after or EXTRA_RETRY_WAIT)
-            st[f"{key}_error"] = err.message
+            reason = _extra_failure_reason(err)
+            st[f"{key}_error"] = reason
             ctx.log(
                 f"youtube_{key}_failed",
-                f"El vídeo está en YouTube, pero {failure_es}: {err.message}",
+                f"El vídeo está en YouTube, pero {failure_es}: {reason}",
                 {"code": err.code, "detail": err.detail},
             )
         st[f"{key}_done"] = True
@@ -2535,7 +2556,12 @@ class YouTubeProvider(Provider):
         st = ctx.state
         video_id = str(st["video_id"])
         url = watch_url(video_id)
-        if message is None:
+        if st.get("native_scheduled"):
+            # The publishAt outcome (still private? lock?) is only known later: check it after that time.
+            self._schedule_publish_at_check(ctx)
+        if message is None and st.get("native_scheduled"):
+            message = MSG_NATIVE_SCHEDULED
+        elif message is None:
             privacy = st.get("returned_privacy") or st.get("requested_privacy")
             if privacy == "unlisted":
                 message = "Subido a YouTube como oculto (no listado)."
@@ -2550,6 +2576,81 @@ class YouTubeProvider(Provider):
         )
         ctx.save_state(st)
         return StepResult("published", external_id=video_id, external_url=url, message=message)
+
+    # -- follow-up after publishAt ----------------------------------------------------------------------
+
+    def _schedule_publish_at_check(self, ctx: PublishContext) -> None:
+        st = ctx.state
+        publish_at = _parse_iso(st.get("publish_at"))
+        if publish_at is None or st.get(FOLLOWUP_KEY):
+            return
+        when = max(publish_at + PUBLISH_AT_CHECK_DELAY, ctx.clock.now())
+        st[FOLLOWUP_KEY] = {"kind": "publish_at", "next_at": _iso(when), "attempts": 0}
+
+    def follow_up(self, ctx: PublishContext) -> FollowUpResult | None:
+        """After ``publishAt`` (+16 min) read the natively scheduled video again (report 06 §7/§14.2): failed
+        or rejected processing → the target fails; still private → the upload lock (account switched to
+        assisted publishing, the user is told); public → done."""
+        st = ctx.state
+        info = dict(st.get(FOLLOWUP_KEY) or {})
+        video_id = st.get("video_id")
+        if info.get("kind") != "publish_at" or not video_id or st.get("native_cancelled"):
+            return None
+        now = ctx.clock.now()
+        try:
+            items = _videos(self._api(ctx), [str(video_id)], "status,processingDetails", op="followup")
+        except ProviderError as err:
+            attempts = int(info.get("attempts") or 0) + 1
+            if attempts >= FOLLOWUP_MAX_ATTEMPTS:
+                return FollowUpResult(
+                    message="No se pudo comprobar si YouTube publicó el vídeo programado "
+                    f"({err.message}). Revísalo en YouTube Studio.",
+                    level="warning",
+                )
+            info["attempts"] = attempts
+            st[FOLLOWUP_KEY] = info
+            return FollowUpResult(next_at=now + FOLLOWUP_RETRY)
+        if not items:
+            st["phase"] = "failed"
+            return FollowUpResult(
+                failed=ProviderError(
+                    ErrorKind.PERMANENT,
+                    "youtube_native_missing",
+                    "El vídeo programado ya no está en YouTube (¿se borró?), así que no se ha publicado.",
+                    detail={"video_id": str(video_id)},
+                )
+            )
+        video = items[0]
+        status = video.get("status") or {}
+        processing = (video.get("processingDetails") or {}).get("processingStatus")
+        st["returned_privacy"] = status.get("privacyStatus")
+        st["upload_status"] = status.get("uploadStatus")
+        if status.get("uploadStatus") in ("failed", "rejected", "deleted") or processing in (
+            "failed",
+            "terminated",
+        ):
+            st["phase"] = "failed"
+            return FollowUpResult(failed=processing_error(video))
+        if status.get("privacyStatus") == "private":
+            publish_at = _parse_iso(status.get("publishAt")) or _parse_iso(st.get("publish_at"))
+            if detect_lock(video, st.get("requested_privacy"), now=now) and processing != "processing":
+                self._check_lock(ctx, video)
+                st["final_message"] = MSG_LOCKED
+                return FollowUpResult(level="error", notify=MSG_LOCKED)
+            attempts = int(info.get("attempts") or 0) + 1
+            if attempts < FOLLOWUP_MAX_ATTEMPTS:
+                info["attempts"] = attempts
+                st[FOLLOWUP_KEY] = info
+                later = publish_at + PUBLISH_AT_CHECK_DELAY if publish_at else now + FOLLOWUP_RETRY
+                return FollowUpResult(next_at=max(later, now + FOLLOWUP_RETRY))
+            return FollowUpResult(
+                message="El vídeo sigue privado en YouTube después de la hora programada. Revísalo en "
+                "YouTube Studio.",
+                level="warning",
+                notify="El vídeo programado sigue privado en YouTube después de la hora indicada. Revísalo "
+                "en YouTube Studio.",
+            )
+        return FollowUpResult(message="YouTube ha publicado el vídeo programado.")
 
     def _final_result(self, ctx: PublishContext) -> StepResult:
         st = ctx.state
@@ -2575,9 +2676,12 @@ class YouTubeProvider(Provider):
         api = self._api(ctx)
         video_id = st.get("video_id")
         if video_id:
+            # YouTube itself returned this id, so the video exists: a failed lookup is no reason to give up.
             try:
                 items = _videos(api, [str(video_id)], "status,processingDetails", op="reconcile")
             except ProviderError as err:
+                if err.kind in (ErrorKind.TRANSIENT, ErrorKind.RATE_LIMITED):
+                    raise  # the engine checks again later (never "unknown" over a network blip)
                 return ReconcileResult(
                     "unknown",
                     message=f"No se pudo consultar YouTube ({err.message}). Revisa tu canal en YouTube "
@@ -2589,13 +2693,25 @@ class YouTubeProvider(Provider):
                 if status.get("uploadStatus") in ("failed", "rejected", "deleted") or processing.get(
                     "processingStatus"
                 ) in ("failed", "terminated"):
+                    # YouTube will never show this video: nothing is live, a retry uploads it again.
                     reason = processing_error(items[0]).message
-                    return ReconcileResult("unknown", message=f"{reason} Revisa el vídeo en YouTube Studio.")
+                    return ReconcileResult(
+                        "not_published", message=f"{reason} No se ha publicado; se puede volver a subir."
+                    )
                 return ReconcileResult(
                     "published",
                     external_id=str(video_id),
                     external_url=watch_url(str(video_id)),
                     message="YouTube confirma que el vídeo existe." + self._extras_note(ctx),
+                )
+            uploaded = _parse_iso(st.get("final_chunk_at")) or _parse_iso(st.get("processing_started_at"))
+            if uploaded is not None and ctx.clock.now() - uploaded < RECONCILE_EMPTY_GRACE:
+                # videos.list can be empty for a while right after an upload (report 06 §8): look again.
+                raise ProviderError(
+                    ErrorKind.TRANSIENT,
+                    "youtube_video_not_listed_yet",
+                    "YouTube aún no muestra el vídeo recién subido; se volverá a comprobar.",
+                    detail={"video_id": str(video_id)},
                 )
             return ReconcileResult(
                 "unknown",
@@ -2870,10 +2986,20 @@ class YouTubeProvider(Provider):
     # --------------------------------------------------------------------------------- comments
 
     def fetch_comments(
-        self, account: AccountCreds, settings: ProviderSettings, http: httpx.Client, since: datetime
+        self,
+        account: AccountCreds,
+        settings: ProviderSettings,
+        http: httpx.Client,
+        since: datetime,
+        *,
+        deep: bool | None = None,
     ) -> list[CommentData]:
         """Comment threads of all the channel's videos (newest first, early stop 2 h before ``since``,
-        5 pages max). Replies hidden behind ``totalReplyCount`` are fetched with ``comments.list``."""
+        5 pages max). Replies hidden behind ``totalReplyCount`` are fetched with ``comments.list``.
+
+        A *deep sweep* (``deep=True``, or automatically on the first poll of each channel in this process and
+        then every :data:`DEEP_SWEEP_EVERY`) reads up to :data:`DEEP_SWEEP_PAGES` pages with no early stop, so
+        new replies on older threads are found too (report 06 §11.1)."""
         if not has_feature(granted_scopes(account), "comments"):
             raise ProviderError(
                 ErrorKind.AUTH,
@@ -2884,12 +3010,16 @@ class YouTubeProvider(Provider):
         since = ensure_utc(since)
         api = _Api(account, settings, http)
         channel_id = account.external_id
+        if deep is None:
+            deep = _deep_sweep_due(channel_id)
         stop_before = since - COMMENT_LOOKBACK
+        max_pages = DEEP_SWEEP_PAGES if deep else COMMENT_PAGES
+        max_reply_fetches = DEEP_SWEEP_REPLY_FETCHES if deep else COMMENT_EXTRA_REPLY_FETCHES
         out: list[CommentData] = []
         seen: set[str] = set()
         reply_fetches = 0
         page_token: str | None = None
-        for _ in range(COMMENT_PAGES):
+        for _ in range(max_pages):
             params: dict[str, Any] = {
                 "part": "snippet,replies",
                 "allThreadsRelatedToChannelId": channel_id,
@@ -2921,7 +3051,7 @@ class YouTubeProvider(Provider):
                         out.append(top_data)
                 replies = list((thread.get("replies") or {}).get("comments") or [])
                 total_replies = _int_or_none(tsnip.get("totalReplyCount")) or 0
-                if total_replies > len(replies) and reply_fetches < COMMENT_EXTRA_REPLY_FETCHES:
+                if total_replies > len(replies) and reply_fetches < max_reply_fetches:
                     reply_fetches += 1
                     replies = self._all_replies(api, top_id) or replies
                 for reply in replies:
@@ -2930,8 +3060,12 @@ class YouTubeProvider(Provider):
                         seen.add(data.external_id)
                         out.append(data)
             page_token = body.get("nextPageToken")
-            if not page_token or not threads or (oldest is not None and oldest < stop_before):
+            if not page_token or not threads:
                 break
+            if not deep and oldest is not None and oldest < stop_before:
+                break
+        if deep:
+            _record_deep_sweep(channel_id)
         return out
 
     def _all_replies(self, api: _Api, parent_id: str) -> list[dict[str, Any]]:
@@ -3131,6 +3265,41 @@ def _comment_data(
     )
 
 
+def _extra_failure_reason(err: ProviderError) -> str:
+    """Why an optional post-upload step was given up. Never repeats the "se reintentará" promise of
+    transient / rate-limit messages: extras are not retried once given up."""
+    studio = " Hazlo a mano en YouTube Studio."
+    if err.code == "youtube_quota_exceeded":
+        return "se agotó la cuota diaria de la API de YouTube de tu proyecto de Google." + studio
+    if err.kind == ErrorKind.RATE_LIMITED:
+        return "YouTube ha limitado temporalmente las peticiones." + studio
+    if err.kind == ErrorKind.TRANSIENT:
+        return "YouTube no respondió correctamente." + studio
+    return err.message
+
+
+_deep_sweeps: dict[str, datetime] = {}
+_deep_sweeps_lock = threading.Lock()
+
+
+def _deep_sweep_due(channel_id: str) -> bool:
+    """First comment poll of a channel in this process (the app starts every day) or one week later."""
+    with _deep_sweeps_lock:
+        last = _deep_sweeps.get(channel_id)
+    return last is None or datetime.now(UTC) - last >= DEEP_SWEEP_EVERY
+
+
+def _record_deep_sweep(channel_id: str) -> None:
+    with _deep_sweeps_lock:
+        _deep_sweeps[channel_id] = datetime.now(UTC)
+
+
+def reset_deep_sweeps() -> None:
+    """Forget when channels were last swept deeply (tests)."""
+    with _deep_sweeps_lock:
+        _deep_sweeps.clear()
+
+
 def processing_error(video: Mapping[str, Any]) -> ProviderError:
     """``failed``/``rejected`` processing → PERMANENT with a Spanish reason (report 06 §8)."""
     status = video.get("status") or {}
@@ -3201,18 +3370,44 @@ def make_test_video(
     return path
 
 
-def _upload_blocking(api: _Api, path: Path, mime: str, plan: UploadPlan) -> dict[str, Any]:
-    """Whole resumable upload in one go (small files only: the lock test)."""
+def _upload_blocking(
+    api: _Api, path: Path, mime: str, plan: UploadPlan, sent: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Whole resumable upload in one go (small files only: the lock test). ``sent["final"]`` becomes true
+    once the final chunk went out (the video may exist from then on). When that last request fails, or its
+    answer has no id, the session is asked (``bytes */TOTAL``) so the caller still learns the video id."""
+    sent = sent if sent is not None else {}
     total = path.stat().st_size
     session_uri = _start_session(api, plan, total, mime)
     offset = 0
     chunk = _chunk_size()
+
+    def recovered(error: ProviderError | None) -> dict[str, Any]:
+        try:
+            outcome, value = _query_session(api, session_uri, total)
+        except ProviderError:
+            outcome, value = None, None
+        if outcome == "complete" and isinstance(value, dict) and value.get("id"):
+            return value
+        if error is not None:
+            raise error
+        return {}
+
     for _ in range(total // chunk + 5):
         length = min(chunk, total - offset)
-        resp = _put_chunk(api, session_uri, path, offset, length, total, mime)
+        final = offset + length >= total
+        if final:
+            sent["final"] = True
+        try:
+            resp = _put_chunk(api, session_uri, path, offset, length, total, mime)
+        except ProviderError as err:
+            if final:
+                return recovered(err)
+            raise
         if resp.status_code in (200, 201):
             body = _json_or_none(resp)
-            return body if isinstance(body, dict) else {}
+            body = body if isinstance(body, dict) else {}
+            return body if body.get("id") else recovered(None)
         if resp.status_code != 308:
             raise ProviderError(
                 ErrorKind.TRANSIENT, "youtube_session_gone", "La sesión de subida de YouTube caducó."
@@ -3239,11 +3434,19 @@ def lock_test(
     clock: Clock,
     *,
     delete: bool = True,
+    keep_for_recheck: bool = True,
 ) -> LockTestResult:
     """ "Prueba de bloqueo" (report 06 §3.7): upload a unique 2-second vertical clip as **unlisted**
-    (``notifySubscribers=false``, not for kids), wait for processing, read ``status.privacyStatus`` back and
-    delete the clip. ``unlisted`` ⇒ unlocked; ``private`` ⇒ locked (unaudited project). Blocking (up to a
-    few minutes): run it from a background task."""
+    (``notifySubscribers=false``, not for kids), wait for processing and read ``status.privacyStatus`` back.
+
+    - ``private`` at any read ⇒ ``locked`` (we asked for unlisted: the unaudited-project lock).
+    - ``unlocked`` only when processing **succeeded** and the privacy read in that same response is
+      ``unlisted``/``public``. With ``keep_for_recheck`` the clip is then kept (``recheck_at`` = +24 h): the
+      lock may appear later, so :func:`confirm_lock_test` reads it again and deletes it (report 06 §3.7).
+    - Anything else (still processing after the polls, failed / rejected / deleted, unreadable) ⇒ ``error``:
+      nothing was proven, the publishing mode must not change.
+
+    Blocking (up to a few minutes): run it from a background task."""
     api = _Api(account, settings, http, clock)
     options = {
         "title": LOCK_TEST_TITLE,
@@ -3259,13 +3462,20 @@ def lock_test(
     )
     video_id: str | None = None
     privacy: str | None = None
+    sent: dict[str, Any] = {}
 
     def failed(message: str) -> LockTestResult:
         result = LockTestResult("error", message, video_id=video_id, privacy_status=privacy)
         if video_id and delete:
             result.deleted = _delete_video(api, video_id)
+        if sent.get("final") and not result.deleted:
+            result.message += (
+                f" Si aparece en tu canal un vídeo «{LOCK_TEST_TITLE}», bórralo en YouTube Studio."
+            )
         return result
 
+    processed = False
+    failure: Mapping[str, Any] | None = None
     try:
         with tempfile.TemporaryDirectory(prefix="planificador-yt-") as tmp:
             path = make_test_video(Path(tmp) / "prueba.mp4")
@@ -3287,19 +3497,29 @@ def lock_test(
             )
             target = TargetSpec("youtube", "short", description, [info], options, None, True)
             plan = build_upload_plan(target, now=clock.now())
-            video = _upload_blocking(api, path, "video/mp4", plan)
+            video = _upload_blocking(api, path, "video/mp4", plan, sent)
         video_id = str(video.get("id") or "") or None
         if not video_id:
             return failed("YouTube no devolvió el vídeo de prueba.")
         privacy = (video.get("status") or {}).get("privacyStatus")
         for _ in range(LOCK_TEST_POLL_MAX):
+            if privacy == "private":
+                break
             items = _videos(api, [video_id], "status,processingDetails", op="lock_test")
             if items:
                 status = items[0].get("status") or {}
-                privacy = status.get("privacyStatus") or privacy
                 proc = (items[0].get("processingDetails") or {}).get("processingStatus")
-                finished_upload = status.get("uploadStatus") in ("processed", "failed", "rejected", "deleted")
-                if finished_upload or proc in ("succeeded", "failed", "terminated"):
+                upload = status.get("uploadStatus")
+                current = status.get("privacyStatus")
+                if current == "private":
+                    privacy = current
+                    break
+                if upload in ("failed", "rejected", "deleted") or proc in ("failed", "terminated"):
+                    failure = items[0]
+                    break
+                if upload == "processed" or proc == "succeeded":
+                    processed = True
+                    privacy = current  # the verdict uses the privacy read after processing, nothing older
                     break
             _sleep(LOCK_TEST_POLL_DELAY)
     except ProviderError as err:
@@ -3315,6 +3535,17 @@ def lock_test(
             video_id=video_id,
             privacy_status=privacy,
         )
+    elif failure is not None:
+        reason = processing_error(failure).message
+        return failed(
+            f"YouTube no pudo procesar el vídeo de prueba ({reason}), así que la prueba no es concluyente. "
+            "Vuelve a intentarlo."
+        )
+    elif not processed:
+        return failed(
+            "YouTube aún no ha terminado de procesar el vídeo de prueba, así que la prueba no es "
+            "concluyente. Vuelve a intentarlo dentro de unos minutos."
+        )
     elif privacy in ("unlisted", "public"):
         result = LockTestResult(
             "unlocked",
@@ -3322,12 +3553,74 @@ def lock_test(
             video_id=video_id,
             privacy_status=privacy,
         )
+        if delete and keep_for_recheck:
+            result.recheck_at = clock.now() + LOCK_RECHECK_AFTER
+            result.message += (
+                " Dejamos el vídeo de prueba (oculto) 24 horas para confirmarlo y después lo borraremos."
+            )
+            return result
     else:
         return failed("No se pudo leer la visibilidad del vídeo de prueba.")
     if delete:
         result.deleted = _delete_video(api, video_id)
         if not result.deleted:
             result.message += " No se pudo borrar el vídeo de prueba: bórralo en YouTube Studio."
+    return result
+
+
+def confirm_lock_test(
+    account: AccountCreds,
+    settings: ProviderSettings,
+    http: httpx.Client,
+    clock: Clock,
+    video_id: str | None,
+    *,
+    since: datetime | None = None,
+    on_tokens: Callable[[TokenUpdate], None] | None = None,
+) -> LockTestResult:
+    """Second read of a lock-test clip about 24 h after an ``unlocked`` result (report 06 §3.7): still
+    ``unlisted``/``public`` ⇒ ``unlocked`` (confirmed); ``private`` ⇒ ``locked``. The clip is then deleted.
+    Without ``video_id`` the clip is looked up by its title in the uploads playlist. Raises ``ProviderError``
+    when YouTube cannot be asked (the caller tries again later)."""
+    api = _Api(account, settings, http, clock, on_tokens)
+    video: Mapping[str, Any] | None = None
+    if video_id:
+        items = _videos(api, [video_id], "status", op="lock_test")
+        video = items[0] if items else None
+    else:
+        video = _find_by_title(api, LOCK_TEST_TITLE, since)
+        video_id = str(video.get("id")) if video and video.get("id") else None
+    if not video or not video_id:
+        return LockTestResult(
+            "error",
+            "El vídeo de la prueba de bloqueo ya no está en YouTube, así que no se pudo volver a comprobar.",
+            video_id=video_id,
+            deleted=True,
+        )
+    privacy = (video.get("status") or {}).get("privacyStatus")
+    if privacy == "private":
+        result = LockTestResult(
+            "locked",
+            "Al volver a comprobarlo 24 horas después, YouTube ha dejado el vídeo de prueba como privado: "
+            "tu proyecto de Google bloquea las subidas hechas con la API. Hemos vuelto a la Publicación "
+            "asistida.",
+            video_id=video_id,
+            privacy_status=privacy,
+        )
+    elif privacy in ("unlisted", "public"):
+        result = LockTestResult(
+            "unlocked",
+            "Confirmado 24 horas después: YouTube mantiene la visibilidad del vídeo de prueba.",
+            video_id=video_id,
+            privacy_status=privacy,
+        )
+    else:
+        result = LockTestResult(
+            "error", "No se pudo leer la visibilidad del vídeo de prueba.", video_id=video_id
+        )
+    result.deleted = _delete_video(api, video_id)
+    if not result.deleted:
+        result.message += f" Borra el vídeo «{LOCK_TEST_TITLE}» en YouTube Studio."
     return result
 
 

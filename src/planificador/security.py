@@ -27,6 +27,7 @@ import base64
 import hashlib
 import hmac
 import logging
+import math
 import secrets
 import threading
 import time
@@ -39,6 +40,7 @@ from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from markupsafe import escape
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -147,12 +149,20 @@ class _PasswordCache:
         self._lock = threading.Lock()
         self._values: weakref.WeakKeyDictionary[Any, tuple[float, str | None]] = weakref.WeakKeyDictionary()
 
-    def get(self, key: Any, loader: Callable[[], str | None]) -> str | None:
+    def peek(self, key: Any) -> tuple[bool, str | None]:
+        """``(True, value)`` while a fresh value is cached, else ``(False, None)`` (no DB access)."""
         now = time.monotonic()
         with self._lock:
             cached = self._values.get(key)
         if cached is not None and now - cached[0] < self.TTL:
-            return cached[1]
+            return True, cached[1]
+        return False, None
+
+    def get(self, key: Any, loader: Callable[[], str | None]) -> str | None:
+        now = time.monotonic()
+        hit, value = self.peek(key)
+        if hit:
+            return value
         value = loader()
         with self._lock:
             self._values[key] = (now, value)
@@ -187,8 +197,89 @@ def set_password(db: Session, password: str | None, *, commit: bool = True) -> N
 
 
 def mark_logged_in(request: Request, db: Session) -> None:
-    request.session[AUTH_SESSION_KEY] = password_fingerprint(get_password_hash(db))
+    mark_logged_in_with_hash(request, get_password_hash(db))
+
+
+def mark_logged_in_with_hash(request: Request, stored_hash: str | None) -> None:
+    request.session[AUTH_SESSION_KEY] = password_fingerprint(stored_hash)
     rotate_csrf_token(request)
+
+
+# ------------------------------------------------------------------------------------------ login throttle
+
+
+class LoginThrottle:
+    """Process-wide brute-force brake for ``POST /login`` (one per app).
+
+    Verifications are serialised behind one lock and every failure holds it for :attr:`FAIL_DELAY_S`, so
+    parallel requests cannot multiply the guessing rate. After :attr:`FREE_FAILURES` consecutive failures
+    every new failure blocks *all* attempts for an exponentially growing time (1 s, 2 s, 4 s ... up to
+    :attr:`MAX_BLOCK_S`); attempts during a block get 429 without being checked. A success, or
+    :attr:`RESET_AFTER_S` without failures, starts over."""
+
+    FREE_FAILURES = 3
+    FAIL_DELAY_S = 0.4
+    MAX_BLOCK_S = 300.0
+    RESET_AFTER_S = 900.0
+    LOCK_WAIT_S = 10.0
+
+    def __init__(
+        self,
+        now: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._lock = threading.Lock()
+        self._now = now
+        self._sleep = sleep
+        self.failures = 0
+        self._last_failure = 0.0
+        self._blocked_until = 0.0
+
+    def retry_after(self) -> float:
+        return max(0.0, self._blocked_until - self._now())
+
+    def attempt(self, check: Callable[[], bool]) -> tuple[str, float]:
+        """Run ``check`` (the password verification). Returns ``("ok", 0)``, ``("wrong", wait)`` or
+        ``("blocked", wait)`` where ``wait`` is the number of seconds until the next attempt is accepted."""
+        if not self._lock.acquire(timeout=self.LOCK_WAIT_S):
+            return "blocked", 1.0
+        try:
+            now = self._now()
+            if self._blocked_until > now:
+                return "blocked", self._blocked_until - now
+            if self.failures and now - self._last_failure > self.RESET_AFTER_S:
+                self.failures = 0
+            if check():
+                self.failures = 0
+                self._blocked_until = 0.0
+                return "ok", 0.0
+            self.failures += 1
+            self._last_failure = now
+            wait = 0.0
+            if self.failures > self.FREE_FAILURES:
+                wait = min(2.0 ** (self.failures - self.FREE_FAILURES - 1), self.MAX_BLOCK_S)
+                self._blocked_until = now + wait
+            self._sleep(
+                self.FAIL_DELAY_S
+            )  # while holding the lock: one guess at a time, whatever the threads
+            return "wrong", wait
+        finally:
+            self._lock.release()
+
+
+_throttle_lock = threading.Lock()
+
+
+def login_throttle(app: Any) -> LoginThrottle:
+    state = app.state
+    throttle = getattr(state, "login_throttle", None)
+    if throttle is None:
+        with _throttle_lock:
+            throttle = getattr(state, "login_throttle", None)
+            if throttle is None:
+                throttle = LoginThrottle()
+                state.login_throttle = throttle
+    return throttle
 
 
 def is_logged_in(session: dict[str, Any], stored_hash: str | None) -> bool:
@@ -336,7 +427,7 @@ class SecurityMiddleware:
 
         # Optional password gate.
         if not _auth_exempt(path):
-            stored = self.password_hash_loader(scope)
+            stored = await self._password_hash(scope)
             if stored is not None and not is_logged_in(session, stored):
                 await self._deny_auth(scope, send, method, path)
                 return
@@ -401,6 +492,17 @@ class SecurityMiddleware:
             if ref_origin is None or ref_origin not in self.allowed_origins:
                 return "referer mismatch"
         return None
+
+    async def _password_hash(self, scope: Scope) -> str | None:
+        """The stored hash; a DB read never runs on the event loop (it could wait for a busy database)."""
+        if self.password_hash_loader is _default_password_loader:
+            database = getattr(getattr(scope.get("app"), "state", None), "db", None)
+            if database is None:
+                return None
+            hit, value = _password_cache.peek(database)
+            if hit:
+                return value
+        return await run_in_threadpool(self.password_hash_loader, scope)
 
     async def _deny_auth(self, scope: Scope, send: Send, method: str, path: str) -> None:
         is_htmx = (_header(scope, b"hx-request") or "").lower() == "true"
@@ -658,16 +760,30 @@ def login_submit(
     next: Annotated[str, Form()] = "/",
 ) -> Response:
     database = request.app.state.db
+    # Read the hash and release the connection at once: the delay and the page render below must never hold
+    # a pooled connection (the render opens its own session).
     with database.session() as db:
         stored = get_password_hash(db)
-        if stored is None:
-            return RedirectResponse(_safe_next(next), status_code=303)
-        if not verify_password(password, stored):
-            time.sleep(0.4)  # slow down guessing
-            return _login_page(
-                request, error="Contraseña incorrecta.", next_path=_safe_next(next), status_code=401
+    if stored is None:
+        return RedirectResponse(_safe_next(next), status_code=303)
+    outcome, wait = login_throttle(request.app).attempt(lambda: verify_password(password, stored))
+    if outcome != "ok":
+        seconds = max(1, math.ceil(wait))
+        if outcome == "blocked":
+            error = f"Demasiados intentos fallidos. Espera {seconds} s y vuelve a probar."
+        elif wait:
+            error = (
+                f"Contraseña incorrecta. Demasiados intentos: espera {seconds} s antes de volver a probar."
             )
-        mark_logged_in(request, db)
+        else:
+            error = "Contraseña incorrecta."
+        response = _login_page(
+            request, error=error, next_path=_safe_next(next), status_code=429 if outcome == "blocked" else 401
+        )
+        if wait:
+            response.headers["Retry-After"] = str(seconds)
+        return response
+    mark_logged_in_with_hash(request, stored)
     return RedirectResponse(_safe_next(next), status_code=303)
 
 

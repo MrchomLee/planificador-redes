@@ -301,8 +301,14 @@ def brands_page(request: Request, db: DbSession, active: ActiveBrand, clock: Clo
 
 
 @router.get("/marcas/nueva")
-def new_brand_form(request: Request, db: DbSession) -> Response:
-    form = BrandForm(timezone=config.default_timezone(db))
+def new_brand_form(request: Request, db: DbSession, active: ActiveBrand) -> Response:
+    # The default zone chosen in Ajustes (or detected on first run); otherwise the active brand's, never a
+    # hardcoded Europe/Madrid that the user did not pick.
+    from planificador.timeutil import is_valid_timezone
+
+    stored = config.get_setting(db, "default_timezone", None)
+    zone = stored if is_valid_timezone(stored) else (active.timezone or config.default_timezone(db))
+    form = BrandForm(timezone=zone)
     return _form_response(request, form, brand=None)
 
 

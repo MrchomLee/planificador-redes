@@ -27,7 +27,7 @@ from planificador.providers.base import (
     StepResult,
     TargetSpec,
 )
-from planificador.providers.instagram import InstagramProvider
+from planificador.providers.instagram import STORY_METRICS, InstagramProvider
 from planificador.timeutil import ManualClock
 
 IG = "17841400000000001"
@@ -963,6 +963,7 @@ def test_recent_posts_with_insights(fake: FakeMeta, http):
         },
     )
     fake.on("GET", "B/insights", error(10, None, "(#10) Not enough viewers for the media to show insights"))
+    fake.on("GET", f"{IG}/stories", {"data": []})
     posts = InstagramProvider().fetch_recent_posts(_account(), SETTINGS, http, since)
     assert [p.external_id for p in posts] == ["A", "B"]
     reel, photo = posts
@@ -1114,3 +1115,175 @@ def test_guard_unknown_container_state_raises_ambiguous(fake: FakeMeta, http, tm
         h.resumed(http, state=h.commits[-1]).step()
     assert exc.value.kind == ErrorKind.AMBIGUOUS and exc.value.code == "ig_commit_unknown"
     assert len(fake.find("POST", f"{IG}/media_publish")) == 1
+
+
+# ------------------------------------------------------------------- review regressions (meta-conformance)
+
+
+def test_action_block_2207051_on_publish_reads_container_and_stops(fake: FakeMeta, http, tmp_path):
+    """Meta sends the action block as code 4 / 2207051: it is not a plain rate limit, the container is read
+    before deciding and the run stops (24 h hold) instead of re-sending media_publish."""
+    _image_routes(fake)
+    fake.on("POST", f"{IG}/media_publish", error(4, 2207051, "We restrict certain activity"))
+    h = Harness(http, items=[media(tmp_path, "a.jpg")])
+    with pytest.raises(ProviderError) as exc:
+        h.run()
+    assert exc.value.kind == ErrorKind.PERMANENT and exc.value.code == "ig_activity_restricted"
+    assert "24 horas" in exc.value.message
+    assert len(fake.find("GET", "C1")) == 3  # 2 polls + the check right after the refusal
+    assert h.state.get("commit_rejected") is True and h.public.released
+    assert h.provider.reconcile(h.ctx).outcome == "not_published"
+    assert len(fake.find("POST", f"{IG}/media_publish")) == 1
+
+
+def test_action_block_2207051_when_the_post_went_live_is_published(fake: FakeMeta, http, tmp_path):
+    _image_routes(fake)
+    fake.on("GET", "C1", {"status_code": "FINISHED"}, {"status_code": "PUBLISHED"})
+    fake.on("POST", f"{IG}/media_publish", error(4, 2207051, "We restrict certain activity"))
+    fake.on(
+        "GET",
+        f"{IG}/media",
+        {
+            "data": [
+                {
+                    "id": "M9",
+                    "caption": "Hola Instagram #prueba",
+                    "timestamp": "2026-11-03T09:00:03+0000",
+                    "permalink": "https://www.instagram.com/p/M9/",
+                }
+            ]
+        },
+    )
+    h = Harness(http, items=[media(tmp_path, "a.jpg")])
+    result, _ = h.run()
+    assert result.status == "published" and result.external_id == "M9"
+    assert len(fake.find("POST", f"{IG}/media_publish")) == 1
+    assert any(event == "ig_publish_recovered" for event, _, _ in h.events)
+
+
+def test_action_block_with_unreadable_container_is_ambiguous(fake: FakeMeta, http, tmp_path):
+    _image_routes(fake)
+    fake.on("GET", "C1", {"status_code": "IN_PROGRESS"}, {"status_code": "FINISHED"}, error(2, status=500))
+    fake.on("POST", f"{IG}/media_publish", error(4, 2207051, "We restrict certain activity"))
+    h = Harness(http, items=[media(tmp_path, "a.jpg")])
+    with pytest.raises(ProviderError) as exc:
+        h.run()
+    assert exc.value.kind == ErrorKind.AMBIGUOUS and exc.value.code == "ig_activity_restricted"
+    assert exc.value.retry_after == mc.ACTION_BLOCK_WAIT
+    assert not h.state.get("commit_rejected") and h.state["stage"] == "committing"
+    fake.on("GET", "C1", {"status_code": "FINISHED"})
+    assert h.provider.reconcile(h.ctx).outcome == "not_published"
+
+
+def test_retry_after_refused_publish_rereads_container_before_resending(fake: FakeMeta, http, tmp_path):
+    """A refusal marked commit_rejected must not make the next attempt trust the stale FINISHED status: the
+    container is read again and a post that went live is never published twice."""
+    _image_routes(fake)
+    fake.on("POST", f"{IG}/media_publish", error(4, None, "Application request limit reached"))
+    h = Harness(http, items=[media(tmp_path, "a.jpg")])
+    with pytest.raises(ProviderError) as exc:
+        h.run()
+    assert exc.value.kind == ErrorKind.RATE_LIMITED
+    assert h.provider.reconcile(h.ctx).outcome == "not_published"
+    fake.on("GET", "C1", {"status_code": "PUBLISHED"})
+    fake.on("GET", f"{IG}/media", {"data": []})
+    gets = len(fake.find("GET", "C1"))
+    result = h.step()
+    assert result.status == "published"
+    assert len(fake.find("GET", "C1")) == gets + 1
+    assert len(fake.find("POST", f"{IG}/media_publish")) == 1
+
+
+def test_retry_after_refused_publish_resends_when_container_still_finished(fake: FakeMeta, http, tmp_path):
+    _image_routes(fake)
+    fake.on("POST", f"{IG}/media_publish", error(9, 2207042, "Max posts reached"), {"id": "M1"})
+    h = Harness(http, items=[media(tmp_path, "a.jpg")])
+    with pytest.raises(ProviderError):
+        h.run()
+    assert h.provider.reconcile(h.ctx).outcome == "not_published"
+    gets = len(fake.find("GET", "C1"))
+    result, _ = h.run()
+    assert result.external_id == "M1" and len(fake.find("GET", "C1")) == gets + 1
+    assert len(fake.find("POST", f"{IG}/media_publish")) == 2
+
+
+def test_server_error_2207001_on_publish_is_ambiguous_not_spam(fake: FakeMeta, http, tmp_path):
+    _image_routes(fake)
+    fake.on("POST", f"{IG}/media_publish", error(-1, 2207001, "Instagram server error"))
+    h = Harness(http, items=[media(tmp_path, "a.jpg")])
+    with pytest.raises(ProviderError) as exc:
+        h.run()
+    assert exc.value.kind == ErrorKind.AMBIGUOUS and exc.value.code == "ig_server_error"
+    assert "spam" not in exc.value.message
+    fake.on("GET", "C1", {"status_code": "PUBLISHED"})
+    fake.on("GET", f"{IG}/media", {"data": []})
+    assert h.provider.reconcile(h.ctx).outcome == "published"
+    assert len(fake.find("POST", f"{IG}/media_publish")) == 1
+
+
+def test_server_error_2207001_on_container_is_retried(fake: FakeMeta, http, tmp_path):
+    fake.on("GET", f"{IG}/content_publishing_limit", QUOTA_OK)
+    fake.on("POST", f"{IG}/media", error(-1, 2207001, "Instagram server error"))
+    with pytest.raises(ProviderError) as exc:
+        Harness(http, items=[media(tmp_path, "a.jpg")]).run()
+    assert exc.value.kind == ErrorKind.TRANSIENT and exc.value.retry_after == mc.IG_SERVER_ERROR_WAIT
+
+
+def test_recent_posts_include_live_stories_with_story_metrics(fake: FakeMeta, http):
+    """/media never lists stories: they come from /stories and need their insights before they expire."""
+    fake.on(
+        "GET",
+        f"{IG}/media",
+        {"data": [{"id": "F1", "media_type": "IMAGE", "timestamp": "2026-11-02T10:00:00+0000"}]},
+    )
+    fake.on("GET", "F1/insights", {"data": [{"name": "views", "values": [{"value": 10}]}]})
+    fake.on(
+        "GET",
+        f"{IG}/stories",
+        {
+            "data": [
+                {
+                    "id": "ST1",
+                    "media_type": "IMAGE",
+                    "media_product_type": "STORY",
+                    "media_url": "https://cdn/st1.jpg",
+                    "permalink": "https://www.instagram.com/stories/mimarca/ST1/",
+                    "timestamp": "2026-11-03T07:00:00+0000",
+                }
+            ]
+        },
+    )
+    fake.on(
+        "GET",
+        "ST1/insights",
+        {
+            "data": [
+                {"name": "views", "values": [{"value": 300}]},
+                {"name": "reach", "values": [{"value": 250}]},
+                {"name": "shares", "values": [{"value": 2}]},
+                {"name": "total_interactions", "values": [{"value": 9}]},
+            ]
+        },
+    )
+    posts = InstagramProvider().fetch_recent_posts(_account(), SETTINGS, http, NOW - timedelta(days=30))
+    assert [p.external_id for p in posts] == ["F1", "ST1"]
+    story = posts[1]
+    assert story.media_type == "STORY" and story.thumbnail_url == "https://cdn/st1.jpg"
+    assert story.metrics["views"] == 300 and story.metrics["reach"] == 250
+    assert story.metrics["interactions"] == 9
+    asked = fake.find("GET", "ST1/insights")[0]["metric"]
+    assert asked == ",".join(STORY_METRICS)
+    stories_call = fake.find("GET", f"{IG}/stories")[0]
+    assert "timestamp" in stories_call["fields"] and "media_product_type" in stories_call["fields"]
+
+
+def test_recent_posts_stories_failure_keeps_feed_posts(fake: FakeMeta, http):
+    fake.on(
+        "GET",
+        f"{IG}/media",
+        {"data": [{"id": "F1", "media_type": "IMAGE", "timestamp": "2026-11-02T10:00:00+0000"}]},
+    )
+    fake.on("GET", "F1/insights", {"data": []})
+    fake.on("GET", f"{IG}/stories", error(10, None, "(#10) Application does not have permission"))
+    posts = InstagramProvider().fetch_recent_posts(_account(), SETTINGS, http, NOW - timedelta(days=30))
+    assert [p.external_id for p in posts] == ["F1"]

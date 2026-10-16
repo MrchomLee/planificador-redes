@@ -21,7 +21,9 @@
   {% elif deleted %}
   {{ ui.info_alert("Esta publicación está en la papelera. Restáurala si quieres publicarla.", tone="warning") }}
   {% elif status == "scheduled" %}
-  {{ ui.info_alert("Todavía no es la hora programada. Puedes prepararla ya: te avisaremos también a la hora prevista.") }}
+  {# Marking as published is only possible once it is due (SPEC: manual_pending/unknown/error): do not invite
+     publishing early, only preparing. #}
+  {{ ui.info_alert("Todavía no es la hora programada. Puedes ir preparando el texto y los archivos, pero publícala a la hora prevista: entonces te avisaremos y podrás marcarla aquí como publicada.") }}
   {% endif %}
 
   <ol class="assist-steps">
@@ -145,8 +147,10 @@
                  placeholder="https://…" value="{{ t.external_url or '' }}">
           <p class="form-field__help">Pega el enlace cuando ya esté publicada para poder abrirla desde el calendario.</p>
         </form>
+        {% elif status == "scheduled" and not deleted %}
+        <p class="assist-hint">Podrás marcarla como publicada cuando llegue la hora programada{% if t.scheduled_at %} ({{ t.scheduled_at|dt_es(tz) }}){% endif %}.</p>
         {% else %}
-        <p class="assist-hint">Esta publicación está «{{ status|status_label }}» y no se puede marcar como publicada.</p>
+        <p class="assist-hint">No se puede marcar como publicada en su estado actual: {{ status|status_label }}.</p>
         {% endif %}
       </div>
     </li>

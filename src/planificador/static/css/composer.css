@@ -315,6 +315,10 @@ fieldset.cmp-field legend { margin-bottom: 4px; font-weight: 620; }
 }
 .cmp-issues--error .cmp-issues__head > .icon { color: var(--danger); }
 .cmp-issues--warning .cmp-issues__head > .icon { color: var(--warning-fg); }
+.cmp-issues__preview {
+  flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  color: var(--text-muted); font-size: var(--text-sm); font-weight: 450;
+}
 .cmp-issues__chev { margin-left: auto; display: inline-flex; color: var(--text-muted); transition: transform var(--dur) var(--ease); }
 .cmp-issues__chev.is-open { transform: rotate(180deg); }
 .cmp-issues__list { list-style: none; margin: 0; padding: 4px 8px 8px; max-height: 148px; overflow-y: auto; background: var(--surface); border-top: 1px solid color-mix(in srgb, currentColor 8%, transparent); }
@@ -547,6 +551,12 @@ fieldset.cmp-field legend { margin-bottom: 4px; font-weight: 620; }
   .composer__brand { display: none; }
   .cmp-footer { flex-wrap: wrap; }
   .cmp-tt__commercial { margin-left: 0; }
+}
+/* Laptop-height windows (≈ 1366×657 with the browser's toolbars): a shorter text box keeps the editor toolbar
+   (add media, emoji, hashtags) in view above the pinned issue panels and footer. */
+@media (max-height: 720px) and (min-width: 1001px) {
+  .cmp-box { min-height: 210px; }
+  .cmp-text { min-height: 110px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .pv-avatar--disc { animation: none; }
