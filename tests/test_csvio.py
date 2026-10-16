@@ -384,6 +384,56 @@ def test_tiktok_rows_become_drafts_without_video_publish(db, brand, clock):
     assert result.created == 1 and result.scheduled == 1, result.failed
 
 
+def test_modo_tiktok_column_sends_drafts_even_with_direct_post(db, brand, clock):
+    add_account(
+        db,
+        brand,
+        Network.TIKTOK,
+        scopes=["user.info.basic", "video.publish", "video.upload"],
+        meta={"creator_info": {"privacy_level_options": ["SELF_ONLY"], "max_video_post_duration_sec": 600}},
+    )
+    add_media(db, brand, "clip.mp4", kind="video", sha="7" * 64)
+    columns = (*csvio.TEMPLATE_COLUMNS, csvio.TIKTOK_MODE_COLUMN)
+    raw = make_csv(
+        row(tiktok="si", medios="clip.mp4", modo_tiktok="Borrador"),
+        row(tiktok="si", medios="clip.mp4", modo_tiktok="directo", privacidad_tiktok="solo yo"),
+        row(tiktok="si", medios="clip.mp4", modo_tiktok="quizas"),
+        columns=columns,
+    )
+    preview = csvio.build_preview(db, brand, raw, clock)
+    draft, direct, bad = preview.data_rows
+    assert draft.data.targets[0].options == {"mode": "inbox"}
+    assert not draft.errors and not draft.tiktok_direct  # no privacy or music consent needed for drafts
+    assert direct.data.targets[0].options["mode"] == "direct" and direct.tiktok_direct
+    assert any("modo_tiktok" in i.message for i in bad.errors)
+    result = csvio.import_rows(db, brand, make_csv(draft.values, columns=columns), clock)
+    assert result.created == 1 and result.scheduled == 1, result.failed
+
+
+def test_modo_tiktok_draft_needs_video_upload(db, brand, clock):
+    add_account(db, brand, Network.TIKTOK, scopes=["user.info.basic", "video.publish"])
+    add_media(db, brand, "clip.mp4", kind="video", sha="6" * 64)
+    raw = make_csv(
+        row(tiktok="si", medios="clip.mp4", modo_tiktok="borrador"),
+        columns=(*csvio.TEMPLATE_COLUMNS, csvio.TIKTOK_MODE_COLUMN),
+    )
+    preview = csvio.build_preview(db, brand, raw, clock)
+    assert any("video.upload" in i.message for i in preview.data_rows[0].errors)
+
+
+def test_export_keeps_the_tiktok_mode(db, brand, clock):
+    add_account(db, brand, Network.TIKTOK, scopes=["user.info.basic", "video.publish", "video.upload"])
+    add_media(db, brand, "clip.mp4", kind="video", sha="5" * 64)
+    raw = make_csv(
+        row(tiktok="si", medios="clip.mp4", modo_tiktok="borrador"),
+        columns=(*csvio.TEMPLATE_COLUMNS, csvio.TIKTOK_MODE_COLUMN),
+    )
+    assert csvio.import_rows(db, brand, raw, clock).created == 1
+    exported = csvio.export_csv(db, brand, date(2026, 11, 1), date(2026, 11, 30)).decode("utf-8-sig")
+    header, line = exported.splitlines()[:2]
+    assert line.split(";")[header.split(";").index("modo_tiktok")] == "borrador"
+
+
 def test_first_comment_and_autopublish(db, brand, clock, fb):
     add_account(db, brand, Network.INSTAGRAM, account_type="business")
     preview = csvio.build_preview(

@@ -78,10 +78,21 @@ TEMPLATE_COLUMNS: tuple[str, ...] = (
 #: Optional column written by the export so each network keeps its own first comment on re-import. When the
 #: header has it, it is YouTube's first comment (empty = none) and «primer_comentario» is Instagram's only.
 YT_FIRST_COMMENT_COLUMN = "primer_comentario_youtube"
+#: Optional column ``modo_tiktok``: «borrador» sends the TikTok video as a draft to the TikTok app (the user
+#: finishes it there) even when the account can post directly; «directo» or empty keeps the default
+#: (Direct Post when the account has video.publish, otherwise draft).
+TIKTOK_MODE_COLUMN = "modo_tiktok"
+TIKTOK_MODE_INBOX = frozenset({"borrador", "borradores", "inbox", "draft", "app", "bandeja"})
+TIKTOK_MODE_DIRECT = frozenset({"directo", "directa", "direct", "publicacion directa"})
 #: Extra informative columns written by the export (ignored on import).
 EXPORT_EXTRA_COLUMNS: tuple[str, ...] = ("estado", "enlaces", "id")
 #: Header of the export (re-importable).
-EXPORT_COLUMNS: tuple[str, ...] = (*TEMPLATE_COLUMNS, YT_FIRST_COMMENT_COLUMN, *EXPORT_EXTRA_COLUMNS)
+EXPORT_COLUMNS: tuple[str, ...] = (
+    *TEMPLATE_COLUMNS,
+    YT_FIRST_COMMENT_COLUMN,
+    TIKTOK_MODE_COLUMN,
+    *EXPORT_EXTRA_COLUMNS,
+)
 CSV_NETWORKS: tuple[str, ...] = ("facebook", "instagram", "tiktok", "youtube")
 #: Optional column ``demo`` (si/no): only read while demo mode is on and the brand has a Demo account, so the
 #: import can be tried without real accounts. Not part of the template.
@@ -218,6 +229,12 @@ COLUMN_HELP: tuple[tuple[str, str, str], ...] = (
     ),
     ("privacidad_youtube", "publica, oculto o privado. Vacío = publica.", "oculto"),
     ("ninos_youtube", "¿Es contenido creado para niños? Obligatorio si youtube = si.", "no"),
+    (
+        "modo_tiktok",
+        "Opcional: «borrador» envía el vídeo a la app de TikTok para terminarlo allí; «directo» o vacío = "
+        "publicación directa si tu app de TikTok lo permite.",
+        "borrador",
+    ),
     (
         "primer_comentario_youtube",
         "Opcional (la añade la exportación): primer comentario en YouTube; vacío = ninguno. Sin esta "
@@ -600,7 +617,20 @@ def _parse_row(
         if net == "tiktok":
             from planificador.providers import tiktok as tiktok_provider
 
-            if tiktok_provider.account_modes(account) == ("inbox",):
+            modes = tiktok_provider.account_modes(account)
+            raw_mode = fold(v.get(TIKTOK_MODE_COLUMN, ""))
+            if raw_mode and raw_mode not in TIKTOK_MODE_INBOX | TIKTOK_MODE_DIRECT:
+                row.add("error", f"«modo_tiktok» no válido: «{raw_mode}» (usa borrador o directo).", net)
+            if raw_mode in TIKTOK_MODE_INBOX and "inbox" in modes:
+                # Asked for a draft: the video goes to the TikTok app inbox; visibility is chosen there.
+                options["mode"] = "inbox"
+            elif raw_mode in TIKTOK_MODE_INBOX:
+                row.add(
+                    "error",
+                    "Pediste «borrador» en TikTok, pero tu app de TikTok no tiene el permiso video.upload.",
+                    net,
+                )
+            elif modes == ("inbox",):
                 # No Direct Post permission (video.publish): the video goes to the TikTok app as a draft.
                 options["mode"] = "inbox"
                 row.add(
@@ -937,6 +967,7 @@ def post_row(post: Post, tz: str | None) -> list[str]:
     if tt is not None:
         level = (tt.options or {}).get("privacy_level")
         values["privacidad_tiktok"] = TIKTOK_PRIVACY_EXPORT.get(str(level), "") if level else ""
+        values[TIKTOK_MODE_COLUMN] = "borrador" if (tt.options or {}).get("mode") == "inbox" else "directo"
     ig, yt = by_net.get("instagram"), by_net.get("youtube")
     ig_first = str((ig.options or {}).get("first_comment") or "") if ig else ""
     yt_first = str((yt.options or {}).get("first_comment") or "") if yt else ""
