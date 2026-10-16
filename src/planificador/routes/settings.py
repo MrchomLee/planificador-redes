@@ -8,8 +8,9 @@ Sections (each one its own form; htmx re-renders just that section, plain forms 
   Google/YouTube (client ID and secret). Secrets are **write-only**: the page only shows "•••• guardado"; an
   empty field keeps the stored value; they are stored encrypted (``config.set_setting(secret=True)``).
   ``POST /ajustes/credenciales/{meta|tiktok|google}``
-- **Publicación** — default time zone (new brands), grace window for late posts, demo mode.
-  ``POST /ajustes/publicacion``
+- **Publicación** — default time zone (new brands), late publishing (publish overdue posts as soon as the
+  PC, the app and the internet are available; optional "Límite de retraso"; spacing between overdue posts of
+  one account), the grace window (only when late publishing is off), demo mode. ``POST /ajustes/publicacion``
 - **URL pública para Instagram** — off / Cloudflare quick tunnel (explicit consent) / own public base URL,
   with the live status of :func:`planificador.publicmedia.get_service`. ``POST /ajustes/url-publica``,
   ``GET /ajustes/url-publica/estado``, ``POST /ajustes/url-publica/probar``
@@ -113,10 +114,18 @@ CONFIG_ID_RE = re.compile(r"^\d{5,25}$")
 TOKENISH_RE = re.compile(r"^[A-Za-z0-9._\-]{6,200}$")
 GOOGLE_CLIENT_SUFFIX = ".apps.googleusercontent.com"
 GRACE_MIN, GRACE_MAX = 0, 1440
+#: Ajustes › Publicación selects: (value, Spanish label).
+MAX_LATE_OPTIONS: tuple[tuple[int, str], ...] = tuple(
+    (h, "Sin límite" if h == 0 else f"{h} horas") for h in config.PUBLISH_LATE_MAX_HOURS_CHOICES
+)
+SPACING_OPTIONS: tuple[tuple[int, str], ...] = tuple(
+    (m, f"{m} minutos") for m in config.CATCHUP_SPACING_CHOICES
+)
 PASSWORD_MIN = 6
 LOG_TAIL_BYTES = 256 * 1024
 LOG_TAIL_LINES = 400
 TRANSITIONAL_TUNNEL_STATES = ("downloading", "starting")
+_ON = {"1", "on", "true", "yes", "si", "sí"}
 
 
 # ------------------------------------------------------------------------------------------- helpers
@@ -211,7 +220,12 @@ def publishing_context(db: Session) -> dict[str, Any]:
             "default_timezone": tz,
             "grace_minutes": config.get_int(db, "grace_minutes"),
             "demo_mode": config.get_bool(db, "demo_mode"),
+            "publish_late": config.get_bool(db, "publish_late"),
+            "publish_late_max_hours": config.get_int(db, "publish_late_max_hours"),
+            "catchup_spacing_minutes": config.get_int(db, "catchup_spacing_minutes"),
         },
+        "max_late_options": MAX_LATE_OPTIONS,
+        "spacing_options": SPACING_OPTIONS,
         "tz_groups": timezone_groups(tz),
     }
 
@@ -457,6 +471,15 @@ def save_credentials(
 # ------------------------------------------------------------------------------------------- publishing
 
 
+def _choice(value: str | None, choices: tuple[int, ...]) -> int | None:
+    """``value`` as one of ``choices`` (``None`` when it is not one of them)."""
+    try:
+        number = int(_clean(value))
+    except ValueError:
+        return None
+    return number if number in choices else None
+
+
 @router.post("/ajustes/publicacion")
 def save_publishing(
     request: Request,
@@ -464,7 +487,12 @@ def save_publishing(
     default_timezone: Annotated[str, Form()] = "",
     grace_minutes: Annotated[str, Form()] = "",
     demo_mode: Annotated[str, Form()] = "",
+    publish_late: Annotated[str | None, Form()] = None,
+    publish_late_max_hours: Annotated[str | None, Form()] = None,
+    catchup_spacing_minutes: Annotated[str | None, Form()] = None,
 ) -> Response:
+    """Save Ajustes › Publicación. The late-publishing fields are optional: a form without them (older page)
+    keeps the stored values. The switch posts a hidden ``0`` before its ``1``, so "off" is explicit."""
     from planificador.routes.brands import is_known_timezone
 
     errors: dict[str, str] = {}
@@ -478,7 +506,29 @@ def save_publishing(
     except ValueError:
         grace = 0
         errors["grace_minutes"] = f"Escribe un número de minutos entre {GRACE_MIN} y {GRACE_MAX}."
-    values = {"default_timezone": tz, "grace_minutes": _clean(grace_minutes), "demo_mode": bool(demo_mode)}
+    late_on = config.get_bool(db, "publish_late") if publish_late is None else _clean(publish_late) in _ON
+    max_hours = config.get_int(db, "publish_late_max_hours")
+    if publish_late_max_hours is not None:
+        chosen = _choice(publish_late_max_hours, config.PUBLISH_LATE_MAX_HOURS_CHOICES)
+        if chosen is None:
+            errors["publish_late_max_hours"] = "Elige un límite de retraso de la lista."
+        else:
+            max_hours = chosen
+    spacing = config.get_int(db, "catchup_spacing_minutes")
+    if catchup_spacing_minutes is not None:
+        chosen = _choice(catchup_spacing_minutes, config.CATCHUP_SPACING_CHOICES)
+        if chosen is None:
+            errors["catchup_spacing_minutes"] = "Elige una separación de la lista."
+        else:
+            spacing = chosen
+    values = {
+        "default_timezone": tz,
+        "grace_minutes": _clean(grace_minutes),
+        "demo_mode": bool(demo_mode),
+        "publish_late": late_on,
+        "publish_late_max_hours": _clean(publish_late_max_hours) if publish_late_max_hours else max_hours,
+        "catchup_spacing_minutes": _clean(catchup_spacing_minutes) if catchup_spacing_minutes else spacing,
+    }
     if errors:
         return _section_response(
             request, db, "settings/_publishing.html", "publicacion", errors=errors, values=values
@@ -487,7 +537,16 @@ def save_publishing(
     config.set_setting(db, "default_timezone", tz, commit=False)
     config.set_setting(db, "grace_minutes", grace, commit=False)
     config.set_setting(db, "demo_mode", bool(demo_mode), commit=False)
+    config.set_setting(db, "publish_late", late_on, commit=False)
+    config.set_setting(db, "publish_late_max_hours", max_hours, commit=False)
+    config.set_setting(db, "catchup_spacing_minutes", spacing, commit=False)
     db.commit()
+    try:  # the scheduler reads these on every tick; wake it so a change applies right away
+        from planificador import scheduler
+
+        scheduler.wake()
+    except Exception:  # noqa: BLE001 - never fail a save because of the scheduler
+        log.debug("Scheduler wake after saving publishing settings failed", exc_info=True)
     message = "Ajustes de publicación guardados."
     if bool(demo_mode) and not was_demo:
         message = (

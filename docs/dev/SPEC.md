@@ -34,8 +34,8 @@ A **local, single-user** web app that runs on the user's Windows PC (also Linux/
 - **Comentarios** (inbox): Facebook + Instagram comments, reply, mark read (polling).
 - **Importar CSV / Exportar CSV** of posts.
 - **Ajustes**: Meta/TikTok developer-app credentials, Graph API version, public-media mode (Cloudflare quick
-  tunnel / own public base URL / off), timezone, grace window for late posts, demo mode, optional password,
-  notifications.
+  tunnel / own public base URL / off), timezone, late publishing (publish overdue posts as soon as possible,
+  delay limit, per-account catch-up spacing; grace window when off), demo mode, optional password, notifications.
 - Windows launchers (`iniciar.bat`, start-with-Windows shortcut) and a Spanish user guide (Meta app + TikTok app
   setup step by step).
 
@@ -154,7 +154,8 @@ TargetStatus: draft | scheduled | publishing | published | manual_pending | manu
    - manual_done: user marked it as published by hand
    - sent_to_app: TikTok draft delivered to the app inbox (user finishes there)
    - error: failed permanently or retries exhausted (last_error shown)
-   - missed: was due while the app was off beyond the grace window
+   - missed: will not go out late: beyond the "Límite de retraso" (`publish_late_max_hours`), or — with
+     `publish_late` off — due while the app was off (or without internet) beyond the grace window
    - unknown: commit was sent but the outcome could not be confirmed — user must check (never auto-retried)
    - cancelled: removed from schedule
 PostKind: scheduled | idea
@@ -529,28 +530,61 @@ Character counting: Python `len()` for FB/IG; TikTok counts UTF-16 code units.
 Scheduler: a daemon thread started in the FastAPI lifespan (skippable via `PLANIFICADOR_NO_SCHEDULER=1` for
 tests). Tick every 15 s or when woken (`scheduler.wake()` after "Publicar ahora"/save). Each tick:
 
-1. **Due targets**: `status == scheduled AND scheduled_at <= now` (and post not deleted):
+1. **Due targets**: `status == scheduled AND scheduled_at <= now` (and post not deleted), read in pages of 100
+   ordered by `scheduled_at, id` (keyset). Once the catch-up spacing holds an account back in a tick, its other
+   overdue automatic targets are left out of the following pages, so an account's backlog (which stays
+   `scheduled` and is the oldest) never hides on-time targets, Publicación asistida reminders or other
+   accounts:
    - `auto_publish == False` (and not TikTok inbox mode) → set `manual_pending`, notify (Publicación asistida).
-   - else, if `now - scheduled_at > grace` (setting `grace_minutes`, default 120) and the app was not running at
-     that time → `missed` + notification (actions: Publicar ahora / Reprogramar / Descartar).
+   - else, if the **late-publishing rule** (below) says so → `missed` + notification (actions: Publicar ahora /
+     Reprogramar / Descartar; the text points to the setting).
    - else claim (atomic `UPDATE ... SET status='publishing', claimed_at=now WHERE id=? AND status='scheduled'`
-     — check rowcount) and run.
-2. **Waiting targets**: `status == publishing AND next_attempt_at <= now` → continue running.
+     — check rowcount) and run. The claim stores engine bookkeeping `due_at` (the due reference: scheduled
+     time, or the time of an explicit retry) and, for a catch-up, `late = "unavailable"`.
+2. **Waiting targets**: `status == publishing AND next_attempt_at <= now` → continue running. A target waiting
+   for the internet connection (engine flag `offline`) is resumed only after a successful connectivity probe;
+   otherwise its `next_attempt_at` is pushed 1 min later, quietly (no event, no retry spent). Once the probe
+   succeeds, such a target that is not resumed in that tick (catch-up spacing, no free worker) drops the
+   `offline` flag (`engine.end_offline_wait`, event `online`); a catch-up one gets flag `queued` instead, which
+   keeps its place in the account's catch-up queue (drawer: "Atrasada: estaba programada para…").
 3. **Stale claims**: `publishing` with `claimed_at` older than 10 min and no `next_attempt_at` (crash) →
    if `commit_phase == commit_sent` → reconcile; else continue from saved state.
    Before 2 and 3 continue, a target that has **sent nothing irreversible yet** (`commit_phase != commit_sent`
-   and no pending reconcile — waiting before a retry, paused at shutdown, or abandoned by a crash) follows the
-   missed rule of 1, measured from the latest of `scheduled_at`, `next_attempt_at` and `claimed_at` (a rate
-   limit that pushed the retry 3 h out is judged from the retry time): if the app was off beyond the grace
-   window → `missed` (partial provider state dropped, guarded on the values read). A target whose commit was
-   sent is always resumed/reconciled, never missed.
+   and no pending reconcile — waiting before a retry or for the internet, paused at shutdown, or abandoned by a
+   crash) follows the late-publishing rule too. A target whose commit was sent is always resumed/reconciled,
+   never missed and never held back by the spacing.
+
+**Late publishing** (settings `publish_late` default **true** — also for installs that never saved it —,
+`publish_late_max_hours` default 0 = no limit, `catchup_spacing_minutes` default 15; `engine.LatePolicy`):
+- `publish_late` on: a target that could not go out on time (PC off/asleep, app closed, no internet) is
+  published as soon as the scheduler runs again. Only when it is later than `publish_late_max_hours`
+  (measured from `due_at`/`scheduled_at`; for a scheduled target from its due reference) does it become
+  `missed` (reason `max_late`).
+- `publish_late` off (previous behaviour): due before the current "online since" period and later than
+  `grace_minutes` (default 120) → `missed` (reason `grace`); publishing targets are measured from the latest of
+  `scheduled_at`, `next_attempt_at` and `claimed_at` (a rate limit that pushed the retry 3 h out is judged from
+  the retry time); waiting for the internet beyond the grace window (from `due_at`) → `missed` (reason
+  `offline`).
+- Targets already `missed` are never published automatically; the user decides.
+- A target that goes out late because the PC/app was not available or there was no internet (`late`
+  bookkeeping) gets a `published_late` event "Publicada con retraso: estaba programada para <hora local>; el
+  equipo o la app no estaba disponible" (or "no había conexión a internet") and an `info` notification
+  "Publicada con retraso en <red>" (for `sent_to_app` the note is appended to the TikTok-draft notification).
+- **Catch-up spacing**: overdue targets — scheduled ones due before the current "online since" period, and
+  pre-commit publishing ones resuming after the app was off or after an internet outage — are released per
+  **account** one at a time, in their original order, at least `catchup_spacing_minutes` after the account's
+  last release. The last release is derived from the DB (latest `publishing` / `catchup` / `recovered` event
+  of the account's targets, or latest `published_at`), so it survives restarts; claims stay atomic, so nothing
+  is published twice. On-time targets are never delayed. The scheduler sleeps until the next release.
+- Start-up and wake: the first tick after start, and the tick that detects a sleep gap, run the catch-up right
+  away (with the spacing); the connectivity cache is dropped after a gap.
 4. **Periodic jobs** (tracked in settings with last-run timestamps): token refresh check (hourly; TikTok refresh
    when < 1 h left; Meta long-lived user token expiry warnings), analytics snapshot (daily after 06:00 local and
    at startup if stale), comment polling (every 15 min), trash purge (> 45 days), public media token cleanup,
    provider follow-ups (hourly, `providers/followups.py`: a finished target whose `provider_state` holds
    `followup.next_at` is checked again through `Provider.follow_up` — TikTok public post id after moderation,
    YouTube `publishAt` uploads read after their time, the YouTube lock-test re-check after 24 h).
-5. **Sleep/wake detection**: if the wall-clock gap between ticks > 2 min, log and run catch-up.
+5. **Sleep/wake detection**: if the wall-clock gap between ticks > 2 min, log and run catch-up (same tick).
 
 Runner for one target (`engine.run_target(target_id)`), in a worker thread pool (max 2 concurrent publishes; at
 most 1 per account):
@@ -570,8 +604,25 @@ most 1 per account):
     (no: just event; errors and manual ones notify);
   - `sent_to_app` → `sent_to_app` + notification "Abre TikTok para terminar la publicación".
 - `ProviderError` handling:
-  - `TRANSIENT` / `RATE_LIMITED`: if `commit_phase == commit_sent` → reconcile first; else retry with backoff
-    1, 5, 15, 30 min (+±20% jitter; `retry_after` wins) up to 4 attempts → then `error`.
+  - **No internet** (offline-aware retries): a network-level failure before the commit point
+    (`engine.is_network_failure`: `httpx.ConnectError`/`ConnectTimeout`/`ReadTimeout`/… in the cause chain, DNS
+    failure, no route, or the providers' `*_network`/`*_timeout`/`meta_connect_failed` codes) is confirmed with
+    a cheap probe (`connectivity.py`: one `HEAD` to the network's API host, any HTTP answer = reachable,
+    cached 30 s; the demo network is never probed). Unreachable → the target stays `publishing` with engine
+    flag `offline`, `next_attempt_at = now + 1 min`, `attempts` unchanged and no `error`; one `offline` event
+    per outage; one `info` notification "Sin conexión a internet" per outage once it lasts 5 min (setting
+    `connectivity_outage` = `{since, last_failed_at, notified}`, cleared and the notification marked read when
+    a probe succeeds, or — every tick, `engine.settle_outage` — once no target waits for the connection any
+    more, e.g. it was cancelled or became `missed`; a failed probe more than 3 min after the previous one starts
+    a new outage, notified again). A fresh target is not sent at all while a recent probe says offline. The
+    drawer shows "Esperando conexión a internet". Reachable → a genuine API problem: normal backoff below.
+    The same wait applies when the irreversible request itself fails at network level and the reconcile
+    confirms `not_published` (Facebook text/link/single-photo posts and TikTok inbox drafts send it first; a
+    TikTok upload cut mid-way): nothing went out, so it waits for the connection instead of retrying.
+  - `TRANSIENT` / `RATE_LIMITED`: if `commit_phase == commit_sent` → reconcile first (also when the cause is
+    a lost connection: never re-send blindly; a `not_published` answer to a network-level failure with no
+    internet → the offline wait above); else retry with backoff 1, 5, 15, 30 min (+±20% jitter;
+    `retry_after` wins) up to 4 attempts → then `error`.
   - `AUTH`: account → `needs_reconnect`, target → `error` with message, notification "Reconecta tu cuenta".
   - `PERMANENT`: `error`.
   - `AMBIGUOUS` or any exception after `before_commit`: reconcile → published / not_published (→ retry path) /

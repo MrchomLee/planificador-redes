@@ -23,7 +23,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from planificador import engine, postsvc
+from planificador import config, engine, postsvc
 from planificador.engine import EngineError
 from planificador.models import (
     Account,
@@ -212,6 +212,7 @@ def test_auth_refresh_failure_after_commit_flags_account_but_keeps_the_post(db, 
 
 
 def test_retry_wait_after_app_was_off_beyond_grace_is_missed(app, db, clock, demo_account, sched):
+    config.set_setting(db, "publish_late", False)  # the grace/missed rule
     demo = registry.register(CountingDemo())
     target = make_target(
         db,
@@ -236,6 +237,7 @@ def test_retry_wait_after_app_was_off_beyond_grace_is_missed(app, db, clock, dem
 
 
 def test_stale_precommit_claim_after_app_was_off_beyond_grace_is_missed(app, db, clock, demo_account):
+    config.set_setting(db, "publish_late", False)  # the grace/missed rule
     demo = registry.register(CountingDemo())
     target = make_target(db, demo_account, at=clock.now(), options={"demo_steps": 2})
     assert engine.claim_due(db, target.id, clock.now())  # claimed, then the app died before running it
@@ -247,6 +249,7 @@ def test_stale_precommit_claim_after_app_was_off_beyond_grace_is_missed(app, db,
 
 
 def test_paused_target_reopened_within_grace_continues(app, db, clock, demo_account):
+    config.set_setting(db, "publish_late", False)  # the grace/missed rule
     registry.register(CountingDemo())
     target = make_target(db, demo_account, at=clock.now(), options={"demo_steps": 3})
     first = restart(app, clock)
@@ -261,6 +264,7 @@ def test_paused_target_reopened_within_grace_continues(app, db, clock, demo_acco
 
 
 def test_paused_target_reopened_days_later_is_missed(app, db, clock, demo_account):
+    config.set_setting(db, "publish_late", False)  # the grace/missed rule
     registry.register(CountingDemo())
     target = make_target(db, demo_account, at=clock.now(), options={"demo_steps": 3})
     first = restart(app, clock)
@@ -294,6 +298,7 @@ class LongRateLimit(CountingDemo):
 
 
 def test_late_retry_is_measured_from_its_own_time(app, db, clock, demo_account, sched):
+    config.set_setting(db, "publish_late", False)  # the grace/missed rule
     registry.register(LongRateLimit())
     target = make_target(db, demo_account, at=clock.now(), options={"demo_steps": 1})
     assert sched.tick().outcomes[target.id] == "retry"

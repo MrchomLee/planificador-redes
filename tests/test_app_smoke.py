@@ -37,6 +37,7 @@ PAGES: dict[str, str] = {
     "/conexiones": "conexiones",
     "/marcas": "marcas",
     "/importar": "importar",
+    "/carga-masiva": "carga-masiva",
     "/ajustes": "ajustes",
     "/notificaciones": "notificaciones",
 }

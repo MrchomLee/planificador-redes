@@ -34,7 +34,7 @@ import unicodedata
 import zipfile
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote, urlsplit
@@ -446,8 +446,82 @@ def _native_cancel_failed(target: PostTarget) -> bool:
     return any(event.event == "native_cancel_failed" for event in target.events)
 
 
-def _when_label(target: PostTarget, tz: str) -> str | None:
+#: A scheduled automatic target this late is shown as "Atrasada" (it goes out as soon as possible).
+OVERDUE_AFTER = timedelta(minutes=2)
+
+
+def _engine_meta(target: PostTarget) -> dict:
+    """The engine's bookkeeping inside ``provider_state`` (``engine.ENGINE_STATE_KEY``)."""
+    state = target.provider_state if isinstance(target.provider_state, dict) else {}
+    meta = state.get("_engine")
+    return meta if isinstance(meta, dict) else {}
+
+
+def _offline_waiting(target: PostTarget) -> bool:
+    """Waiting for the internet connection (sent nothing yet; it goes out when the connection is back)."""
+    return (
+        target.status == TargetStatus.PUBLISHING
+        and str(target.commit_phase) != "commit_sent"
+        and bool(_engine_meta(target).get("offline"))
+    )
+
+
+def _queued_after_outage(target: PostTarget) -> bool:
+    """It waited for the internet connection, which is back, and now waits for its turn: overdue posts of one
+    account go out one at a time, with the catch-up spacing (engine flag ``queued``)."""
+    return (
+        target.status == TargetStatus.PUBLISHING
+        and str(target.commit_phase) != "commit_sent"
+        and bool(_engine_meta(target).get("queued"))
+    )
+
+
+def _due_at(target: PostTarget) -> datetime | None:
+    """When a target was due (engine ``due_at``: its scheduled time or an explicit retry time)."""
+    value = _engine_meta(target).get("due_at")
+    if value:
+        try:
+            return ensure_utc(datetime.fromisoformat(str(value)))
+        except ValueError:
+            pass
+    return target.scheduled_at
+
+
+def _overdue(target: PostTarget, now: datetime | None) -> bool:
+    """An automatic target whose time has passed but has not been picked up yet (the PC/app was not available,
+    or it waits for the catch-up spacing of its account)."""
+    if now is None or target.status != TargetStatus.SCHEDULED or target.scheduled_at is None:
+        return False
+    automatic = target.auto_publish or (
+        str(target.network) == "tiktok" and str((target.options or {}).get("mode") or "") == "inbox"
+    )
+    return automatic and ensure_utc(target.scheduled_at) < now - OVERDUE_AFTER
+
+
+def _offline_since(target: PostTarget) -> datetime | None:
+    value = _engine_meta(target).get("offline_since")
+    if not value:
+        return None
+    try:
+        return ensure_utc(datetime.fromisoformat(str(value)))
+    except ValueError:
+        return None
+
+
+def _when_label(target: PostTarget, tz: str, now: datetime | None = None) -> str | None:
     status = target.status
+    if _offline_waiting(target):
+        since = _offline_since(target)
+        if since is not None:
+            return f"Esperando conexión a internet desde el {format_dt_es(since, tz)}"
+        return "Esperando conexión a internet"
+    if _queued_after_outage(target):
+        due = _due_at(target)
+        if due is not None:
+            return f"Atrasada: estaba programada para el {format_dt_es(due, tz)}"
+        return "Atrasada"
+    if _overdue(target, now) and not target.attempts:
+        return f"Atrasada: estaba programada para el {format_dt_es(target.scheduled_at, tz)}"
     if status in (TargetStatus.PUBLISHED, TargetStatus.MANUAL_DONE) and target.published_at:
         if status == TargetStatus.PUBLISHED and _native_scheduled(target) and target.scheduled_at:
             when = format_dt_es(target.scheduled_at, tz)
@@ -471,7 +545,11 @@ _NOTES: dict[str, tuple[str, str]] = {
         "warning",
         "El vídeo está en la bandeja de la app de TikTok: termina la publicación allí.",
     ),
-    "missed": ("danger", "No se publicó porque la aplicación estaba cerrada a la hora prevista."),
+    "missed": (
+        "danger",
+        "No se publicó a tiempo porque la aplicación estaba cerrada (o sin internet) a la hora prevista, o "
+        "porque superó el límite de retraso. Puedes publicarla ahora, reprogramarla o descartarla.",
+    ),
     "unknown": (
         "danger",
         "Se envió pero no se pudo confirmar el resultado. Comprueba en la red si aparece antes de "
@@ -481,8 +559,27 @@ _NOTES: dict[str, tuple[str, str]] = {
 }
 
 
-def _target_note(target: PostTarget) -> tuple[str | None, str]:
+def _target_note(target: PostTarget, now: datetime | None = None) -> tuple[str | None, str]:
     status = str(target.status)
+    if _offline_waiting(target):
+        return (
+            "Esperando conexión a internet: se publicará sola en cuanto vuelva, sin gastar reintentos. Deja "
+            "el ordenador encendido y la app abierta.",
+            "warning",
+        )
+    if _queued_after_outage(target):
+        return (
+            "Ha vuelto la conexión a internet. Saldrá en su turno: las publicaciones atrasadas de una misma "
+            "cuenta salen de una en una, con la separación elegida en Ajustes › Publicación.",
+            "warning",
+        )
+    if _overdue(target, now):
+        return (
+            "Atrasada: saldrá en cuanto sea posible (ordenador encendido, app abierta e internet). Si hay "
+            "varias atrasadas de la misma cuenta, salen una a una con la separación elegida en Ajustes › "
+            "Publicación.",
+            "warning",
+        )
     if status == "scheduled" and not target.auto_publish:
         return (
             "Publicación asistida: a la hora programada te avisaremos para que la publiques tú.",
@@ -532,12 +629,19 @@ def _options_summary(target: PostTarget) -> list[tuple[str, str]]:
 
 
 def build_target_view(
-    db: Session, target: PostTarget, tz: str, sets: dict[str, frozenset], *, post_deleted: bool, focus: bool
+    db: Session,
+    target: PostTarget,
+    tz: str,
+    sets: dict[str, frozenset],
+    *,
+    post_deleted: bool,
+    focus: bool,
+    now: datetime | None = None,
 ) -> TargetView:
     account = target.account
     network = str(target.network)
     external_label = f"Ver en {network_label(network)}" if network != "demo" else "Ver publicación"
-    note, note_tone = _target_note(target)
+    note, note_tone = _target_note(target, None if post_deleted else now)
     detail = target.last_error_detail if isinstance(target.last_error_detail, dict) else None
     events = sorted(target.events, key=lambda e: (e.ts, e.id or 0), reverse=True)
     return TargetView(
@@ -557,7 +661,7 @@ def build_target_view(
         actions=_target_actions(target, sets, post_deleted),
         external_url=target.external_url,
         external_label=external_label,
-        when_label=_when_label(target, tz),
+        when_label=_when_label(target, tz, None if post_deleted else now),
         note=note,
         note_tone=note_tone,
         assisted=not target.auto_publish,
@@ -592,13 +696,13 @@ def detail_context(
     tz = _post_tz(post)
     sets = _status_sets()
     deleted = post.deleted_at is not None
+    now = clock.now()
     targets = [
-        build_target_view(db, t, tz, sets, post_deleted=deleted, focus=t.id == focus_target)
+        build_target_view(db, t, tz, sets, post_deleted=deleted, focus=t.id == focus_target, now=now)
         for t in sorted(post.targets, key=lambda t: t.id)
     ]
     statuses = [t.status for t in post.targets]
     can_publish_now = not deleted and any(s in sets["publish_now"] for s in statuses)
-    now = clock.now()
     # The scheduler changes statuses in the background: keep the open detail fresh while something is being
     # sent (or is about to be), e.g. right after "Publicar ahora".
     in_flight = not deleted and any(

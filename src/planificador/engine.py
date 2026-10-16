@@ -38,6 +38,28 @@ retries after 1, 5, 15 and 30 minutes (±20 % jitter); ``retry_after`` from the 
 is final (``error``). Every transition writes a ``post_events`` row; errors, reconnects, unknown outcomes,
 missed posts, manual reminders and TikTok drafts also create a notification.
 
+Offline-aware retries: a **network-level** failure before the commit point (connection refused, DNS
+failure, no route, connect/read timeout — :func:`is_network_failure`) is confirmed with a cheap connectivity
+probe (:mod:`planificador.connectivity`). No internet → the target keeps ``publishing`` with
+``next_attempt_at`` about a minute later and engine flag ``offline`` (:func:`_Runner._offline_wait`): no retry
+is spent, no error is recorded, one ``offline`` event per outage and one "Sin conexión a internet"
+notification per outage (after :data:`OFFLINE_NOTIFY_AFTER`). The scheduler probes again before resuming
+it and publishes it as soon as the connection is back. A reachable host means a genuine API problem: the
+usual backoff applies. After the commit point nothing changes (reconcile, never a blind re-send) — but when
+the reconcile confirms that nothing went out (``not_published``: the irreversible request was the run's first
+network call, e.g. a Facebook text post or a TikTok inbox init, or an upload broke off) and the failure was a
+network-level one with no internet, the target waits for the connection the same way.
+
+The outage record (:data:`OUTAGE_KEY`) ends when a probe succeeds, when nothing waits for the connection any
+more (:func:`settle_outage`, every scheduler tick) or, on the next failed probe, when the previous failed
+probe is older than :data:`OUTAGE_STALE_AFTER` (a new outage: notified again).
+
+Late publishing (:class:`LatePolicy`, settings ``publish_late`` / ``publish_late_max_hours`` /
+``catchup_spacing_minutes``): the scheduler decides *whether* a late target still goes out; the engine
+records when it was due (engine bookkeeping ``due_at``) and why it went out late (``late``: ``unavailable`` =
+the PC or the app was not available, ``offline`` = no internet), and on success adds a ``published_late``
+event and an informative notification ("Publicada con retraso…").
+
 Public API for routes (contract): :func:`publish_now`, :func:`retry_target`, :func:`cancel_target`,
 :func:`mark_done_manually` (raise :class:`EngineError` with a Spanish message on invalid operations).
 """
@@ -47,6 +69,7 @@ from __future__ import annotations
 import logging
 import random
 import re
+import socket
 import threading
 import time
 import unicodedata
@@ -57,11 +80,12 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import or_, select, update
+from sqlalchemy import case, or_, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from planificador import config, keepawake
+from planificador import connectivity as connectivity_mod
 from planificador.models import (
     NETWORK_LABELS,
     Account,
@@ -92,7 +116,14 @@ from planificador.providers.base import (
     scrub,
     scrub_text,
 )
-from planificador.timeutil import Clock, SystemClock, format_dt_es, format_duration_es, format_time_es
+from planificador.timeutil import (
+    Clock,
+    SystemClock,
+    ensure_utc,
+    format_dt_es,
+    format_duration_es,
+    format_time_es,
+)
 
 log = logging.getLogger(__name__)
 
@@ -113,6 +144,28 @@ MAX_STEPS_PER_RUN = 200
 HEARTBEAT_EVERY = timedelta(seconds=60)
 HTTP_TIMEOUT = httpx.Timeout(connect=15.0, read=120.0, write=120.0, pool=30.0)
 ENGINE_STATE_KEY = "_engine"
+#: While there is no internet, how often a waiting target re-checks the connection.
+OFFLINE_RECHECK = timedelta(seconds=60)
+#: The "Sin conexión a internet" notification is shown once per outage, when it lasts at least this long.
+OFFLINE_NOTIFY_AFTER = timedelta(minutes=5)
+#: ``settings`` key with the current internet outage
+#: ``{"since": iso, "last_failed_at": iso, "notified": bool}`` (absent while online or nothing waits for it).
+OUTAGE_KEY = "connectivity_outage"
+OUTAGE_TITLE = "Sin conexión a internet"
+#: A failed probe this long after the previous one starts a new outage (while posts wait for the connection
+#: the scheduler probes about every :data:`OFFLINE_RECHECK`; a longer silence means nobody was waiting, or the
+#: PC was asleep).
+OUTAGE_STALE_AFTER = 3 * OFFLINE_RECHECK
+#: How long after the last failed probe the scheduler may drop the outage record when no post waits for the
+#: connection (a short margin so a run that is about to start waiting is not raced).
+OUTAGE_SETTLE_AFTER = timedelta(seconds=30)
+#: Why a target went out late (engine bookkeeping ``late``).
+LATE_UNAVAILABLE = "unavailable"  # the PC was off/asleep or the app was closed
+LATE_OFFLINE = "offline"  # no internet connection
+#: Why a target became ``missed`` (:func:`set_missed`).
+MISSED_GRACE = "grace"  # publish_late off: the app was off beyond the grace window
+MISSED_MAX_LATE = "max_late"  # publish_late on: beyond the "Límite de retraso"
+MISSED_OFFLINE = "offline"  # publish_late off: no internet beyond the grace window
 #: Provider-state key with ``accounts.meta`` changes the engine merges into the account (YouTube lock status).
 ACCOUNT_META_UPDATES_KEY = "account_meta_updates"
 
@@ -160,6 +213,7 @@ OUTCOMES = (
     "cancelled",
     "skipped",
     "handoff_failed",
+    "offline",
 )
 
 
@@ -187,6 +241,16 @@ class EngineRuntime:
     write_lock: Any = None  # threading lock serialising engine writes (db.Database.write_lock)
     stop_event: threading.Event | None = None
     rng: random.Random = field(default_factory=random.Random)
+    connectivity: connectivity_mod.Connectivity | None = None  # internet probe (default: real HEAD probes)
+
+    def __post_init__(self) -> None:
+        if self.connectivity is None:
+            self.connectivity = connectivity_mod.Connectivity(self.clock)
+
+    def get_connectivity(self) -> connectivity_mod.Connectivity:
+        if self.connectivity is None:  # pragma: no cover - set in __post_init__
+            self.connectivity = connectivity_mod.Connectivity(self.clock)
+        return self.connectivity
 
     def get_public_media(self) -> Any:
         pm = self.public_media
@@ -226,6 +290,7 @@ def default_runtime(clock: Clock | None = None) -> EngineRuntime:
             write_lock=rt.write_lock,
             stop_event=rt.stop_event,
             rng=rt.rng,
+            connectivity=rt.connectivity,
         )
     from planificador import db as dbmod
 
@@ -350,6 +415,258 @@ def merge_state(state: dict, meta: dict) -> dict:
     if meta:
         out[ENGINE_STATE_KEY] = dict(meta)
     return out
+
+
+def engine_meta(target: PostTarget) -> dict:
+    """The engine bookkeeping stored in a target's ``provider_state``."""
+    return split_state(target.provider_state)[1]
+
+
+def _parse_iso(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return ensure_utc(datetime.fromisoformat(str(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+# ------------------------------------------------------------------------------------- late publishing
+
+
+@dataclass(frozen=True)
+class LatePolicy:
+    """What to do with targets that could not go out at their time (settings in Ajustes › Publicación).
+
+    - ``publish_late`` on (default): publish them as soon as possible — PC on, app open, internet — unless
+      they are later than ``max_late`` (``publish_late_max_hours``; ``None`` = no limit), then ``missed``.
+    - ``publish_late`` off (old behaviour): due while the app was not running and later than ``grace``
+      (``grace_minutes``) → ``missed``; waiting for internet beyond ``grace`` → ``missed`` too.
+    - ``spacing`` (``catchup_spacing_minutes``): minimum gap between overdue posts of the same account.
+    """
+
+    publish_late: bool = True
+    grace: timedelta = timedelta(minutes=120)
+    max_late: timedelta | None = None
+    spacing: timedelta = timedelta(minutes=15)
+
+    @classmethod
+    def load(cls, db: Session) -> LatePolicy:
+        hours = max(0, min(config.get_int(db, "publish_late_max_hours"), config.MAX_PUBLISH_LATE_HOURS))
+        spacing = max(
+            0, min(config.get_int(db, "catchup_spacing_minutes"), config.MAX_CATCHUP_SPACING_MINUTES)
+        )
+        return cls(
+            publish_late=config.get_bool(db, "publish_late"),
+            grace=timedelta(minutes=max(0, config.get_int(db, "grace_minutes"))),
+            max_late=timedelta(hours=hours) if hours > 0 else None,
+            spacing=timedelta(minutes=spacing),
+        )
+
+
+def lateness_reference(target: PostTarget) -> datetime | None:
+    """When a ``publishing`` target was due: the moment recorded at its claim (``due_at``: the scheduled time,
+    or the time of an explicit retry), else its scheduled time."""
+    due = _parse_iso(engine_meta(target).get("due_at"))
+    if due is not None:
+        return due
+    return target.scheduled_at or target.next_attempt_at or target.claimed_at
+
+
+def is_offline_waiting(target: PostTarget) -> bool:
+    """A ``publishing`` target that sent nothing irreversible and waits for the internet connection."""
+    if target.status != TargetStatus.PUBLISHING or target.commit_phase == CommitPhase.COMMIT_SENT:
+        return False
+    return bool(engine_meta(target).get("offline"))
+
+
+def is_queued_after_outage(target: PostTarget) -> bool:
+    """A ``publishing`` target that waited for the internet connection, which is back, and now waits for its
+    turn in its account's catch-up queue (engine flag ``queued``, :func:`end_offline_wait`)."""
+    if target.status != TargetStatus.PUBLISHING or target.commit_phase == CommitPhase.COMMIT_SENT:
+        return False
+    return bool(engine_meta(target).get("queued"))
+
+
+#: Exception class names that mean "the request did not get through" (as providers record them in
+#: ``ProviderError.detail["error"]`` when they wrap transport errors) and the codes they use for them.
+_TRANSPORT_ERROR_NAMES = frozenset(
+    {
+        "ConnectError",
+        "ConnectTimeout",
+        "ReadTimeout",
+        "WriteTimeout",
+        "PoolTimeout",
+        "TimeoutException",
+        "ReadError",
+        "WriteError",
+        "NetworkError",
+        "RemoteProtocolError",
+        "TransportError",
+        "ProxyError",
+        "gaierror",
+        "ConnectionError",
+        "ConnectionRefusedError",
+        "ConnectionResetError",
+        "ConnectionAbortedError",
+        "TimeoutError",
+    }
+)
+_NETWORK_ERROR_CODES = frozenset(
+    {
+        "meta_connect_failed",
+        "meta_timeout",
+        "meta_network",
+        "tiktok_network",
+        "tiktok_timeout",
+        "youtube_network",
+        "youtube_timeout",
+        "demo_offline",
+    }
+)
+_TRANSPORT_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    httpx.TransportError,
+    socket.gaierror,
+    ConnectionError,
+    TimeoutError,
+)
+
+
+def is_network_failure(exc: BaseException) -> bool:
+    """Whether ``exc`` looks like "the request never got an answer" (no internet, DNS failure, no route,
+    connect/read timeout) rather than an answer from the API. HTTP errors (5xx, 429) and rejections are not.
+    It is only a hint: the engine confirms it with a connectivity probe before treating it as offline."""
+    if isinstance(exc, ProviderError) and exc.kind != ErrorKind.TRANSIENT:
+        return False
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, _TRANSPORT_EXCEPTIONS):
+            return True
+        current = current.__cause__ or current.__context__
+    if isinstance(exc, ProviderError):
+        if exc.code in _NETWORK_ERROR_CODES:
+            return True
+        name = exc.detail.get("error") or exc.detail.get("exception")
+        return isinstance(name, str) and name in _TRANSPORT_ERROR_NAMES
+    return False
+
+
+def _late_reason_text(reason: str | None) -> str:
+    if reason == LATE_OFFLINE:
+        return "no había conexión a internet"
+    return "el equipo o la app no estaba disponible"
+
+
+def _resolve_outage_notices(s: Session, now: datetime) -> None:
+    """Mark the unread "Sin conexión a internet" notifications read (their outage is over)."""
+    from planificador.models import Notification
+
+    s.execute(
+        update(Notification)
+        .where(
+            Notification.kind == NotificationKind.INFO,
+            Notification.title == OUTAGE_TITLE,
+            Notification.read_at.is_(None),
+        )
+        .values(read_at=now)
+        .execution_options(synchronize_session=False)
+    )
+
+
+def _clear_outage(s: Session, now: datetime) -> dict | None:
+    """Drop the outage record and resolve its notification (no commit). Returns the dropped record, if any."""
+    raw = config.get_setting(s, OUTAGE_KEY, None)
+    if raw is None:
+        return None
+    config.delete_setting(s, OUTAGE_KEY, commit=False)
+    _resolve_outage_notices(s, now)
+    return raw if isinstance(raw, dict) else {}
+
+
+def note_connectivity(rt: EngineRuntime, online: bool, now: datetime) -> None:
+    """Track the current internet outage in ``settings`` (:data:`OUTAGE_KEY`): started on the first failed
+    probe, one "Sin conexión a internet" notification once it lasts :data:`OFFLINE_NOTIFY_AFTER`, cleared (and
+    that notification marked read) when a probe succeeds. A failed probe more than :data:`OUTAGE_STALE_AFTER`
+    after the previous one starts a new outage (the old notification is resolved; the new one is notified
+    again). Never raises."""
+    conn = rt.get_connectivity()
+    if online and getattr(conn, "outage_active", None) is False:
+        return
+    try:
+        if online:
+            previous = _write(rt, lambda s: _clear_outage(s, now))
+            if previous is not None:
+                log.info("Internet connection is back (offline since %s)", previous.get("since"))
+            conn.outage_active = False
+            return
+
+        def mark(s: Session) -> None:
+            raw = config.get_setting(s, OUTAGE_KEY, None)
+            info = dict(raw) if isinstance(raw, dict) else {}
+            since = _parse_iso(info.get("since"))
+            last = _parse_iso(info.get("last_failed_at")) or since
+            if since is None or since > now or last is None or now - last > OUTAGE_STALE_AFTER:
+                if raw is not None:
+                    _resolve_outage_notices(s, now)  # that outage ended unnoticed: this is a new one
+                fresh = {"since": now.isoformat(), "last_failed_at": now.isoformat(), "notified": False}
+                config.set_setting(s, OUTAGE_KEY, fresh, commit=False)
+                log.warning("No internet connection: publishing waits for it")
+                return
+            info["last_failed_at"] = max(last, now).isoformat()
+            if not info.get("notified") and now - since >= OFFLINE_NOTIFY_AFTER:
+                info["notified"] = True
+                _notify(
+                    s,
+                    NotificationKind.INFO,
+                    OUTAGE_TITLE,
+                    "Hay publicaciones esperando a la conexión. Saldrán solas en cuanto vuelva internet, sin "
+                    "gastar reintentos: deja el ordenador encendido y la app abierta.",
+                    now=now,
+                )
+            config.set_setting(s, OUTAGE_KEY, info, commit=False)
+
+        _write(rt, mark)
+        conn.outage_active = True
+    except Exception:  # bookkeeping only: never break publishing
+        log.debug("Could not record the connectivity state", exc_info=True)
+
+
+def settle_outage(rt: EngineRuntime, now: datetime) -> bool:
+    """End the outage record when no target waits for the connection any more (the scheduler calls this
+    every tick; it is one cheap read while there is no record). Only waiting targets probe the connection, so
+    if they all left that state (cancelled, ``missed``…) before internet came back, no successful probe would
+    ever clear the record: its notification would stay unread and the next outage would not be notified.
+    Records younger than :data:`OUTAGE_SETTLE_AFTER` are left alone (a run may be about to start waiting).
+    Returns whether a record was dropped. Never raises."""
+    conn = rt.get_connectivity()
+
+    def settle(s: Session) -> bool | None:
+        raw = config.get_setting(s, OUTAGE_KEY, None)
+        if raw is None:
+            return None
+        info = raw if isinstance(raw, dict) else {}
+        last = _parse_iso(info.get("last_failed_at")) or _parse_iso(info.get("since"))
+        if last is not None and now - last < OUTAGE_SETTLE_AFTER:
+            return False
+        publishing = s.scalars(select(PostTarget).where(PostTarget.status == TargetStatus.PUBLISHING))
+        if any(is_offline_waiting(t) for t in publishing):
+            return False
+        _clear_outage(s, now)
+        return True
+
+    try:
+        with rt.session_factory() as s:
+            recorded = config.get_setting(s, OUTAGE_KEY, None) is not None
+        dropped = _write(rt, settle) if recorded else None
+    except Exception:  # bookkeeping only
+        log.debug("Could not settle the connectivity state", exc_info=True)
+        return False
+    conn.outage_active = dropped is False
+    if dropped:
+        log.info("No post waits for the internet connection any more: outage record cleared")
+    return bool(dropped)
 
 
 def media_info(asset: MediaAsset) -> MediaInfo:
@@ -533,13 +850,47 @@ def _msg_manual(network: str, account: str, text: str) -> tuple[str, str]:
     )
 
 
-def _msg_missed(network: str, account: str, scheduled_at: datetime | None, tz: str | None) -> tuple[str, str]:
+_LATE_SETTING_HINT = (
+    "Para que las publicaciones atrasadas salgan solas en cuanto el equipo, la app e internet vuelvan a "
+    "estar disponibles, activa «Publicar las publicaciones atrasadas en cuanto se pueda» en Ajustes › "
+    "Publicación."
+)
+
+
+def _msg_missed(
+    network: str,
+    account: str,
+    scheduled_at: datetime | None,
+    tz: str | None,
+    reason: str = MISSED_GRACE,
+    limit: timedelta | None = None,
+) -> tuple[str, str]:
     label = network_label(network)
     when = format_dt_es(scheduled_at, tz) if scheduled_at else "la hora prevista"
+    actions = "Puedes publicarla ahora, reprogramarla o descartarla."
+    if reason == MISSED_MAX_LATE:
+        bound = format_duration_es(limit.total_seconds()) if limit is not None else "el máximo"
+        body = (
+            f"{account}: estaba programada para el {when} y ya supera el límite de retraso ({bound}) de "
+            f"Ajustes › Publicación. {actions}"
+        )
+    elif reason == MISSED_OFFLINE:
+        body = f"{account}: estaba programada para el {when} y no había conexión a internet. {actions} "
+        body += _LATE_SETTING_HINT
+    else:
+        body = f"{account}: estaba programada para el {when} y la app no estaba abierta. {actions} "
+        body += _LATE_SETTING_HINT
+    return f"Publicación perdida en {label}", body
+
+
+def _msg_published_late(
+    network: str, account: str, due_at: datetime, tz: str | None, delay: timedelta, reason: str | None
+) -> tuple[str, str]:
+    label = network_label(network)
     return (
-        f"Publicación perdida en {label}",
-        f"{account}: estaba programada para el {when} y la app no estaba abierta. Puedes publicarla ahora, "
-        "reprogramarla o descartarla.",
+        f"Publicada con retraso en {label}",
+        f"{account}: estaba programada para el {format_dt_es(due_at, tz)} y ha salido "
+        f"{format_duration_es(delay.total_seconds())} tarde porque {_late_reason_text(reason)}.",
     )
 
 
@@ -586,8 +937,40 @@ def _msg_sent_to_app(network: str, account: str) -> tuple[str, str]:
 # ------------------------------------------------------------------- scheduler-facing transitions
 
 
-def claim_due(db: Session, target_id: int, now: datetime, *, late_by: timedelta | None = None) -> bool:
-    """``scheduled`` → ``publishing`` (atomic). Commits. Returns whether this caller owns the target."""
+#: ``post_events`` written when a target is (re)started: the catch-up spacing measures the gap from the latest
+#: of these per account (and from the latest ``published_at``).
+RELEASE_EVENTS: tuple[str, ...] = ("publishing", "catchup", "recovered")
+
+
+def _update_meta(
+    db: Session, target_id: int, *, set_: dict | None = None, drop: tuple[str, ...] = ()
+) -> None:
+    """Merge engine bookkeeping into a target this caller just claimed (same transaction as the claim)."""
+    row = db.get(PostTarget, target_id, populate_existing=True)
+    if row is None:  # pragma: no cover - deleted concurrently (the claim would have failed)
+        return
+    state, meta = split_state(row.provider_state)
+    for key in drop:
+        meta.pop(key, None)
+    meta.update(set_ or {})
+    row.provider_state = merge_state(state, meta)
+
+
+def claim_due(
+    db: Session,
+    target_id: int,
+    now: datetime,
+    *,
+    late_by: timedelta | None = None,
+    due_at: datetime | None = None,
+    catchup: bool = False,
+    tz: str | None = None,
+) -> bool:
+    """``scheduled`` → ``publishing`` (atomic). Commits. Returns whether this caller owns the target.
+
+    Records when it was due (``due_at``, default: its scheduled time) for the late-publishing rules; a
+    ``catchup`` claim (it is due since the PC/app was not available) is marked ``late = unavailable`` and its
+    ``late`` event says when it was due."""
     claimed = _guarded_update(
         db,
         target_id,
@@ -602,23 +985,55 @@ def claim_due(db: Session, target_id: int, now: datetime, *, late_by: timedelta 
     if not claimed:
         db.rollback()
         return False
+    row = db.get(PostTarget, target_id, populate_existing=True)
+    reference = due_at or (row.scheduled_at if row is not None else None) or now
+    meta: dict[str, Any] = {"due_at": ensure_utc(reference).isoformat()}
+    if catchup:
+        meta["late"] = LATE_UNAVAILABLE
+    _update_meta(
+        db, target_id, set_=meta, drop=("late", "offline", "offline_since", "queued", "last_wait_message")
+    )
     add_event(db, target_id, now, "publishing", "Empieza la publicación.")
     if late_by is not None and late_by > LATE_NOTE_AFTER:
+        message = f"Se publica con {format_duration_es(late_by.total_seconds())} de retraso."
+        if catchup:
+            message = (
+                f"Se publica con {format_duration_es(late_by.total_seconds())} de retraso: estaba programada "
+                f"para el {format_dt_es(reference, tz)} y el equipo o la app no estaba disponible."
+            )
         add_event(
             db,
             target_id,
             now,
             "late",
-            f"Se publica con {format_duration_es(late_by.total_seconds())} de retraso.",
+            message,
             level=EventLevel.WARNING,
-            data={"late_seconds": int(late_by.total_seconds())},
+            data={"late_seconds": int(late_by.total_seconds()), "catchup": catchup},
         )
     db.commit()
     return True
 
 
-def claim_waiting(db: Session, target_id: int, seen_next_attempt_at: datetime, now: datetime) -> bool:
-    """Take a ``publishing`` target whose wait/backoff elapsed (atomic). Commits."""
+def _release_note(release: str, *, queued: bool = False) -> str:
+    if queued:
+        return "Le llega el turno: se retoma la publicación atrasada."
+    if release == LATE_OFFLINE:
+        return "Ha vuelto la conexión a internet: se retoma la publicación."
+    return "Publicación atrasada: se retoma ahora que el equipo y la app vuelven a estar disponibles."
+
+
+def claim_waiting(
+    db: Session,
+    target_id: int,
+    seen_next_attempt_at: datetime,
+    now: datetime,
+    *,
+    release: str | None = None,
+) -> bool:
+    """Take a ``publishing`` target whose wait/backoff elapsed (atomic). Commits.
+
+    ``release`` (``unavailable`` | ``offline``): it resumes late, as a catch-up release (a ``catchup`` event,
+    which the per-account spacing counts, and ``late`` bookkeeping for the "Publicada con retraso" note)."""
     claimed = _guarded_update(
         db,
         target_id,
@@ -629,12 +1044,33 @@ def claim_waiting(db: Session, target_id: int, seen_next_attempt_at: datetime, n
     if not claimed:
         db.rollback()
         return False
+    row = db.get(PostTarget, target_id)
+    meta = engine_meta(row) if row is not None else {}
+    if release:
+        _update_meta(
+            db,
+            target_id,
+            set_={"late": meta.get("late") or release},
+            drop=("offline", "offline_since", "queued"),
+        )
+        note = _release_note(release, queued=bool(meta.get("queued")))
+        add_event(db, target_id, now, "catchup", note, data={"reason": release})
+    elif "queued" in meta:
+        _update_meta(db, target_id, drop=("queued",))
     db.commit()
     return True
 
 
-def claim_stale(db: Session, target_id: int, seen_claimed_at: datetime | None, now: datetime) -> bool:
-    """Re-claim a ``publishing`` target abandoned by a crashed run (atomic). Commits."""
+def claim_stale(
+    db: Session,
+    target_id: int,
+    seen_claimed_at: datetime | None,
+    now: datetime,
+    *,
+    release: str | None = None,
+) -> bool:
+    """Re-claim a ``publishing`` target abandoned by a crashed run (atomic). Commits. ``release`` as in
+    :func:`claim_waiting` (the ``recovered`` event already counts as a release for the spacing)."""
     seen = (
         PostTarget.claimed_at.is_(None)
         if seen_claimed_at is None
@@ -650,6 +1086,12 @@ def claim_stale(db: Session, target_id: int, seen_claimed_at: datetime | None, n
     if not claimed:
         db.rollback()
         return False
+    if release:
+        row = db.get(PostTarget, target_id)
+        reason = engine_meta(row).get("late") if row is not None else None
+        _update_meta(
+            db, target_id, set_={"late": reason or release}, drop=("offline", "offline_since", "queued")
+        )
     add_event(
         db,
         target_id,
@@ -658,6 +1100,65 @@ def claim_stale(db: Session, target_id: int, seen_claimed_at: datetime | None, n
         "Se retoma la publicación tras un cierre inesperado de la app.",
         level=EventLevel.WARNING,
     )
+    db.commit()
+    return True
+
+
+def postpone_offline(db: Session, target: PostTarget, now: datetime) -> bool:
+    """Still no internet: push a waiting target's next check :data:`OFFLINE_RECHECK` later (quietly: no event,
+    no retry spent). Guarded on the ``next_attempt_at`` the caller read. Commits."""
+    ok = _guarded_update(
+        db,
+        target.id,
+        {"next_attempt_at": now + OFFLINE_RECHECK},
+        status_in=TargetStatus.PUBLISHING,
+        extra=(
+            PostTarget.next_attempt_at == target.next_attempt_at,
+            PostTarget.commit_phase != CommitPhase.COMMIT_SENT,
+        ),
+    )
+    if not ok:
+        db.rollback()
+        return False
+    db.commit()
+    return True
+
+
+def end_offline_wait(db: Session, target: PostTarget, now: datetime, *, queued: bool = False) -> bool:
+    """The connection is back, but the scheduler does not resume this offline-waiting target in this tick
+    (the catch-up spacing of its account holds it back, or no worker is free): it no longer waits for the
+    internet, so drop ``offline`` / ``offline_since`` (no more "Esperando conexión a internet" in its detail).
+    ``queued``: it is an overdue catch-up release, so record engine flag ``queued`` to keep its place in the
+    account's catch-up queue (:func:`is_queued_after_outage`). Guarded on the ``next_attempt_at`` the caller
+    read. Commits."""
+    state, meta = split_state(target.provider_state)
+    if not meta.get("offline"):
+        return False
+    meta.pop("offline", None)
+    meta.pop("offline_since", None)
+    if queued:
+        meta["queued"] = True
+    ok = _guarded_update(
+        db,
+        target.id,
+        {"provider_state": merge_state(state, meta), "updated_at": now},
+        status_in=TargetStatus.PUBLISHING,
+        extra=(
+            PostTarget.next_attempt_at == target.next_attempt_at,
+            PostTarget.commit_phase != CommitPhase.COMMIT_SENT,
+        ),
+    )
+    if not ok:
+        db.rollback()
+        return False
+    if queued:
+        message = (
+            "Ha vuelto la conexión a internet. Saldrá en su turno: las publicaciones atrasadas de una misma "
+            "cuenta salen de una en una, con la separación elegida en Ajustes › Publicación."
+        )
+    else:
+        message = "Ha vuelto la conexión a internet: se continúa con la publicación."
+    add_event(db, target.id, now, "online", message)
     db.commit()
     return True
 
@@ -712,8 +1213,19 @@ def can_miss_while_publishing(target: PostTarget) -> bool:
     return meta.get("pending") != "reconcile"
 
 
-def set_missed(db: Session, target: PostTarget, now: datetime, *, grace: timedelta | None = None) -> bool:
-    """Due while the app was off and beyond the grace window → ``missed`` + notification.
+def set_missed(
+    db: Session,
+    target: PostTarget,
+    now: datetime,
+    *,
+    grace: timedelta | None = None,
+    reason: str = MISSED_GRACE,
+    limit: timedelta | None = None,
+) -> bool:
+    """A target that will not go out late → ``missed`` + notification. ``reason``: :data:`MISSED_GRACE` (late
+    publishing off: due while the app was off and beyond the grace window ``grace``), :data:`MISSED_MAX_LATE`
+    (beyond the "Límite de retraso" ``limit``) or :data:`MISSED_OFFLINE` (late publishing off: no internet
+    beyond the grace window).
 
     Also for a ``publishing`` target that has not sent anything irreversible yet (see
     :func:`can_miss_while_publishing`): the guard is on the values the caller read (``next_attempt_at``,
@@ -756,27 +1268,36 @@ def set_missed(db: Session, target: PostTarget, now: datetime, *, grace: timedel
     account = target.account
     label = account.display_name if account is not None else ""
     tz = target.post.brand.timezone if target.post is not None and target.post.brand is not None else None
-    margin = format_duration_es(grace.total_seconds()) if grace is not None else "espera"
-    if publishing:
-        reason = (
+    if limit is None:
+        limit = grace
+    margin = format_duration_es(limit.total_seconds()) if limit is not None else "espera"
+    data: dict[str, Any] = {"reason": reason}
+    if grace is not None:
+        data["grace_minutes"] = int(grace.total_seconds() // 60)
+    if limit is not None:
+        data["limit_minutes"] = int(limit.total_seconds() // 60)
+    if reason == MISSED_MAX_LATE:
+        message = (
+            f"No se publicó: ya supera el límite de retraso de {margin} (Ajustes › Publicación), así que "
+            "no se envía tan tarde."
+        )
+    elif reason == MISSED_OFFLINE:
+        message = (
+            f"No se publicó: no había conexión a internet y ya ha pasado el margen de {margin} (publicar con "
+            "retraso está desactivado en Ajustes › Publicación)."
+        )
+    elif publishing:
+        message = (
             "No se publicó: la app no estaba abierta para terminar el envío y ya ha pasado el margen de "
             f"{margin}."
         )
     else:
-        reason = (
+        message = (
             "No se publicó: la app no estaba abierta a la hora programada y ya ha pasado el margen de "
             f"{margin}."
         )
-    add_event(
-        db,
-        target.id,
-        now,
-        "missed",
-        reason,
-        level=EventLevel.ERROR,
-        data={"grace_minutes": int(grace.total_seconds() // 60)} if grace is not None else None,
-    )
-    title, body = _msg_missed(str(target.network), label, target.scheduled_at, tz)
+    add_event(db, target.id, now, "missed", message, level=EventLevel.ERROR, data=data)
+    title, body = _msg_missed(str(target.network), label, target.scheduled_at, tz, reason, limit)
     _notify(
         db, NotificationKind.MISSED, title, body, now=now, target_id=target.id, account_id=target.account_id
     )
@@ -841,6 +1362,7 @@ class _TargetInfo:
     brand_tz: str | None
     settings: ProviderSettings
     post_deleted: bool
+    policy: LatePolicy = field(default_factory=LatePolicy)
 
 
 class _Runner:
@@ -906,6 +1428,14 @@ class _Runner:
                         + "). Vuelve a añadirlo y reintenta.",
                     )
                 )
+            # Waiting for the internet (or a probe just failed): check the connection before sending anything.
+            waiting = self.engine_meta.get("offline") or self.rt.get_connectivity().known_offline(
+                info.network
+            )
+            if waiting and not self._early_handoff():
+                if not self._online():
+                    return self._offline_wait(None)
+                self._back_online()
 
         ctx = self._context()
         first = not self.state and self.commit_phase == CommitPhase.NONE and info.attempts == 0
@@ -968,6 +1498,7 @@ class _Runner:
                 brand_tz=post.brand.timezone if post is not None and post.brand is not None else None,
                 settings=config.provider_settings(s, base_url=self.rt.base_url),
                 post_deleted=post is not None and post.deleted_at is not None,
+                policy=LatePolicy.load(s),
             )
 
     def _context(self) -> PublishContext:
@@ -1074,6 +1605,74 @@ class _Runner:
             )
         except Exception:
             log.debug("Heartbeat failed for target %s", self.target_id, exc_info=True)
+
+    # ---- connectivity
+
+    def _online(self, *, fresh: bool = False) -> bool:
+        """Probe the network's API host (cached unless ``fresh``) and track the outage state."""
+        online = self.rt.get_connectivity().check(self.info.network, self.http, fresh=fresh)
+        note_connectivity(self.rt, online, self._now())
+        return online
+
+    def _back_online(self) -> None:
+        if self.engine_meta.pop("offline", None):
+            self.engine_meta.pop("offline_since", None)
+            self._log_safe(
+                "online",
+                "Ha vuelto la conexión a internet: se continúa con la publicación.",
+                None,
+                EventLevel.INFO,
+            )
+
+    def _offline_wait(self, exc: ProviderError | None) -> str:
+        """No internet before the commit point: wait for the connection without spending a retry. The target
+        stays ``publishing``; the scheduler checks the connection again in :data:`OFFLINE_RECHECK`."""
+        now = self._now()
+        first = not self.engine_meta.get("offline")
+        self.engine_meta["offline"] = True
+        self.engine_meta.pop("queued", None)
+        self.engine_meta.setdefault("offline_since", now.isoformat())
+        self.engine_meta.setdefault("late", LATE_OFFLINE)
+        self.engine_meta.pop("pending", None)
+        next_at = now + OFFLINE_RECHECK
+        updates = self._take_account_updates()
+        persisted = merge_state(self.state, self.engine_meta)
+        detail = exc.to_dict() if exc is not None else None
+        message = (
+            "Esperando conexión a internet: la publicación saldrá en cuanto vuelva (no se gastan "
+            "reintentos). Deja el ordenador encendido y la app abierta."
+        )
+
+        def write(s: Session) -> None:
+            self._apply_account_updates(s, updates)
+            values: dict[str, Any] = {
+                "provider_state": persisted,
+                "commit_phase": self.commit_phase,
+                "next_attempt_at": next_at,
+                "claimed_at": None,
+                "last_error": None,
+                "updated_at": now,
+            }
+            if detail is not None:
+                values["last_error_detail"] = detail
+            if _guarded_update(s, self.target_id, values, status_in=TargetStatus.PUBLISHING) and first:
+                add_event(s, self.target_id, now, "offline", message, level=EventLevel.WARNING, data=detail)
+
+        _write(self.rt, write)
+        return "offline"
+
+    def _offline_instead(self, exc: BaseException) -> bool:
+        """A network-level failure before the commit point while there really is no internet (the probe
+        confirms it). Early native hand-offs keep their own retry path."""
+        if self.commit_phase == CommitPhase.COMMIT_SENT or not is_network_failure(exc):
+            return False
+        if self._early_handoff():
+            return False
+        try:
+            return not self._online(fresh=True)
+        except Exception:  # pragma: no cover - the probe never raises; be defensive anyway
+            log.debug("Connectivity probe failed", exc_info=True)
+            return False
 
     # ---- pre-flight
 
@@ -1239,8 +1838,13 @@ class _Runner:
         now = self._now()
         persisted = merge_state(self.state, self.engine_meta)
         message = "Publicación en pausa: la app se está cerrando. Continuará al volver a abrirla."
+        policy = self.info.policy
         if self.commit_phase != CommitPhase.COMMIT_SENT:
-            message += " Si para entonces ha pasado el margen de espera, quedará como perdida."
+            if not policy.publish_late:
+                message += " Si para entonces ha pasado el margen de espera, quedará como perdida."
+            elif policy.max_late is not None:
+                bound = format_duration_es(policy.max_late.total_seconds())
+                message += f" Si para entonces supera el límite de retraso ({bound}), quedará como perdida."
 
         def write(s: Session) -> None:
             if _guarded_update(
@@ -1269,6 +1873,7 @@ class _Runner:
         published_at = now
         if self.state.get("native_scheduled") and info.scheduled_at is not None and info.scheduled_at > now:
             published_at = info.scheduled_at  # handed to the network's scheduler: goes live at that time
+        late = self._late_info(published_at)
         self.engine_meta = {}
         updates = self._take_account_updates()
         persisted = merge_state(self.state, self.engine_meta)
@@ -1317,8 +1922,43 @@ class _Runner:
             )
             if ok:  # earlier error/missed reminders about this target are moot now
                 _resolve_notifications(s, self.target_id, now)
+            if late is not None and ok:
+                due_at, delay, reason = late
+                when = format_dt_es(due_at, info.brand_tz)
+                add_event(
+                    s,
+                    self.target_id,
+                    now,
+                    "published_late",
+                    f"{'Enviada a la app' if sent_to_app else 'Publicada'} con retraso: estaba programada "
+                    f"para el {when}; {_late_reason_text(reason)}.",
+                    level=EventLevel.WARNING,
+                    data={
+                        "due_at": due_at.isoformat(),
+                        "late_seconds": int(delay.total_seconds()),
+                        "reason": reason,
+                    },
+                )
+                if not sent_to_app:
+                    title, body = _msg_published_late(
+                        info.network, info.account_label, due_at, info.brand_tz, delay, reason
+                    )
+                    _notify(
+                        s,
+                        NotificationKind.INFO,
+                        title,
+                        body,
+                        now=now,
+                        target_id=self.target_id,
+                        account_id=info.account_id,
+                    )
             if sent_to_app and ok:
                 title, body = _msg_sent_to_app(info.network, info.account_label)
+                if late is not None:
+                    body += (
+                        f" Va con retraso: estaba programada para el {format_dt_es(late[0], info.brand_tz)} "
+                        f"({_late_reason_text(late[2])})."
+                    )
                 _notify(
                     s,
                     NotificationKind.INFO,
@@ -1331,6 +1971,20 @@ class _Runner:
 
         _write(self.rt, write)
         return str(status)
+
+    def _late_info(self, published_at: datetime) -> tuple[datetime, timedelta, str | None] | None:
+        """(due time, delay, reason) when this target goes out late because the PC/app or the internet was
+        not available (engine bookkeeping ``late``), else ``None``."""
+        reason = self.engine_meta.get("late")
+        if not reason:
+            return None
+        due_at = _parse_iso(self.engine_meta.get("due_at")) or self.info.scheduled_at
+        if due_at is None:
+            return None
+        delay = published_at - due_at
+        if delay <= LATE_NOTE_AFTER:
+            return None
+        return due_at, delay, str(reason)
 
     def _fail(self, exc: ProviderError, *, exhausted: bool = False, attempts: int | None = None) -> str:
         if self._early_handoff():
@@ -1644,6 +2298,8 @@ class _Runner:
 
     def _on_provider_error(self, exc: ProviderError, ctx: PublishContext) -> str:
         committed = self.commit_phase == CommitPhase.COMMIT_SENT
+        if self._offline_instead(exc):
+            return self._offline_wait(exc)
         if exc.kind == ErrorKind.AMBIGUOUS or (
             committed and exc.kind in (ErrorKind.TRANSIENT, ErrorKind.RATE_LIMITED)
         ):
@@ -1656,6 +2312,16 @@ class _Runner:
         return self._fail(exc)
 
     def _on_exception(self, exc: Exception, ctx: PublishContext) -> str:
+        if self._offline_instead(exc):
+            log.info("No internet while publishing target %s (%s)", self.target_id, type(exc).__name__)
+            return self._offline_wait(
+                ProviderError(
+                    ErrorKind.TRANSIENT,
+                    "network_unreachable",
+                    "Sin conexión a internet.",
+                    detail={"exception": type(exc).__name__, "text": scrub_text(str(exc))[:300]},
+                )
+            )
         log.error("Unexpected error publishing target %s", self.target_id, exc_info=exc)
         err = ProviderError(
             ErrorKind.TRANSIENT,
@@ -1715,13 +2381,18 @@ class _Runner:
             )
         if outcome == "not_published":
             self.commit_phase = CommitPhase.NONE
-            self.engine_meta = {}
+            self.engine_meta = {k: v for k, v in self.engine_meta.items() if k in ("due_at", "late")}
             self._log_safe(
                 "reconciled_not_published",
                 result.message or "La red confirma que no se publicó; se puede volver a enviar.",
                 None,
                 EventLevel.INFO,
             )
+            # Nothing went out. When the irreversible request was the run's first network call (Facebook
+            # text/link/photo, TikTok inbox init) or an upload broke off, a connection failure lands here:
+            # with no internet, wait for it instead of spending the retries.
+            if cause is not None and self._offline_instead(cause):
+                return self._offline_wait(cause)
             return self._retry(
                 cause
                 or ProviderError(
@@ -2136,6 +2807,14 @@ def due_reference(target: PostTarget) -> datetime | None:
     return target.scheduled_at
 
 
+def due_reference_sql() -> Any:
+    """SQL twin of :func:`due_reference` for due targets (``scheduled_at`` set)."""
+    return case(
+        (PostTarget.next_attempt_at > PostTarget.scheduled_at, PostTarget.next_attempt_at),
+        else_=PostTarget.scheduled_at,
+    )
+
+
 def due_filter(now: datetime) -> Any:
     """SQL condition for targets that are due (status scheduled, time reached, post not in the trash)."""
     return (
@@ -2163,6 +2842,10 @@ __all__ = [
     "default_runtime",
     "due_filter",
     "due_reference",
+    "due_reference_sql",
+    "end_offline_wait",
+    "is_queued_after_outage",
+    "settle_outage",
     "is_tiktok_inbox",
     "wants_native_schedule",
     "mark_account_needs_reconnect",

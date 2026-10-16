@@ -6,9 +6,13 @@ Behaviour is controlled by ``target.options``:
 
 - ``demo_steps`` (int, default 2): total ``publish_step`` calls for a successful publish. Every call except
   the last returns ``wait`` (1 s); the last one commits. 2 → one ``wait`` of 1 s, then ``published``.
-- ``demo_fail``: ``transient`` | ``rate_limited`` | ``auth`` | ``permanent`` | ``ambiguous`` | ``none``.
-  ``transient``/``rate_limited``/``auth``/``permanent`` raise **before** the commit point (``before_commit``
-  is not called). ``ambiguous`` raises **after** ``ctx.before_commit`` (the outcome is unknown).
+- ``demo_fail``: ``transient`` | ``rate_limited`` | ``auth`` | ``permanent`` | ``ambiguous`` | ``offline`` |
+  ``offline_after_commit`` | ``none``. ``transient``/``rate_limited``/``auth``/``permanent``/``offline`` raise
+  **before** the commit point (``before_commit`` is not called). ``ambiguous`` and ``offline_after_commit``
+  raise **after** ``ctx.before_commit`` (the outcome is unknown). ``offline*`` simulate "no internet": a
+  ``TRANSIENT`` error caused by an ``httpx.ConnectError``, as the real providers raise it (not offered in the
+  composer: the demo network has no host to probe, so the engine only treats it as offline when a test
+  injects a connectivity probe).
 - ``demo_fail_times`` (int): how many times to fail before succeeding. Absent → fail every time.
 - ``demo_result`` (extension): ``published`` (default) | ``sent_to_app`` (simulates TikTok inbox mode).
 - ``demo_reconcile`` (extension): what :meth:`DemoProvider.reconcile` reports when the remote outcome was not
@@ -60,13 +64,19 @@ FAIL_KINDS: dict[str, ErrorKind] = {
     "auth": ErrorKind.AUTH,
     "permanent": ErrorKind.PERMANENT,
     "ambiguous": ErrorKind.AMBIGUOUS,
+    "offline": ErrorKind.TRANSIENT,
+    "offline_after_commit": ErrorKind.TRANSIENT,
 }
+#: Failures raised after the irreversible point (the others are raised before it).
+AFTER_COMMIT_FAILS = frozenset({"ambiguous", "offline_after_commit"})
 FAIL_MESSAGES: dict[str, str] = {
     "transient": "Fallo temporal simulado en la red Demo. Se reintentará.",
     "rate_limited": "Límite de peticiones simulado en la red Demo. Se reintentará más tarde.",
     "auth": "La cuenta Demo necesita reconexión (simulado).",
     "permanent": "La red Demo ha rechazado la publicación (simulado).",
     "ambiguous": "La red Demo no respondió tras enviar la publicación (simulado).",
+    "offline": "No se pudo conectar con la red Demo (¿hay conexión a Internet?). Simulado.",
+    "offline_after_commit": "Se perdió la conexión con la red Demo tras enviar la publicación (simulado).",
 }
 
 _SAMPLE_COMMENTS = (
@@ -153,13 +163,17 @@ class DemoProvider(Provider):
     def _raise(self, ctx: PublishContext, fail: str) -> None:
         ctx.state["failures"] = int(ctx.state.get("failures", 0)) + 1
         ctx.save_state(ctx.state)
-        raise ProviderError(
+        error = ProviderError(
             FAIL_KINDS[fail],
-            f"demo_{fail}",
+            "demo_offline" if fail.startswith("offline") else f"demo_{fail}",
             FAIL_MESSAGES[fail],
             detail={"simulated": True, "attempt": ctx.state["failures"]},
             retry_after=60 if fail == "rate_limited" else None,
         )
+        if fail.startswith("offline"):
+            error.detail["error"] = "ConnectError"
+            raise error from httpx.ConnectError("[Errno -3] Temporary failure in name resolution (simulado)")
+        raise error
 
     def publish_step(self, ctx: PublishContext) -> StepResult:
         steps = max(1, _int_option(ctx.target.options, "demo_steps", 2) or 1)
@@ -176,14 +190,14 @@ class DemoProvider(Provider):
             return StepResult("wait", wait_seconds=WAIT_SECONDS, message="Procesando en Demo…")
 
         fail = self._failure(ctx)
-        if fail is not None and fail != "ambiguous":
+        if fail is not None and fail not in AFTER_COMMIT_FAILS:
             self._raise(ctx, fail)
 
         ctx.state["steps_done"] = steps
         ctx.state["commit_attempts"] = int(ctx.state.get("commit_attempts", 0)) + 1
         ctx.before_commit(ctx.state)  # --- irreversible point ---
 
-        if fail == "ambiguous":
+        if fail in AFTER_COMMIT_FAILS:
             self._raise(ctx, fail)
 
         ctx.state["remote_published"] = True

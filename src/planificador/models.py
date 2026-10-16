@@ -185,6 +185,7 @@ class PostSource(StrEnum):
     COMPOSER = "composer"
     CSV = "csv"
     DUPLICATE = "duplicate"
+    BULK = "bulk"  # "Carga masiva" (bulk.py)
 
 
 NETWORK_LABELS: dict[str, str] = {

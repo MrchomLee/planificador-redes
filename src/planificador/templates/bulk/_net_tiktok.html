@@ -1,0 +1,96 @@
+{#- Bulk · TikTok common settings (TikTok posting guidelines, research 03 §4.2, same keys as the composer): creator
+    nickname, privacy from creator_info with no default (a single "Solo yo" option is still chosen by the user),
+    interactions unchecked by default and greyed when the creator disabled them, AI label, commercial content
+    disclosure, music-usage consent (required for Direct Post, never stored). Only the modes the account's
+    granted scopes allow: without video.publish the draft mode is forced. Vars: K, info. -#}
+<div class="bk-fields">
+  <div class="bk-tt-creator" x-show="ttModes('{{ K }}').includes('direct')">
+    <span class="bk-tt-creator__avatar">{{ net_glyph("tiktok", 16) }}</span>
+    <div class="grow">
+      <div>Publicar como <strong x-text="creatorName('{{ K }}')">{{ info.name }}</strong></div>
+      <div class="bk-help" x-show="creator['{{ K }}'] && creator['{{ K }}'].loading">Consultando tu cuenta de TikTok…</div>
+      <div class="bk-help text-danger" x-show="creator['{{ K }}'] && creator['{{ K }}'].error" x-text="creator['{{ K }}'] && creator['{{ K }}'].error"></div>
+    </div>
+    <button type="button" class="btn btn--ghost btn--sm" @click="loadCreator('{{ K }}')" title="Volver a consultar TikTok" aria-label="Volver a consultar TikTok"
+            :disabled="creator['{{ K }}'] && creator['{{ K }}'].loading">{{ icon("refresh-cw", 15) }}</button>
+  </div>
+
+  <div class="bk-field">
+    <label class="switch" :class="{'is-locked': ttModeLocked('{{ K }}')}">
+      <input type="checkbox" role="switch" :checked="opt('{{ K }}').mode === 'inbox'" @change="setInbox('{{ K }}', $event.target.checked)"
+             :disabled="ttModeLocked('{{ K }}')">
+      <span class="switch__track" aria-hidden="true"></span>
+      <span class="switch__text"><span class="switch__label">Enviar a la app de TikTok como borrador</span>
+        <span class="switch__help">A cada hora el vídeo llega a tu bandeja de TikTok para terminarlo allí (música, efectos…). El texto no se envía: te lo dejaremos listo para copiar.</span></span>
+    </label>
+    <div class="callout cmp-callout bk-callout" x-show="ttModeNote('{{ K }}')" x-cloak :class="ttModes('{{ K }}').length ? 'tone-info' : 'tone-danger'">
+      {{ icon("info", 16) }}<div><span x-text="ttModeNote('{{ K }}')"></span> <a href="/ayuda/tiktok#7-content-posting-api-publicar-videos">Ver la guía</a></div>
+    </div>
+  </div>
+
+  <div class="bk-fields" x-show="ttDirect('{{ K }}')">
+    <div class="bk-field">
+      <label class="bk-label" for="bk-tt-privacy-{{ K }}">¿Quién puede ver las publicaciones? <span class="req" aria-hidden="true">*</span></label>
+      <select id="bk-tt-privacy-{{ K }}" class="select" @change="setPrivacy('{{ K }}', $event.target.value)"
+              :aria-invalid="!opt('{{ K }}').privacy_level ? 'true' : 'false'" aria-required="true">
+        <option value="" :selected="!opt('{{ K }}').privacy_level">Selecciona quién puede verlas</option>
+        <template x-for="o in privacyChoices('{{ K }}')" :key="o.value">
+          <option :value="o.value" :selected="opt('{{ K }}').privacy_level === o.value" :disabled="o.value === 'SELF_ONLY' && opt('{{ K }}').brand_content_toggle"
+                  x-text="o.label + (o.value === 'SELF_ONLY' && opt('{{ K }}').brand_content_toggle ? ' (no disponible con contenido de marca)' : '')"></option>
+        </template>
+      </select>
+      <p class="bk-error" x-show="notice['{{ K }}']" x-text="notice['{{ K }}']"></p>
+      <p class="bk-help" x-show="!privacyChoices('{{ K }}').length && !(creator['{{ K }}'] && creator['{{ K }}'].loading)">No hemos podido leer las opciones de tu cuenta. Pulsa {{ icon("refresh-cw", 12) }} para volver a consultarlas.</p>
+      <div class="callout tone-warning cmp-callout bk-callout" x-show="unaudited('{{ K }}')" x-cloak>
+        {{ icon("triangle-alert", 16) }}<div>Tu app de TikTok no está auditada: TikTok solo permite publicar en privado («Solo yo»). Cambia la visibilidad después en la app o usa «Enviar a la app de TikTok como borrador».</div>
+      </div>
+      <p class="bk-help">Se aplica a todos los vídeos de esta carga.</p>
+    </div>
+
+    <div class="bk-field bk-tt-allow" role="group" aria-label="Interacciones">
+      {% for key, flag, label in [("disable_comment", "comment_disabled", "Permitir comentarios"), ("disable_duet", "duet_disabled", "Permitir dúo"), ("disable_stitch", "stitch_disabled", "Permitir pegar")] %}
+      <label class="switch" :class="{'is-locked': creatorFlag('{{ K }}', '{{ flag }}')}" :title="creatorFlag('{{ K }}', '{{ flag }}') ? 'Desactivado en la configuración de tu cuenta de TikTok' : ''">
+        <input type="checkbox" role="switch" :checked="allow('{{ K }}', '{{ key }}')" @change="setAllow('{{ K }}', '{{ key }}', $event.target.checked)" :disabled="creatorFlag('{{ K }}', '{{ flag }}')">
+        <span class="switch__track" aria-hidden="true"></span><span class="switch__text"><span class="switch__label">{{ label }}</span></span>
+      </label>
+      {% endfor %}
+    </div>
+    <p class="bk-help" x-show="maxDuration('{{ K }}')" x-text="'Duración máxima por vídeo en esta cuenta: ' + Math.round(maxDuration('{{ K }}') / 60 * 10) / 10 + ' min.'"></p>
+
+    <div class="bk-field">
+      <label class="switch">
+        <input type="checkbox" role="switch" x-model="batch.accounts['{{ K }}'].options.is_aigc">
+        <span class="switch__track" aria-hidden="true"></span>
+        <span class="switch__text"><span class="switch__label">Contenido generado por IA</span><span class="switch__help">Añade la etiqueta de TikTok para contenido creado o editado con IA.</span></span>
+      </label>
+    </div>
+
+    <div class="bk-field">
+      <label class="switch">
+        <input type="checkbox" role="switch" :checked="opt('{{ K }}').commercial_content" @change="setCommercial('{{ K }}', $event.target.checked)">
+        <span class="switch__track" aria-hidden="true"></span>
+        <span class="switch__text"><span class="switch__label">Contenido comercial</span>
+          <span class="switch__help">Estos vídeos promocionan bienes o servicios a cambio de algo de valor.</span></span>
+      </label>
+      <div class="bk-tt-commercial" x-show="opt('{{ K }}').commercial_content" x-cloak>
+        <label class="check">
+          <input type="checkbox" x-model="batch.accounts['{{ K }}'].options.brand_organic_toggle">
+          <span><span class="check__label">Tu marca</span><span class="check__help">Promocionas tu propia marca o negocio («Contenido promocional»).</span></span>
+        </label>
+        <label class="check">
+          <input type="checkbox" :checked="opt('{{ K }}').brand_content_toggle" @change="setBranded('{{ K }}', $event.target.checked)" :disabled="unaudited('{{ K }}')">
+          <span><span class="check__label">Contenido de marca</span><span class="check__help">Promocionas a otra marca o a un tercero («Colaboración pagada»).</span></span>
+        </label>
+        <p class="bk-help" :class="{'text-danger': !opt('{{ K }}').brand_organic_toggle && !opt('{{ K }}').brand_content_toggle}" x-text="commercialLabel('{{ K }}')"></p>
+      </div>
+    </div>
+
+    <div class="bk-field bk-consent">
+      <label class="check">
+        <input type="checkbox" x-model="consent">
+        <span><span class="check__label">Al programar, aceptas la <a :href="cfg.legal.music_url" target="_blank" rel="noopener noreferrer">Confirmación de uso de música</a> de TikTok<span x-show="opt('{{ K }}').brand_content_toggle"> y la <a :href="cfg.legal.bc_url" target="_blank" rel="noopener noreferrer">Política de contenido de marca</a></span> para estos vídeos.</span>
+          <span class="check__help">Obligatorio para publicar directamente. Por seguridad no se guarda: márcala cada vez que programes.</span></span>
+      </label>
+    </div>
+  </div>
+</div>

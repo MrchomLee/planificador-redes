@@ -1,0 +1,110 @@
+{#- Carga masiva (routes/bulk.py): many videos at once, each with its own text and hashtags, spread over the calendar.
+    Four steps (Vídeos · Redes y ajustes · Calendario · Textos) + the result. Alpine component "bulkPage"
+    (static/js/bulk.js); everything is autosaved per brand. Context: state, brand, tz, accept_types. -#}
+{% extends "base.html" %}
+{% import "components/ui.html" as ui with context %}
+
+{% block head %}<link rel="stylesheet" href="{{ static_url('css/bulk.css') }}">{% endblock %}
+{% block scripts %}<script src="{{ static_url('js/bulk.js') }}" defer></script>{% endblock %}
+{% block body_class %}page-bulk{% endblock %}
+
+{% set STEPS = [(1, "Vídeos", "film"), (2, "Redes y ajustes", "share-2"), (3, "Calendario", "calendar-days"), (4, "Textos", "type")] %}
+{% set REAL_NETWORKS = ["facebook", "instagram", "tiktok", "youtube"] %}
+
+{% block content %}
+<div class="bk" x-data="bulkPage" x-effect="track()" @media:selected.window="onMediaSelected($event)" :class="{'is-ready': ready}">
+  <script type="application/json" data-bulk-state>{{ state|tojson }}</script>
+
+  {# ------------------------------------------------------------------ header #}
+  <header class="bk-head">
+    <div class="bk-head__titles">
+      <nav class="bk-crumbs" aria-label="Ruta"><a href="/planificacion">Planificación</a>{{ icon("chevron-right", 14) }}<span aria-current="page">Carga masiva</span></nav>
+      <h1 class="bk-head__title">Carga masiva</h1>
+      <p class="bk-head__sub">Sube muchos vídeos de golpe, escribe el texto y los hashtags de cada uno y repártelos en el calendario de <strong>{{ brand.name }}</strong>.</p>
+    </div>
+    <div class="bk-head__actions" x-show="!result">
+      <span class="bk-save" :class="'is-' + saveState" role="status" aria-live="polite">
+        <span class="bk-save__icon" x-show="saveState === 'saving'" x-cloak><span class="spinner" aria-hidden="true"></span></span>
+        <span class="bk-save__icon" x-show="saveState === 'error'" x-cloak>{{ icon("cloud-alert", 16) }}</span>
+        <span class="bk-save__icon" x-show="saveState === 'dirty'" x-cloak>{{ icon("circle-dot", 14) }}</span>
+        <span class="bk-save__icon" x-show="saveState === 'stopped'" x-cloak>{{ icon("cloud-off", 16) }}</span>
+        <span class="bk-save__icon" x-show="saveState === 'saved' || saveState === 'idle'">{{ icon("cloud-check", 16) }}</span>
+        <span x-text="saveLabel()">Todo guardado</span>
+      </span>
+      <button type="button" class="btn btn--ghost bk-discard" @click="discard()" :disabled="submitting" title="Vaciar la carga masiva y empezar otra">{{ icon("trash", 16) }}<span>Descartar lote</span></button>
+    </div>
+  </header>
+  <p class="bk-save-error" x-show="saveState === 'error'" x-cloak role="alert">{{ icon("triangle-alert", 15) }}<span x-text="saveError + ' Lo reintentaremos en unos segundos.'"></span></p>
+  {# Autosave stopped (the active brand changed in another tab, or this batch was scheduled elsewhere) #}
+  <div class="alert alert--danger bk-alert bk-stopped" x-show="stopReason && !result" x-cloak role="alert">
+    {{ icon("cloud-off", 18) }}
+    <div class="alert__body"><div class="alert__title">Esta pestaña ya no guarda los cambios</div><div x-text="stopReason"></div></div>
+    <div class="alert__actions"><button type="button" class="btn btn--primary btn--sm" @click="reload()">{{ icon("refresh-cw", 15) }}<span>Recargar la página</span></button></div>
+  </div>
+  {# "Programar todo" was cut short (the app closed or crashed): the rows it created are not repeated #}
+  <div class="alert alert--warning bk-alert bk-interrupted" x-show="interrupted && !result && !stopReason" x-cloak role="status">
+    {{ icon("clock-alert", 18) }}
+    <div class="alert__body"><div class="alert__title">Se interrumpió: pulsa «Programar todo» para terminar</div><div x-text="interruptedText()"></div></div>
+    <div class="alert__actions" x-show="batch.step !== 4"><button type="button" class="btn btn--secondary btn--sm" @click="go(4, true)">Ir al paso 4</button></div>
+  </div>
+
+  {# ------------------------------------------------------------------ stepper #}
+  <div class="bk-steps" role="tablist" aria-label="Pasos de la carga masiva" x-ref="steps" @keydown="stepKey($event)" x-show="!result" :inert="submitting || !!stopReason">
+    {% for n, label, ic in STEPS %}
+    <button type="button" role="tab" class="bk-step" id="bk-tab-{{ n }}" data-step-tab="{{ n }}" aria-controls="bk-panel-{{ n }}"
+            :aria-selected="batch.step === {{ n }} ? 'true' : 'false'" :tabindex="batch.step === {{ n }} ? 0 : -1"
+            :class="{'is-done': stepDone({{ n }}), 'has-alert': stepAlert({{ n }})}" @click="go({{ n }})">
+      <span class="bk-step__num" aria-hidden="true">
+        <span x-show="!stepDone({{ n }})">{{ n }}</span>
+        <span x-show="stepDone({{ n }})" x-cloak>{{ icon("check", 16, stroke=2.75) }}</span>
+      </span>
+      <span class="bk-step__text">
+        <span class="bk-step__label">{{ label }}</span>
+        <span class="bk-step__hint" x-text="stepHint({{ n }})"></span>
+      </span>
+      <span class="bk-step__alert" x-show="stepAlert({{ n }})" x-cloak title="Hay algo que revisar">{{ icon("circle-alert", 15) }}</span>
+    </button>
+    {% endfor %}
+  </div>
+
+  {% include "bulk/_step_videos.html" %}
+  {% include "bulk/_step_networks.html" %}
+  {% include "bulk/_step_calendar.html" %}
+  {% include "bulk/_step_texts.html" %}
+  {% include "bulk/_result.html" %}
+
+  {# ------------------------------------------------------------------ action bar #}
+  <footer class="bk-foot" x-show="!result" aria-label="Acciones de la carga masiva" :inert="submitting || !!stopReason">
+    <button type="button" class="btn btn--secondary" x-show="batch.step > 1" x-cloak @click="go(batch.step - 1, true)">{{ icon("chevron-left", 18) }}<span>Anterior</span></button>
+    <div class="bk-foot__info" aria-live="polite">
+      <span><strong x-text="batch.rows.length"></strong> <span x-text="batch.rows.length === 1 ? 'vídeo' : 'vídeos'"></span></span>
+      <span class="bk-foot__sep" aria-hidden="true">·</span>
+      <span><strong x-text="selectedKeys().length"></strong> <span x-text="selectedKeys().length === 1 ? 'red' : 'redes'"></span></span>
+      <template x-if="summary() && summary().first_date">
+        <span><span class="bk-foot__sep" aria-hidden="true">·</span> <span x-text="shortDate(summary().first_date) + (summary().last_date !== summary().first_date ? ' – ' + shortDate(summary().last_date) : '')"></span></span>
+      </template>
+      <span class="bk-foot__checking" x-show="checking" x-cloak><span class="spinner" aria-hidden="true"></span> Comprobando…</span>
+    </div>
+    <template x-if="batch.step < 4">
+      <button type="button" class="btn btn--primary" @click="go(batch.step + 1, true)"><span x-text="nextLabel()"></span>{{ icon("chevron-right", 18) }}</button>
+    </template>
+    <template x-if="batch.step === 4">
+      <div class="bk-foot__final">
+        <label class="check bk-foot__consent" x-show="needsConsent()" x-cloak>
+          <input type="checkbox" x-model="consent">
+          <span class="check__label">Acepto la <a :href="cfg.legal.music_url" target="_blank" rel="noopener noreferrer">Confirmación de uso de música</a> de TikTok</span>
+        </label>
+        <button type="button" class="btn btn--secondary" @click="submit('draft')" :disabled="submitting || !!stopReason || (!batch.rows.length && !interrupted)">{{ icon("file-text", 17) }}<span>Guardar todo como borradores</span></button>
+        <button type="button" class="btn btn--primary bk-go" @click="submit('schedule')" :disabled="!canSchedule()" :aria-busy="submitting ? 'true' : 'false'"
+                :title="commonErrors().length ? commonErrors()[0].message : ''">
+          <span class="spinner spinner--light" x-show="submitting" x-cloak aria-hidden="true"></span>
+          <span x-show="!submitting">{{ icon("calendar-check", 18) }}</span>
+          <span x-text="submitting ? 'Programando…' : scheduleLabel()">Programar todo</span>
+        </button>
+      </div>
+    </template>
+  </footer>
+
+  {% include "bulk/_paste_modal.html" %}
+</div>
+{% endblock %}

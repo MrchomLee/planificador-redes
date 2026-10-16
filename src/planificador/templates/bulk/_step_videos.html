@@ -1,0 +1,93 @@
+{#- Step 1 · Vídeos: drop/upload many files (POST /biblioteca/subir, 2 at a time) or pick them from the library. -#}
+<section class="bk-panel" role="tabpanel" id="bk-panel-1" aria-labelledby="bk-tab-1" data-step-panel="1" tabindex="-1" :inert="submitting || !!stopReason"
+         x-show="batch.step === 1 && !result">
+  <template x-if="lastResult && !batch.rows.length">
+    <div class="alert alert--success alert--compact bk-last" role="note">
+      {{ icon("circle-check", 18) }}
+      <div class="alert__body">
+        <span class="alert__title">Tu última carga masiva</span>
+        <span x-text="(lastResult.scheduled ? lastResult.scheduled + (lastResult.scheduled === 1 ? ' programada' : ' programadas') : '') + (lastResult.scheduled && lastResult.drafts ? ' y ' : '') + (lastResult.drafts ? lastResult.drafts + (lastResult.drafts === 1 ? ' en borrador' : ' en borrador') : '') + (lastResult.first_label ? ', desde el ' + lastResult.first_label : '') + '.'"></span>
+      </div>
+      <div class="alert__actions">
+        <a class="btn btn--secondary btn--sm" :href="(lastResult.links && lastResult.links.calendar) || cfg.urls.calendar">{{ icon("calendar-days", 15) }}<span>Ver en el calendario</span></a>
+      </div>
+    </div>
+  </template>
+
+  <div class="bk-drop" :class="{'is-over': dropping, 'is-compact': batch.rows.length > 0}"
+       @dragenter="onDragEnterZone($event)" @dragover="onDragEnterZone($event)" @dragleave.self="dropping = false" @drop="onDropZone($event)">
+    <span class="bk-drop__icon" aria-hidden="true">{{ icon("cloud-upload", 28) }}</span>
+    <div class="bk-drop__copy">
+      <h2 class="bk-drop__title" x-text="batch.rows.length ? 'Añade más vídeos' : 'Arrastra aquí tus vídeos'">Arrastra aquí tus vídeos</h2>
+      <p class="bk-drop__text">Suelta muchos a la vez o elígelos de la Biblioteca. MP4, MOV o WebM; se guardan también en la Biblioteca.</p>
+    </div>
+    <div class="bk-drop__actions">
+      <button type="button" class="btn btn--primary" @click="pickFiles()">{{ icon("upload", 18) }}<span>Elegir vídeos del ordenador</span></button>
+      <button type="button" class="btn btn--secondary" @click="openPicker()">{{ icon("images", 18) }}<span>Elegir de la Biblioteca</span></button>
+    </div>
+    <input type="file" multiple hidden x-ref="file" tabindex="-1" aria-hidden="true"
+           accept="video/mp4,video/quicktime,video/x-m4v,video/webm,.mp4,.mov,.m4v,.webm" @change="onFileInput($event)" data-bulk-file>
+  </div>
+
+  {# Upload queue: per-file progress, 2 in parallel #}
+  <div class="bk-uploads" x-show="uploads.length" x-cloak aria-live="polite" aria-label="Subidas">
+    <template x-for="u in uploads" :key="u.id">
+      <div class="bk-upload" :class="'is-' + u.status">
+        <span class="bk-upload__icon" aria-hidden="true">
+          <span x-show="u.status === 'uploading' || u.status === 'queued'">{{ icon("film", 16) }}</span>
+          <span x-show="u.status === 'done'" x-cloak>{{ icon("circle-check", 16) }}</span>
+          <span x-show="u.status === 'error'" x-cloak>{{ icon("circle-alert", 16) }}</span>
+        </span>
+        <div class="bk-upload__body">
+          <div class="bk-upload__line"><span class="bk-upload__name truncate" x-text="u.name"></span>
+            <span class="bk-upload__state" x-text="u.status === 'queued' ? 'En cola' : (u.status === 'uploading' ? u.progress + ' %' : (u.status === 'done' ? 'Listo' : 'Error'))"></span></div>
+          <div class="progress" x-show="u.status !== 'error'" role="progressbar" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="u.progress" :aria-label="'Subiendo ' + u.name"><span :style="'width:' + u.progress + '%'"></span></div>
+          <p class="bk-upload__error" x-show="u.status === 'error'" x-text="u.error"></p>
+        </div>
+        <button type="button" class="icon-btn icon-btn--sm" x-show="u.status === 'error'" @click="dismissUpload(u.id)" aria-label="Quitar aviso">{{ icon("x", 15) }}</button>
+      </div>
+    </template>
+  </div>
+
+  {# Video list #}
+  <div class="bk-section-head" x-show="batch.rows.length" x-cloak>
+    <h2 class="bk-section-title"><span x-text="batch.rows.length"></span> <span x-text="batch.rows.length === 1 ? 'vídeo' : 'vídeos'"></span></h2>
+    <p class="bk-section-hint">Se publican en este orden: puedes cambiarlo en el paso 4 y las fechas seguirán el nuevo orden. Los iconos indican si cada vídeo sirve para cada red.</p>
+    <div class="bk-compat-legend" aria-hidden="true">
+      <span class="bk-compat is-ok"><span class="bk-compat__dot"></span></span>Compatible
+      <span class="bk-compat is-warning"><span class="bk-compat__dot"></span></span>Con avisos
+      <span class="bk-compat is-error"><span class="bk-compat__dot"></span></span>No compatible
+    </div>
+  </div>
+  <ul class="bk-vids" x-show="batch.rows.length" x-cloak aria-label="Vídeos de la carga masiva">
+    <template x-for="(row, i) in batch.rows" :key="row.id">
+      <li class="bk-vid" :class="{'is-missing': !media[row.media_id]}">
+        <div class="bk-vid__thumb">
+          <template x-if="thumb(row)"><img :src="thumb(row)" alt="" loading="lazy"></template>
+          <span class="bk-vid__play" aria-hidden="true">{{ icon("play", 14, stroke=2.5) }}</span>
+          <span class="bk-vid__dur" x-show="mediaDuration(row)" x-text="mediaDuration(row)"></span>
+        </div>
+        <div class="bk-vid__body">
+          <div class="bk-vid__top"><span class="bk-vid__num" x-text="i + 1"></span><span class="bk-vid__name" x-text="mediaName(row)" :title="mediaName(row)"></span></div>
+          <div class="bk-vid__meta" x-text="mediaMeta(row)"></div>
+          <div class="bk-vid__compat">
+            {% for net in REAL_NETWORKS %}
+            <span class="bk-compat" :class="'is-' + compatStatus(row, '{{ net }}')" :title="compatTitle(row, '{{ net }}')" role="img" :aria-label="compatTitle(row, '{{ net }}')">{{ net_glyph(net, 15) }}<span class="bk-compat__dot"></span></span>
+            {% endfor %}
+          </div>
+        </div>
+        <button type="button" class="icon-btn icon-btn--sm bk-vid__x" @click="removeRow(i)" :aria-label="'Quitar ' + mediaName(row) + ' de la carga masiva'" title="Quitar de la carga masiva">{{ icon("x", 15) }}</button>
+      </li>
+    </template>
+  </ul>
+
+  <div class="bk-empty" x-show="!batch.rows.length && !uploads.length">
+    <ol class="bk-howto">
+      <li><span class="bk-howto__num">1</span><div><strong>Sube tus vídeos</strong><span>Todos de una vez, desde el ordenador o la Biblioteca.</span></div></li>
+      <li><span class="bk-howto__num">2</span><div><strong>Elige las redes</strong><span>Formato y opciones comunes (privacidad, audiencia…) una sola vez.</span></div></li>
+      <li><span class="bk-howto__num">3</span><div><strong>Reparte las fechas</strong><span>Por ejemplo 2 al día a las 12:00 y a las 19:00.</span></div></li>
+      <li><span class="bk-howto__num">4</span><div><strong>Escribe los textos</strong><span>Uno por vídeo, con sus hashtags. Puedes pegarlos todos de golpe.</span></div></li>
+    </ol>
+    <p class="bk-empty__note">{{ icon("cloud-check", 15) }} Todo se guarda solo mientras trabajas: puedes cerrar la pestaña y seguir más tarde.</p>
+  </div>
+</section>

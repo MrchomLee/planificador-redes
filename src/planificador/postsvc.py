@@ -165,7 +165,7 @@ class PostInput:
     idea_stage: str | None = None
     notes: str | None = None
     targets: list[TargetInput] = field(default_factory=list)
-    source: str = PostSource.COMPOSER.value  # extension: "composer" | "csv" | "duplicate"
+    source: str = PostSource.COMPOSER.value  # extension: "composer" | "csv" | "duplicate" | "bulk"
 
 
 # ========================================================================================== helpers

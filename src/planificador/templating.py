@@ -148,6 +148,7 @@ NAV_ITEMS = (
 MENU_ITEMS = (
     ("conexiones", "Cuentas conectadas", "/conexiones", "plug"),
     ("marcas", "Marcas", "/marcas", "building"),
+    ("carga-masiva", "Carga masiva", "/carga-masiva", "layers"),
     ("importar", "Importar o exportar CSV", "/importar", "file-spreadsheet"),
     ("ajustes", "Ajustes", "/ajustes", "settings"),
 )
@@ -165,6 +166,7 @@ _NAV_PREFIXES = {
     "medios": "biblioteca",
     "conexiones": "conexiones",
     "marcas": "marcas",
+    "carga-masiva": "carga-masiva",
     "importar": "importar",
     "exportar": "importar",
     "ajustes": "ajustes",

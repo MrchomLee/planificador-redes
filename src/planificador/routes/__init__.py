@@ -29,6 +29,7 @@ ROUTER_MODULES: tuple[str, ...] = (
     "settings",
     "notifications",
     "csv",
+    "bulk",
 )
 
 

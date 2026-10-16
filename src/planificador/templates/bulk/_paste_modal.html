@@ -1,0 +1,47 @@
+{#- "Pegar textos": many captions at once filled into the videos in order — separated by a line with only "---"
+    (captions with several paragraphs), by a blank line or one per line; "Automático" picks "---" when present and
+    keeps a hashtags-only paragraph with the text before it. In-page dialog (focus kept inside, Esc closes,
+    Ctrl+Intro applies). -#}
+<div class="modal-backdrop bk-modal" x-show="paste.open" x-cloak @click.self="closePaste()">
+  <div class="modal modal--lg" role="dialog" aria-modal="true" aria-labelledby="bk-paste-title" x-ref="pasteDialog" tabindex="-1">
+    <header class="modal__header">
+      <div class="modal__titles">
+        <div><h2 class="modal__title" id="bk-paste-title">Pegar textos</h2>
+          <p class="modal__subtitle">Pega todos los textos de una vez: se rellenan los vídeos en el orden de la lista.</p></div>
+      </div>
+      <button type="button" class="icon-btn" @click="closePaste()" aria-label="Cerrar" title="Cerrar (Esc)">{{ icon("x", 18) }}</button>
+    </header>
+    <div class="modal__body bk-paste">
+      <label class="bk-label" for="bk-paste-text">Textos</label>
+      <textarea id="bk-paste-text" class="textarea bk-paste__text" rows="10" x-ref="pasteText" x-model="paste.text"
+                placeholder="Primer texto&#10;&#10;#hashtags #del #primero&#10;---&#10;Segundo texto&#10;---&#10;Tercer texto…"></textarea>
+      <p class="bk-help bk-paste__help">Si algún texto tiene varios párrafos, separa un texto del siguiente con una línea que solo tenga <code>---</code>. En «Automático», un párrafo que solo tiene #hashtags o @menciones se queda con el texto de encima.</p>
+      <fieldset class="bk-field">
+        <legend class="bk-label">Cómo están separados</legend>
+        <div class="bk-radios bk-radios--inline">
+          <label class="check"><input type="radio" name="bk-paste-mode" value="auto" x-model="paste.mode"><span class="check__label">Automático</span></label>
+          <label class="check"><input type="radio" name="bk-paste-mode" value="sep" x-model="paste.mode"><span class="check__label">Por una línea con ---</span></label>
+          <label class="check"><input type="radio" name="bk-paste-mode" value="blank" x-model="paste.mode"><span class="check__label">Por una línea en blanco</span></label>
+          <label class="check"><input type="radio" name="bk-paste-mode" value="line" x-model="paste.mode"><span class="check__label">Uno por línea</span></label>
+        </div>
+      </fieldset>
+      <label class="check">
+        <input type="checkbox" x-model="paste.onlyEmpty">
+        <span class="check__label">Rellenar solo los vídeos que aún no tienen texto</span>
+      </label>
+      <div class="bk-paste__preview" aria-live="polite">
+        <p class="bk-paste__count" x-text="pasteSummary()"></p>
+        <ol class="bk-paste__list" x-show="pasteParts().length">
+          <template x-for="(part, pi) in pasteParts().slice(0, pasteTargets().length).slice(0, 8)" :key="pi">
+            <li><span class="bk-paste__to" x-text="'Vídeo ' + (batch.rows.indexOf(pasteTargets()[pi]) + 1)"></span><span class="bk-paste__txt" x-text="pastePreview(part)"></span></li>
+          </template>
+        </ol>
+      </div>
+    </div>
+    <footer class="modal__footer">
+      <span class="bk-help spacer">Atajo: <kbd>Ctrl</kbd> + <kbd>Intro</kbd></span>
+      <button type="button" class="btn btn--secondary" @click="closePaste()">Cancelar</button>
+      <button type="button" class="btn btn--primary" @click="applyPaste()" :disabled="!pasteParts().length || !pasteTargets().length">{{ icon("clipboard-paste", 18) }}<span>Rellenar textos</span></button>
+    </footer>
+  </div>
+</div>

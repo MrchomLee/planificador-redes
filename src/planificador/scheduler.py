@@ -5,17 +5,33 @@ or when :func:`wake` is called after "Publicar ahora"/save). Each tick:
 
 1. **Heartbeat** — persists ``scheduler_last_tick_at`` and ``scheduler_online_since`` in ``settings``. A
    wall-clock gap > 2 min since the previous tick (PC asleep, app closed) starts a new "online since" period
-   and triggers a catch-up (token refresh check now).
+   and triggers a catch-up in the same tick (token refresh check now, connectivity cache dropped).
 2. **Stale claims** — ``publishing`` targets without ``next_attempt_at`` whose claim is older than 10 min (or
    any, on the first tick after start: the single-instance lock means they belong to a dead process) are
    re-claimed: reconcile if ``commit_phase == commit_sent``, else continue from the saved provider state.
-3. **Waiting targets** — ``publishing`` with ``next_attempt_at <= now`` (provider waits and retry backoffs).
-   Stale and waiting targets that have **not** sent anything irreversible yet follow the same missed rule as
-   due ones (step 4), measured from when they should have carried on: nothing goes out hours or days late
-   just because the app was closed between two attempts.
-4. **Due targets** — ``scheduled`` with ``scheduled_at <= now`` (post not in the trash):
-   auto-publish off (and not TikTok inbox mode) → ``manual_pending``; due before the current "online since"
-   period and later than the grace window (``grace_minutes``) → ``missed``; otherwise claimed and run.
+3. **Waiting targets** — ``publishing`` with ``next_attempt_at <= now`` (provider waits, retry backoffs and
+   targets waiting for the internet connection: those are only resumed after a successful connectivity probe,
+   otherwise their next check is pushed a minute later, quietly; once the connection is back, one that is not
+   resumed in that tick — catch-up spacing, no free worker — stops "waiting for internet" and is ``queued``).
+4. **Due targets** — ``scheduled`` with ``scheduled_at <= now`` (post not in the trash), read in pages so
+   targets held back by the catch-up spacing never use up the batch:
+   auto-publish off (and not TikTok inbox mode) → ``manual_pending``; otherwise claimed and run, unless the
+   late-publishing rule below says ``missed``. Then, if nothing waits for the internet connection any more,
+   a recorded outage is ended (:func:`engine.settle_outage`).
+
+**Late publishing** (:class:`engine.LatePolicy`, Ajustes › Publicación). With ``publish_late`` on (default) a
+target that could not go out on time (PC off/asleep, app closed, no internet; also waiting/stale targets
+that sent nothing irreversible yet) is published as soon as possible; only beyond ``publish_late_max_hours``
+(0 = no limit) does it become ``missed``. With it off, the old rule applies: due before the current "online
+since" period and later than ``grace_minutes`` → ``missed`` (stale/waiting ones measured from when they
+should have carried on; waiting for internet beyond the grace window → ``missed`` too). Targets already
+``missed`` are never published automatically.
+
+**Catch-up spacing**: overdue targets ("catch-up": due while the PC/app was not available, or resuming after
+an internet outage) of the **same account** are released one at a time, in their original order, at least
+``catchup_spacing_minutes`` after the account's previous release — derived from the database (latest
+``publishing``/``catchup``/``recovered`` event or ``published_at`` of the account), so it survives restarts;
+claims stay atomic, so nothing is published twice. On-time targets are never delayed by it.
    Facebook/YouTube targets with ``native_schedule`` (of connected accounts) are claimed **ahead of time**
    (within 28 days) so the provider can hand them to the network's own scheduler; a failed hand-off puts them
    back to ``scheduled`` (``engine``), so they still publish at their time.
@@ -46,10 +62,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from planificador import __version__, config, engine, keepawake
+from planificador.connectivity import Connectivity, Probe
 from planificador.models import (
     Account,
     AccountStatus,
@@ -57,6 +74,7 @@ from planificador.models import (
     NotificationKind,
     OAuthState,
     Post,
+    PostEvent,
     PostTarget,
     PublicMediaToken,
     TargetStatus,
@@ -104,8 +122,78 @@ class TickReport:
     missed: list[int] = field(default_factory=list)
     deferred: list[int] = field(default_factory=list)
     native: list[int] = field(default_factory=list)  # handed to the network's scheduler ahead of time
+    catchup: list[int] = field(default_factory=list)  # overdue targets released (late publishing)
+    spaced: list[int] = field(default_factory=list)  # overdue targets held back by the catch-up spacing
+    offline: list[int] = field(default_factory=list)  # still no internet: next check postponed
     outcomes: dict[int, str] = field(default_factory=dict)  # inline mode only
     jobs: list[str] = field(default_factory=list)
+
+
+class CatchupGate:
+    """Per-tick release gate for overdue ("catch-up") targets: per account one at a time (the first one asked
+    in a tick wins; phases and queries go in their original order) and at least ``spacing`` after the
+    account's last release. The last release comes from the database — the latest ``publishing`` /
+    ``catchup`` / ``recovered`` event of the account's targets, or its latest ``published_at`` — so the
+    spacing survives restarts."""
+
+    def __init__(self, spacing: timedelta, now: datetime) -> None:
+        self.spacing = spacing
+        self.now = now
+        self.decided: set[int] = set()
+        self.released: set[int] = set()  # accounts with a release in this tick
+        self.next_release: datetime | None = None
+
+    def _hint(self, at: datetime) -> None:
+        self.next_release = at if self.next_release is None else min(self.next_release, at)
+
+    def last_release(self, s: Session, account_id: int, *, exclude: int | None = None) -> datetime | None:
+        events = (
+            select(func.max(PostEvent.ts))
+            .join(PostTarget, PostEvent.target_id == PostTarget.id)
+            .where(
+                PostTarget.account_id == account_id,
+                PostEvent.event.in_(engine.RELEASE_EVENTS),
+                PostEvent.ts <= self.now,
+            )
+        )
+        if exclude is not None:
+            events = events.where(PostEvent.target_id != exclude)
+        published = select(func.max(PostTarget.published_at)).where(
+            PostTarget.account_id == account_id,
+            PostTarget.status.in_([TargetStatus.PUBLISHED, TargetStatus.SENT_TO_APP]),
+            PostTarget.published_at <= self.now,
+        )
+        moments = [ensure_utc(m) for m in (s.scalar(events), s.scalar(published)) if m is not None]
+        return max(moments) if moments else None
+
+    def block(self, account_id: int, *, released: bool = False) -> None:
+        """Nothing else overdue of this account goes out in this tick (``released``: because one just did)."""
+        self.decided.add(account_id)
+        if released:
+            self.released.add(account_id)
+
+    def allow(self, s: Session, account_id: int, *, exclude: int | None = None) -> bool:
+        if account_id in self.decided:
+            if account_id in self.released:
+                self._hint(self.now + self.spacing)  # the next one of this account is due then
+            return False
+        self.decided.add(account_id)
+        if self.spacing <= timedelta(0):
+            self.released.add(account_id)
+            return True
+        last = self.last_release(s, account_id, exclude=exclude)
+        if last is None or self.now >= last + self.spacing:
+            self.released.add(account_id)
+            return True
+        self._hint(last + self.spacing)
+        return False
+
+
+@dataclass
+class _TickState:
+    policy: engine.LatePolicy
+    gate: CatchupGate
+    online: dict[str, bool] = field(default_factory=dict)  # connectivity answers of this tick, per network
 
 
 JobFn = Callable[["Scheduler", datetime], Any]
@@ -141,6 +229,7 @@ class Scheduler:
         jobs: list[Job] | None = None,
         enable_jobs: bool = True,
         rng: random.Random | None = None,
+        connectivity_probe: Probe | None = None,
     ) -> None:
         self.database = database
         self.session_factory: Callable[[], Session] = getattr(database, "session", database)
@@ -168,6 +257,8 @@ class Scheduler:
         self.online_since: datetime | None = None
         self.last_tick_at: datetime | None = None
         self.ticks = 0
+        self.connectivity = Connectivity(self.clock, probe=connectivity_probe)
+        self._release_hint: datetime | None = None  # next catch-up release blocked by the spacing
         self.runtime = engine.EngineRuntime(
             session_factory=self.session_factory,
             clock=self.clock,
@@ -177,6 +268,7 @@ class Scheduler:
             write_lock=getattr(database, "write_lock", None),
             stop_event=self._stop,
             rng=rng or random.Random(),
+            connectivity=self.connectivity,
         )
 
     # ---- lifecycle
@@ -282,7 +374,7 @@ class Scheduler:
                     )
                 )
             seconds = [self.tick_seconds]
-            for at in (next_wait, next_due):
+            for at in (next_wait, next_due, self._release_hint):
                 # Past deadlines are running or waiting for a free worker; a finishing worker wakes us.
                 if at is not None and ensure_utc(at) > now:
                     seconds.append((ensure_utc(at) - now).total_seconds())
@@ -307,6 +399,8 @@ class Scheduler:
                 log.exception("Scheduler heartbeat failed")
                 if self.online_since is None:
                     self.online_since = now
+            policy = self._load_policy()
+            state = _TickState(policy, CatchupGate(policy.spacing, now))
             for phase in (
                 self._recover_stale,
                 self._continue_waiting,
@@ -314,9 +408,12 @@ class Scheduler:
                 self._process_native,
             ):
                 try:
-                    phase(now, report)
+                    phase(now, report, state)
                 except Exception:
                     log.exception("Scheduler phase %s failed", phase.__name__)
+            self._release_hint = state.gate.next_release
+            # Nothing waits for the connection any more (cancelled, missed…): end the recorded outage.
+            engine.settle_outage(self.runtime, now)
             try:
                 self._schedule_jobs(now, report)
             except Exception:
@@ -345,6 +442,23 @@ class Scheduler:
                 report.gap_seconds,
             )
             self._force_jobs.add("token_refresh")
+            self.connectivity.forget()  # the network may have changed while the PC was asleep
+
+    def _load_policy(self) -> engine.LatePolicy:
+        try:
+            with self.session() as s:
+                return engine.LatePolicy.load(s)
+        except Exception:
+            log.exception("Could not read the late-publishing settings; using the defaults")
+            return engine.LatePolicy()
+
+    def _online(self, network: str, now: datetime, state: _TickState) -> bool:
+        """Connectivity of ``network``'s API host, probed once per tick (also tracks the outage state)."""
+        key = str(network)
+        if key not in state.online:
+            state.online[key] = self.connectivity.check(key, self.http)
+            engine.note_connectivity(self.runtime, state.online[key], now)
+        return state.online[key]
 
     # ---- capacity
 
@@ -400,33 +514,60 @@ class Scheduler:
 
     # ---- phases
 
-    def _grace(self, s: Session) -> timedelta:
-        return timedelta(minutes=max(0, config.get_int(s, "grace_minutes")))
-
-    def _is_missed(
-        self, reference: datetime | None, now: datetime, grace: timedelta
-    ) -> tuple[bool, timedelta]:
-        """The missed rule: due before the current online period and later than the grace window."""
-        reference = reference or now
+    def _due_verdict(
+        self, target: PostTarget, now: datetime, policy: engine.LatePolicy
+    ) -> tuple[str | None, timedelta, bool]:
+        """(``missed`` reason or ``None``, how late, catch-up?) for a due ``scheduled`` target. Catch-up: it
+        became due while the PC/app was not available (before the current "online since" period)."""
+        reference = engine.due_reference(target) or now
         late = now - reference
-        return late > grace and reference < (self.online_since or now), late
+        unavailable = reference < (self.online_since or now)
+        catchup = unavailable and late > engine.LATE_NOTE_AFTER
+        if policy.publish_late:
+            if policy.max_late is not None and late > policy.max_late:
+                return engine.MISSED_MAX_LATE, late, catchup
+            return None, late, catchup
+        if unavailable and late > policy.grace:
+            return engine.MISSED_GRACE, late, catchup
+        return None, late, catchup
 
-    def _missed_while_publishing(
-        self, s: Session, target: PostTarget, now: datetime, report: TickReport
-    ) -> bool:
-        """A ``publishing`` target that sent nothing yet (retry/backoff wait, paused at shutdown, abandoned by
-        a crash) follows the same rule as a ``scheduled`` one: if the app was off beyond the grace window when
-        it should have carried on, it is ``missed`` instead of going out hours or days late."""
+    def _publishing_verdict(
+        self, target: PostTarget, now: datetime, policy: engine.LatePolicy
+    ) -> tuple[str | None, str | None]:
+        """(``missed`` reason or ``None``, catch-up release reason or ``None``) for a stale/waiting
+        ``publishing`` target. Only targets that sent nothing irreversible yet can be missed or count as a
+        catch-up (a committed one is always resumed/reconciled, never held back)."""
         if not engine.can_miss_while_publishing(target):
-            return False
-        grace = self._grace(s)
-        missed, _late = self._is_missed(engine.resume_reference(target), now, grace)
-        if missed and engine.set_missed(s, target, now, grace=grace):
-            report.missed.append(target.id)
-            return True
-        return False
+            return None, None
+        resume = engine.resume_reference(target) or now
+        due = engine.lateness_reference(target) or resume
+        online_since = self.online_since or now
+        unavailable = resume < online_since
+        # Waiting for the internet, or the connection is back and it waits for its turn after the outage.
+        offline = engine.is_offline_waiting(target) or engine.is_queued_after_outage(target)
+        release: str | None = None
+        if unavailable and now - resume > engine.LATE_NOTE_AFTER:
+            release = engine.LATE_UNAVAILABLE
+        elif offline and now - due > engine.LATE_NOTE_AFTER:
+            release = engine.LATE_OFFLINE
+        if policy.publish_late:
+            if policy.max_late is not None and now - due > policy.max_late:
+                return engine.MISSED_MAX_LATE, release
+            return None, release
+        if unavailable and now - resume > policy.grace:
+            return engine.MISSED_GRACE, release
+        if offline and now - due > policy.grace:
+            return engine.MISSED_OFFLINE, release
+        return None, release
 
-    def _recover_stale(self, now: datetime, report: TickReport) -> None:
+    def _set_missed(
+        self, s: Session, target: PostTarget, now: datetime, reason: str, policy: engine.LatePolicy
+    ) -> bool:
+        if reason == engine.MISSED_MAX_LATE:
+            return engine.set_missed(s, target, now, reason=reason, limit=policy.max_late)
+        return engine.set_missed(s, target, now, grace=policy.grace, reason=reason)
+
+    def _recover_stale(self, now: datetime, report: TickReport, state: _TickState) -> None:
         threshold = now - engine.STALE_CLAIM_AFTER
         with self.session() as s:
             targets = list(
@@ -443,13 +584,22 @@ class Scheduler:
                     continue
                 if not (self._first_tick or claimed_at is None or claimed_at <= threshold):
                     continue
-                if self._missed_while_publishing(s, target, now, report):
+                missed, release = self._publishing_verdict(target, now, state.policy)
+                if missed:
+                    if self._set_missed(s, target, now, missed, state.policy):
+                        report.missed.append(target_id)
                     continue
                 if not self._capacity(account_id):
                     report.deferred.append(target_id)
                     continue
-                if engine.claim_stale(s, target_id, claimed_at, now):
+                if release:
+                    # It was mid-run (at most one per account): resume it now, and let nothing else overdue
+                    # of the account go out in this tick (its "recovered" event starts the next spacing).
+                    state.gate.block(account_id, released=True)
+                if engine.claim_stale(s, target_id, claimed_at, now, release=release):
                     report.recovered.append(target_id)
+                    if release:
+                        report.catchup.append(target_id)
                     log.warning(
                         "Recovering abandoned publish of target %s (commit phase %s)", target_id, phase
                     )
@@ -457,7 +607,7 @@ class Scheduler:
                         target_id, account_id, reconcile=phase == CommitPhase.COMMIT_SENT, report=report
                     )
 
-    def _continue_waiting(self, now: datetime, report: TickReport) -> None:
+    def _continue_waiting(self, now: datetime, report: TickReport, state: _TickState) -> None:
         with self.session() as s:
             targets = list(
                 s.scalars(
@@ -470,50 +620,121 @@ class Scheduler:
                     .order_by(PostTarget.next_attempt_at, PostTarget.id)
                 )
             )
+            # Original order (when each one was due), so overdue targets of an account go out in order.
+            targets.sort(key=lambda t: (engine.lateness_reference(t) or now, t.id))
             for target in targets:
                 target_id, account_id, next_attempt_at = target.id, target.account_id, target.next_attempt_at
                 if self._busy(target_id):
                     continue
-                if self._missed_while_publishing(s, target, now, report):
+                missed, release = self._publishing_verdict(target, now, state.policy)
+                if missed:
+                    if self._set_missed(s, target, now, missed, state.policy):
+                        report.missed.append(target_id)
+                    continue
+                offline = engine.is_offline_waiting(target)
+                if offline and not self._online(target.network, now, state):
+                    # Still no internet: check again in a minute, quietly (no event, no retry spent).
+                    state.gate.block(account_id)
+                    if engine.postpone_offline(s, target, now):
+                        report.offline.append(target_id)
+                    continue
+                # From here on the connection is back: a target that is not resumed in this tick no longer
+                # waits for it (it waits for its turn), so it must not keep saying "Esperando conexión".
+                if release and not state.gate.allow(s, account_id, exclude=target_id):
+                    report.spaced.append(target_id)
+                    if offline:
+                        engine.end_offline_wait(s, target, now, queued=True)
                     continue
                 if not self._capacity(account_id):
                     report.deferred.append(target_id)
+                    if offline:
+                        engine.end_offline_wait(s, target, now, queued=release is not None)
                     continue
-                if engine.claim_waiting(s, target_id, next_attempt_at, now):
+                if engine.claim_waiting(s, target_id, next_attempt_at, now, release=release):
                     report.continued.append(target_id)
+                    if release:
+                        report.catchup.append(target_id)
                     self._launch(target_id, account_id, reconcile=False, report=report)
 
-    def _process_due(self, now: datetime, report: TickReport) -> None:
+    def _process_due(self, now: datetime, report: TickReport, state: _TickState) -> None:
+        """Due ``scheduled`` targets in pages of :data:`DUE_BATCH` (keyset on ``scheduled_at, id``), so the
+        overdue targets the catch-up spacing holds back (they stay ``scheduled`` and are the oldest) never use
+        up the batch: once an account is held back in this tick, its other overdue automatic targets are left
+        out of the following pages. On-time targets, Publicación asistida reminders and other accounts are
+        always reached."""
+        # Due before this instant = catch-up (the same rule as :meth:`_due_verdict`).
+        catchup_before = min(self.online_since or now, now - engine.LATE_NOTE_AFTER)
+        held: set[int] = set()
+        after: tuple[datetime, int] | None = None
         with self.session() as s:
-            grace = self._grace(s)
-            targets = list(
-                s.scalars(
-                    select(PostTarget)
-                    .where(engine.due_filter(now))
-                    .order_by(PostTarget.scheduled_at, PostTarget.id)
-                    .limit(DUE_BATCH)
+            while True:
+                query = select(PostTarget).where(engine.due_filter(now))
+                if held:
+                    query = query.where(
+                        ~and_(
+                            PostTarget.account_id.in_(sorted(held)),
+                            PostTarget.auto_publish.is_(True),
+                            engine.due_reference_sql() < catchup_before,
+                        )
+                    )
+                if after is not None:
+                    query = query.where(
+                        or_(
+                            PostTarget.scheduled_at > after[0],
+                            and_(PostTarget.scheduled_at == after[0], PostTarget.id > after[1]),
+                        )
+                    )
+                targets = list(
+                    s.scalars(query.order_by(PostTarget.scheduled_at, PostTarget.id).limit(DUE_BATCH))
                 )
-            )
-            for target in targets:
-                if self._busy(target.id):
-                    continue
-                if not target.auto_publish and not engine.is_tiktok_inbox(target.network, target.options):
-                    if engine.set_manual_pending(s, target, now):
-                        report.manual.append(target.id)
-                    continue
-                missed, late = self._is_missed(engine.due_reference(target), now, grace)
-                if missed:
-                    if engine.set_missed(s, target, now, grace=grace):
-                        report.missed.append(target.id)
-                    continue
-                if not self._capacity(target.account_id):
-                    report.deferred.append(target.id)
-                    continue
-                if engine.claim_due(s, target.id, now, late_by=late):
-                    report.claimed.append(target.id)
-                    self._launch(target.id, target.account_id, reconcile=False, report=report)
+                keys = [(t.scheduled_at, t.id) for t in targets]
+                for target in targets:
+                    if self._process_due_target(s, target, now, report, state):
+                        held.add(target.account_id)
+                if len(targets) < DUE_BATCH:
+                    break
+                after = keys[-1]
 
-    def _process_native(self, now: datetime, report: TickReport) -> None:
+    def _process_due_target(
+        self, s: Session, target: PostTarget, now: datetime, report: TickReport, state: _TickState
+    ) -> bool:
+        """Handle one due ``scheduled`` target. Returns True when the catch-up spacing holds it back."""
+        target_id, account_id = target.id, target.account_id
+        if self._busy(target_id):
+            return False
+        if not target.auto_publish and not engine.is_tiktok_inbox(target.network, target.options):
+            if engine.set_manual_pending(s, target, now):
+                report.manual.append(target_id)
+            return False
+        missed, late, catchup = self._due_verdict(target, now, state.policy)
+        if missed:
+            if self._set_missed(s, target, now, missed, state.policy):
+                report.missed.append(target_id)
+            return False
+        if catchup and not state.gate.allow(s, account_id):
+            report.spaced.append(target_id)
+            return True
+        if not self._capacity(account_id):
+            report.deferred.append(target_id)
+            return False
+        post = target.post
+        tz = post.brand.timezone if post is not None and post.brand is not None else None
+        if engine.claim_due(
+            s,
+            target_id,
+            now,
+            late_by=late,
+            due_at=engine.due_reference(target),
+            catchup=catchup,
+            tz=tz,
+        ):
+            report.claimed.append(target_id)
+            if catchup:
+                report.catchup.append(target_id)
+            self._launch(target_id, account_id, reconcile=False, report=report)
+        return False
+
+    def _process_native(self, now: datetime, report: TickReport, state: _TickState) -> None:
         """Facebook/YouTube targets with ``native_schedule`` are handed to the network's own scheduler ahead
         of time (so they go out even if the PC is off), once within :data:`NATIVE_HANDOFF_WINDOW`. The
         provider decides whether the lead time allows it; otherwise it waits and publishes at the time."""
@@ -545,7 +766,7 @@ class Scheduler:
                 if not self._capacity(target.account_id):
                     report.deferred.append(target.id)
                     continue
-                if engine.claim_due(s, target.id, now):
+                if engine.claim_due(s, target.id, now, due_at=target.scheduled_at):
                     report.claimed.append(target.id)
                     report.native.append(target.id)
                     self._launch(target.id, target.account_id, reconcile=False, report=report)
@@ -974,6 +1195,7 @@ def status() -> dict[str, Any]:
 
 __all__ = [
     "GAP_THRESHOLD",
+    "CatchupGate",
     "HEARTBEAT_KEY",
     "JOB_KEY_PREFIX",
     "ONLINE_SINCE_KEY",

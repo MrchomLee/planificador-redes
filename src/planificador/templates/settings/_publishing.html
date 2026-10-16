@@ -1,10 +1,11 @@
-{#- Ajustes → Publicación: default time zone, grace window, demo mode. -#}
+{#- Ajustes → Publicación: default time zone, late publishing (catch-up), grace window, demo mode. -#}
 {% import "components/ui.html" as ui with context %}
 {% import "settings/_macros.html" as sm with context %}
 {% import "brands/_macros.html" as bm with context %}
 {% set err = errors or {} %}
 {% set val = values or {} %}
-<section class="settings-section card" id="publicacion" aria-labelledby="publicacion-title">
+{% set late_on = val.get("publish_late", pub.publish_late) %}
+<section class="settings-section card" id="publicacion" aria-labelledby="publicacion-title" x-data="{ late: {{ 'true' if late_on else 'false' }} }">
   <form method="post" action="/ajustes/publicacion" hx-post="/ajustes/publicacion" hx-target="#publicacion" hx-swap="outerHTML">
     {{ sm.csrf() }}
     <header class="settings-section__head">
@@ -18,15 +19,35 @@
       {{ bm.tz_select("default_timezone", val.get("default_timezone", pub.default_timezone), tz_groups, label="Zona horaria por defecto",
                       error=err.get("default_timezone"), id="tz-default",
                       help="Se usa al crear marcas nuevas. Cada marca tiene su propia zona horaria (en Marcas).") }}
-      <div class="form-field">
+
+      {{ ui.info_alert("Para publicar automáticamente, el ordenador tiene que estar encendido (no dormido), con Planificador abierto y con internet a la hora programada. Facebook y YouTube pueden quedar programados en la propia red (opción «Programar en Facebook/YouTube» del editor) y salen aunque el ordenador esté apagado.",
+                       title="Publicación automática", tone="info", icon_name="monitor", compact=True, cls="settings-late__intro") }}
+
+      <div class="settings-late" id="settings-late">
+        {{ ui.switch("publish_late", "Publicar las publicaciones atrasadas en cuanto se pueda (PC encendido, app abierta e internet)",
+                     checked=late_on, id="sw-publish-late", off_value="0", attrs={"x-model": "late"},
+                     help="Si a la hora programada el ordenador estaba apagado o dormido, la app cerrada o sin internet, la publicación sale sola en cuanto todo vuelve a estar disponible, en vez de quedar como «Perdido». Las que ya están como «Perdido» no se publican solas: decides tú.") }}
+        <div class="settings-late__options form-grid form-grid--2" x-show="late"{% if not late_on %} style="display: none"{% endif %}>
+          {{ ui.form_field("publish_late_max_hours", "Límite de retraso", type="select", id="f-late-max",
+                           value=val.get("publish_late_max_hours", pub.publish_late_max_hours), options=max_late_options,
+                           error=err.get("publish_late_max_hours"),
+                           help="Si una publicación lleva más retraso que esto, ya no se envía: queda como «Perdido» y te avisamos para que decidas.") }}
+          {{ ui.form_field("catchup_spacing_minutes", "Separación entre publicaciones atrasadas de una misma cuenta", type="select", id="f-late-spacing",
+                           value=val.get("catchup_spacing_minutes", pub.catchup_spacing_minutes), options=spacing_options,
+                           error=err.get("catchup_spacing_minutes"),
+                           help="Si se acumulan varias de la misma cuenta (p. ej. el ordenador estuvo apagado toda la noche), salen una a una, en su orden y con esta separación, para no publicarlas todas de golpe. Las que llegan a su hora no se retrasan.") }}
+        </div>
+      </div>
+
+      <div class="form-field" x-show="!late"{% if late_on %} style="display: none"{% endif %}>
         <label class="form-field__label" for="f-grace">Ventana de gracia</label>
         <div class="input-suffix">
           <input class="input" id="f-grace" name="grace_minutes" type="number" min="0" max="1440" step="5" required
                  value="{{ val.get('grace_minutes', pub.grace_minutes) }}"{% if err.get("grace_minutes") %} aria-invalid="true"{% endif %} aria-describedby="f-grace-help">
           <span class="input-suffix__text">minutos</span>
         </div>
-        <p class="form-field__help" id="f-grace-help">Si el ordenador estaba apagado o dormido a la hora programada, la publicación sale al volver
-          si no han pasado más de estos minutos. Si han pasado más, se marca como «Perdido» y te avisamos para que decidas.</p>
+        <p class="form-field__help" id="f-grace-help">Solo cuando la opción anterior está desactivada. Si el ordenador estaba apagado o dormido a la hora programada,
+          la publicación sale al volver si no han pasado más de estos minutos. Si han pasado más, se marca como «Perdido» y te avisamos para que decidas.</p>
         {% if err.get("grace_minutes") %}<p class="form-field__error">{{ icon("circle-alert", 14) }}<span>{{ err.grace_minutes }}</span></p>{% endif %}
       </div>
       <div class="settings-demo{% if val.get('demo_mode', pub.demo_mode) %} is-on{% endif %}">

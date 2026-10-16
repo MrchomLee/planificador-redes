@@ -9,6 +9,8 @@ suscripciones. Se usa desde el navegador en `http://localhost:8765` y **tus dato
 - **Editor de publicaciones** con vista previa por red, formatos (publicación, reel, historia, vídeo, Short),
   texto distinto por red, validación antes de programar y **Publicación asistida** cuando prefieres publicar tú.
 - **Biblioteca** de fotos y vídeos con comprobación de compatibilidad por red.
+- **Carga masiva** de vídeos: muchos a la vez, cada uno con su texto y sus hashtags, repartidos solos en el
+  calendario.
 - **Estadísticas** diarias, **Comentarios** de Facebook, Instagram y YouTube en un solo buzón, e
   **importación/exportación CSV**.
 
@@ -111,7 +113,32 @@ tokens de acceso y las claves secretas se guardan **cifrados** en tu ordenador.
    **Guardar como idea** (flecha junto a Programar).
 4. A la hora indicada Planificador publica solo y la publicación pasa a **Publicado** en el calendario.
 
-Para cargar muchas publicaciones de golpe usa **☰ › Importar o exportar CSV**.
+Para que publique solo, el ordenador tiene que estar **encendido** (no dormido), con Planificador **abierto** y
+con **internet** a la hora programada. Si en ese momento no lo estaba, no se pierde nada: con **Publicar las
+publicaciones atrasadas en cuanto se pueda** (**Ajustes › Publicación**, activado por defecto) la publicación
+sale en cuanto el ordenador, la app e internet vuelven a estar disponibles:
+
+- **Ordenador apagado o dormido, o app cerrada**: al volver a abrir Planificador (o al despertar el ordenador)
+  salen las atrasadas, en su orden. Si se acumulan varias **de la misma cuenta** (por ejemplo el ordenador
+  estuvo apagado toda la noche), salen **una a una**, separadas 15 minutos (configurable: 5, 10, 15, 30 o 60),
+  para no publicarlas todas de golpe. Las que llegan a su hora no se retrasan.
+- **Sin internet**: la publicación queda **Esperando conexión a internet** (lo verás en su detalle), lo
+  comprueba cada minuto sin gastar reintentos y sale en cuanto vuelve la conexión (si se juntan varias de la
+  misma cuenta, una a una con la misma separación; mientras esperan su turno el detalle dice **Atrasada**). Si
+  el corte dura más de 5 minutos te avisamos una vez.
+- Cada publicación que sale tarde lo indica en su historial («Publicada con retraso: estaba programada para…») y
+  con un aviso.
+- Opcional: **Límite de retraso** (2, 6, 12 o 24 horas; por defecto sin límite). Si una publicación lleva más
+  retraso, ya no se envía: queda como **Perdido** y decides tú.
+
+Para programar **muchos vídeos de golpe** usa **☰ › Carga masiva** (también en el menú ⋮ del calendario):
+arrastra todos los vídeos, elige las redes y sus opciones una sola vez, reparte las fechas automáticamente
+(por ejemplo 2 al día a las 12:00 y a las 19:00, o 1 cada 2 días, saltando fines de semana), escribe el texto y
+los hashtags de cada vídeo (o pégalos todos de una vez; si algún texto tiene varios párrafos, separa un texto del
+siguiente con una línea que solo tenga `---`) y pulsa **Programar todo**. Todo se guarda solo mientras trabajas:
+puedes cerrar la pestaña y seguir otro día; si la aplicación se cierra a mitad de «Programar todo», al volver
+pulsa otra vez **Programar todo** para terminar (lo ya guardado no se repite). Si prefieres una hoja de cálculo, usa **☰ › Importar o
+exportar CSV**.
 
 ## Publicación asistida
 
@@ -185,9 +212,8 @@ salgan aunque olvides abrirlo:
 3. Para quitarlo: el mismo script con `-Quitar`.
 
 Con el arranque automático, abre <http://localhost:8765> en el navegador cuando quieras usarlo (añádelo a
-favoritos). El ordenador sigue teniendo que estar **encendido** a la hora de publicar: si se suspende, la
-publicación sale al despertar si no ha pasado la **Ventana de gracia** (**Ajustes › Publicación**, 120
-minutos por defecto).
+favoritos). El ordenador sigue teniendo que estar **encendido** a la hora de publicar: si se suspende, las
+publicaciones atrasadas salen al despertar (ver [Publicar](#publicar)).
 
 ## Dónde están tus datos
 
@@ -221,9 +247,20 @@ Para probar cosas sin tocar tus datos, puedes arrancar con otra carpeta:
 excepciones son **Programar en Facebook** y **Programar en YouTube** (con publicación automática), que dejan la
 publicación programada en la propia red.
 
-**¿Qué pasa si el ordenador estaba apagado a la hora programada?** Al volver a abrir Planificador, la
-publicación sale si no ha pasado la **Ventana de gracia** (120 minutos por defecto). Si ha pasado más tiempo,
-queda como **Perdido** y te avisamos para que elijas **Publicar ahora**, **Reprogramar** o **Descartar**.
+**¿Qué pasa si mi PC estaba apagado a la hora programada?** No se pierde: en cuanto vuelvas a encenderlo y
+Planificador esté abierto (con el arranque automático, al iniciar sesión), las publicaciones atrasadas salen
+solas, en su orden y separadas 15 minutos entre las de una misma cuenta. Igual si estaba dormido, si la app
+estaba cerrada o si no había internet (en ese caso salen en cuanto vuelve la conexión). Cada una queda marcada
+como «Publicada con retraso» y te avisamos. Si prefieres que no salgan tan tarde, elige un **Límite de retraso**
+en **Ajustes › Publicación**; si desactivas **Publicar las publicaciones atrasadas en cuanto se pueda**, se usa
+la **Ventana de gracia** (120 minutos por defecto). Las que pasen del límite quedan como **Perdido** y te
+avisamos para que elijas **Publicar ahora**, **Reprogramar** o **Descartar** (las que ya estaban como
+**Perdido** no se publican solas).
+
+**¿Y si se corta internet?** La publicación espera («Esperando conexión a internet»), sin gastar reintentos, y
+sale en cuanto vuelve la conexión. Si el corte ocurre justo mientras se estaba enviando, Planificador comprueba
+en la red si llegó a publicarse antes de volver a intentarlo, para no publicarla dos veces; si no llegó, espera
+también a que vuelva internet.
 
 **Mis publicaciones de Facebook solo las veo yo.** Tu app de Meta está en modo **Desarrollo**: pásala a
 **Activo** ([guía de Meta](docs/guia-meta.md)).

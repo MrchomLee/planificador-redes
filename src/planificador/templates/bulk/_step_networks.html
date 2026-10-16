@@ -1,0 +1,133 @@
+{#- Step 2 · Redes y ajustes comunes: accounts, format per network, options set once for every video (same keys and
+    rules as the composer), Autopublicar and the common hashtags. -#}
+{% set FMT_ICONS = {"post": "layout-grid", "reel": "clapperboard", "story": "circle-dashed", "video": "play", "short": "zap", "photo": "image"} %}
+<section class="bk-panel" role="tabpanel" id="bk-panel-2" aria-labelledby="bk-tab-2" data-step-panel="2" tabindex="-1" :inert="submitting || !!stopReason"
+         x-show="batch.step === 2 && !result" x-cloak>
+  <div class="bk-cols">
+    <div class="bk-col-main">
+      <section class="card bk-card" aria-labelledby="bk-nets-title">
+        <header class="bk-card__head">
+          <span class="bk-card__icon">{{ icon("share-2", 18) }}</span>
+          <div>
+            <h2 class="bk-card__title" id="bk-nets-title">Redes</h2>
+            <p class="bk-card__sub">Elige dónde se publicará cada vídeo. En el paso 4 puedes quitar una red de un vídeo concreto.</p>
+          </div>
+        </header>
+        <div class="bk-accounts">
+          {% for info in state.accounts %}
+          {% set K = info.key %}
+          {% set N = info.network %}
+          <div class="bk-acc bk-acc--{{ N }}" :class="{'is-on': isSel('{{ K }}')}">
+            <div class="bk-acc__row">
+              <button type="button" class="bk-acc__pick" @click="toggleAccount('{{ K }}')" :aria-pressed="isSel('{{ K }}') ? 'true' : 'false'">
+                <span class="bk-acc__logo">{{ net_icon(N, 36, title=False) }}</span>
+                <span class="bk-acc__names">
+                  <span class="bk-acc__net">{{ info.network_label }}</span>
+                  <span class="bk-acc__who truncate">{{ info.display if N != "demo" else "Red de prueba (modo prueba)" }}</span>
+                </span>
+                {% if info.status == "needs_reconnect" %}{{ ui.tag("Reconectar", "warning", icon_name="triangle-alert", size="sm") }}{% endif %}
+                <span class="bk-acc__check" aria-hidden="true">{{ icon("check", 16, stroke=3) }}</span>
+                <span class="visually-hidden" x-text="isSel('{{ K }}') ? 'Seleccionada' : 'Sin seleccionar'"></span>
+              </button>
+              <div class="bk-acc__ctrls" x-show="isSel('{{ K }}')" x-cloak>
+                {% if info.formats|selectattr("disabled", "false")|list|length > 1 or info.formats|length > 1 %}
+                <label class="bk-acc__fmt">
+                  <span class="visually-hidden">Formato en {{ info.network_label }}</span>
+                  <select class="select select--sm" @change="chooseFormat('{{ K }}', $event.target.value)" aria-label="Formato en {{ info.network_label }}">
+                    {% for f in info.formats %}
+                    <option value="{{ f.key }}" :selected="conf('{{ K }}').format === '{{ f.key }}'"{% if f.disabled %} disabled{% endif %}>{{ f.label }}{% if f.disabled %} (no disponible){% endif %}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                {% endif %}
+                <label class="switch switch--pill bk-acc__auto" :title="autoHelp('{{ K }}')">
+                  <input type="checkbox" role="switch" x-model="batch.accounts['{{ K }}'].auto_publish"
+                         {% if N == "tiktok" %}:disabled="opt('{{ K }}').mode === 'inbox'"{% endif %}>
+                  <span class="switch__track" aria-hidden="true"></span>
+                  <span class="switch__text"><span class="switch__label">Autopublicar</span></span>
+                </label>
+              </div>
+            </div>
+            <p class="bk-acc__help" x-show="isSel('{{ K }}')" x-cloak x-text="autoHelp('{{ K }}')"></p>
+            {% if N == "tiktok" %}
+            <div class="bk-acc__opts" x-show="isSel('{{ K }}')" x-cloak>{% include "bulk/_net_tiktok.html" %}</div>
+            {% elif N == "youtube" %}
+            <div class="bk-acc__opts" x-show="isSel('{{ K }}')" x-cloak>{% include "bulk/_net_youtube.html" %}</div>
+            {% elif N == "instagram" %}
+            <div class="bk-acc__opts" x-show="isSel('{{ K }}') && conf('{{ K }}').format === 'reel'" x-cloak>
+              <label class="switch">
+                <input type="checkbox" role="switch" x-model="batch.accounts['{{ K }}'].options.share_to_feed">
+                <span class="switch__track" aria-hidden="true"></span>
+                <span class="switch__text"><span class="switch__label">Mostrar los reels también en el feed</span>
+                  <span class="switch__help">Además de en la pestaña Reels, aparecen en tu cuadrícula de publicaciones.</span></span>
+              </label>
+            </div>
+            {% endif %}
+          </div>
+          {% endfor %}
+          {% if not state.accounts %}
+          {% call ui.empty_state("No hay cuentas conectadas en esta marca", "Conecta Facebook, Instagram, TikTok o YouTube para programar tus vídeos.", icon_name="plug", compact=True) %}
+            <a class="btn btn--primary" href="/conexiones">{{ icon("plug", 16) }}<span>Conectar cuentas</span></a>
+          {% endcall %}
+          {% else %}
+          <a class="bk-acc-add" href="/conexiones">{{ icon("plus", 16) }}<span>Conectar otra cuenta</span></a>
+          {% endif %}
+        </div>
+      </section>
+    </div>
+
+    <aside class="bk-col-side">
+      <section class="card bk-card" aria-labelledby="bk-tags-title">
+        <header class="bk-card__head">
+          <span class="bk-card__icon bk-card__icon--alt">{{ icon("hash", 18) }}</span>
+          <div>
+            <h2 class="bk-card__title" id="bk-tags-title">Hashtags comunes <span class="optional">(opcional)</span></h2>
+            <p class="bk-card__sub">Se añaden al final del texto de todos los vídeos, después de los suyos.</p>
+          </div>
+        </header>
+        <div class="bk-card__body">
+          <div class="bk-chips" @click="$refs.commonTag.focus()">
+            <template x-for="(t, ti) in batch.common_hashtags" :key="t + ti">
+              <span class="chip bk-chip"><span x-text="'#' + t"></span>
+                <button type="button" class="bk-chip__x" @click.stop="removeTag(batch, 'common_hashtags', ti)" :aria-label="'Quitar #' + t">{{ icon("x", 13) }}</button></span>
+            </template>
+            <input type="text" class="bk-chips__input" x-ref="commonTag" x-model="drafts.common" placeholder="#hashtag y pulsa Intro" autocomplete="off"
+                   aria-label="Añadir hashtag común" @keydown="tagKey($event, batch, 'common_hashtags', 'common')"
+                   @blur="commitTag(batch, 'common_hashtags', 'common')" @paste="tagPaste($event, batch, 'common_hashtags', 'common')">
+          </div>
+          <p class="bk-help" x-show="batch.common_hashtags.length" x-cloak x-text="'Ejemplo: …texto del vídeo ' + batch.common_hashtags.map(t => '#' + t).join(' ')"></p>
+        </div>
+      </section>
+
+      <section class="card bk-card" aria-labelledby="bk-review-title">
+        <header class="bk-card__head">
+          <span class="bk-card__icon" :class="commonErrors().length ? 'bk-card__icon--danger' : 'bk-card__icon--ok'">
+            <span x-show="!commonErrors().length">{{ icon("circle-check", 18) }}</span>
+            <span x-show="commonErrors().length" x-cloak>{{ icon("circle-alert", 18) }}</span>
+          </span>
+          <div>
+            <h2 class="bk-card__title" id="bk-review-title">Revisión de los ajustes</h2>
+            <p class="bk-card__sub" x-text="!selectedKeys().length ? 'Elige al menos una red.' : (commonErrors().length ? 'Corrige esto para poder programar.' : 'Los ajustes comunes están completos.')"></p>
+          </div>
+        </header>
+        <div class="bk-card__body bk-review" aria-live="polite">
+          <template x-if="commonErrors().length">
+            <ul class="bk-issues bk-issues--error">
+              <template x-for="(e, ei) in commonErrors()" :key="'ce' + ei">
+                <li><span class="bk-issues__net" x-show="e.network_label" x-text="e.network_label"></span><span x-text="e.message"></span></li>
+              </template>
+            </ul>
+          </template>
+          <template x-if="commonWarnings().length">
+            <ul class="bk-issues bk-issues--warning">
+              <template x-for="(w, wi) in commonWarnings()" :key="'cw' + wi">
+                <li><span class="bk-issues__net" x-show="w.network_label" x-text="w.network_label"></span><span x-text="w.message"></span></li>
+              </template>
+            </ul>
+          </template>
+          <p class="bk-help" x-show="!batch.rows.length" x-cloak>Añade vídeos en el paso 1 para comprobar también cada vídeo.</p>
+        </div>
+      </section>
+    </aside>
+  </div>
+</section>

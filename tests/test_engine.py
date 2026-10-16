@@ -682,7 +682,13 @@ def _app_was_off_since(db: Session, last_tick) -> None:
     db.commit()
 
 
+def _old_late_rule(db: Session) -> None:
+    """Turn late publishing off: the grace window / missed rule of before (Ajustes › Publicación)."""
+    config.set_setting(db, "publish_late", False)
+
+
 def test_missed_when_app_was_off_beyond_grace(db, clock, demo_account, demo, sched):
+    _old_late_rule(db)
     due = clock.now()
     target = make_target(db, demo_account, at=due)
     _app_was_off_since(db, due - timedelta(hours=1))
@@ -702,6 +708,7 @@ def test_missed_when_app_was_off_beyond_grace(db, clock, demo_account, demo, sch
 
 
 def test_late_within_grace_is_published_with_a_note(db, clock, demo_account, demo, sched):
+    _old_late_rule(db)
     due = clock.now()
     target = make_target(db, demo_account, at=due, options={"demo_steps": 1})
     _app_was_off_since(db, due - timedelta(hours=1))
@@ -713,7 +720,10 @@ def test_late_within_grace_is_published_with_a_note(db, clock, demo_account, dem
     late_msg = db.scalars(
         select(PostEvent.message).where(PostEvent.target_id == target.id, PostEvent.event == "late")
     ).one()
-    assert late_msg == "Se publica con 1 h 30 min de retraso."
+    assert late_msg == (
+        "Se publica con 1 h 30 min de retraso: estaba programada para el martes 3 de noviembre, 10:00 y el "
+        "equipo o la app no estaba disponible."
+    )
 
 
 def test_late_beyond_grace_while_app_was_running_is_not_missed(db, clock, demo_account, demo, sched):
@@ -732,6 +742,7 @@ def test_late_beyond_grace_while_app_was_running_is_not_missed(db, clock, demo_a
 
 
 def test_grace_minutes_setting(db, clock, demo_account, demo, sched):
+    _old_late_rule(db)
     config.set_setting(db, "grace_minutes", 0)
     due = clock.now()
     target = make_target(db, demo_account, at=due)
@@ -939,6 +950,7 @@ def test_retry_target_from_error(db, clock, demo_account, demo, sched):
 
 
 def test_retry_target_from_missed(db, clock, demo_account, demo, sched):
+    _old_late_rule(db)
     due = clock.now()
     target = make_target(db, demo_account, at=due, options={"demo_steps": 1})
     _app_was_off_since(db, due - timedelta(hours=1))

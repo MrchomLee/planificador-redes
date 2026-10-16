@@ -527,14 +527,30 @@ def test_settings_save_and_csv_import(browser: Any, live_server_sched: LiveServe
     page = new_page(browser, live)
     log = PageLog(page)
 
-    # Ajustes: save the grace window.
+    # Ajustes › Publicación: late publishing is on by default (limit + spacing visible, grace window hidden).
     page.goto(live.url + "/ajustes", wait_until="networkidle")
+    assert page.is_checked("#sw-publish-late")
+    assert page.is_visible("#f-late-spacing") and not page.is_visible("#f-grace")
+    page.select_option("#f-late-max", "6")
+    page.select_option("#f-late-spacing", "30")
+    with page.expect_response(lambda r: "/ajustes/publicacion" in r.url) as saved:
+        page.locator("#publicacion button[type=submit]").click()
+    assert saved.value.ok
+    page.locator("#toast-root .toast", has_text="guardados").wait_for()
+    page.reload(wait_until="networkidle")
+    assert page.input_value("#f-late-max") == "6" and page.input_value("#f-late-spacing") == "30"
+
+    # Switching it off shows the grace window instead; save it.
+    page.locator("label[for='sw-publish-late']").click()
+    page.locator("#f-grace").wait_for(state="visible")
+    assert not page.is_visible("#f-late-spacing")
     page.fill("#f-grace", "90")
     with page.expect_response(lambda r: "/ajustes/publicacion" in r.url) as saved:
         page.locator("#publicacion button[type=submit]").click()
     assert saved.value.ok
     page.locator("#toast-root .toast", has_text="guardados").wait_for()
     page.reload(wait_until="networkidle")
+    assert not page.is_checked("#sw-publish-late")
     assert page.input_value("#f-grace") == "90"
     log.assert_clean("ajustes")
 

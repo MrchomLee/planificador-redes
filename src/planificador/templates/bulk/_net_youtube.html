@@ -1,0 +1,54 @@
+{#- Bulk · YouTube common settings (research 06 §13.2, same keys as the composer): where the title comes from
+    (editable per video in step 4), visibility, "made for kids" (required, no default), category, notify. Vars: K. -#}
+<div class="bk-fields">
+  <div class="callout tone-warning cmp-callout bk-callout" x-show="conf('{{ K }}').auto_publish && !acc['{{ K }}'].youtube_unlocked" x-cloak>
+    {{ icon("triangle-alert", 16) }}
+    <div>Tu proyecto de Google no está verificado por YouTube: los vídeos subidos automáticamente pueden quedar <strong>privados</strong>. Te recomendamos la Publicación asistida (desactiva «Autopublicar») o hacer la «Prueba de bloqueo» en <a :href="cfg.urls.connections">Cuentas conectadas</a>.</div>
+  </div>
+
+  <fieldset class="bk-field">
+    <legend class="bk-label">Título de cada vídeo</legend>
+    <div class="bk-radios bk-radios--inline">
+      <label class="check"><input type="radio" name="bk-yt-title-{{ K }}" value="text" x-model="batch.yt_title_source"><span class="check__label">Primera línea del texto</span></label>
+      <label class="check"><input type="radio" name="bk-yt-title-{{ K }}" value="filename" x-model="batch.yt_title_source"><span class="check__label">Nombre del archivo</span></label>
+    </div>
+    <p class="bk-help">Podrás cambiar el título de cada vídeo en el paso 4. La descripción es el texto del vídeo.</p>
+  </fieldset>
+
+  <div class="bk-field">
+    <span class="bk-label" id="bk-yt-priv-{{ K }}">Visibilidad</span>
+    <div class="segmented bk-seg" role="radiogroup" aria-labelledby="bk-yt-priv-{{ K }}">
+      <template x-for="p in cfg.yt_privacy" :key="p.value">
+        <label :class="{'is-active': (opt('{{ K }}').privacy_status || 'public') === p.value}">
+          <input type="radio" name="bk-yt-privacy-{{ K }}" :value="p.value" x-model="batch.accounts['{{ K }}'].options.privacy_status"><span x-text="p.label"></span>
+        </label>
+      </template>
+    </div>
+  </div>
+
+  <fieldset class="bk-field">
+    <legend class="bk-label">Audiencia: ¿son vídeos creados para niños? <span class="req" aria-hidden="true">*</span></legend>
+    <div class="bk-radios">
+      <label class="check"><input type="radio" name="bk-yt-kids-{{ K }}" :checked="opt('{{ K }}').made_for_kids === true" @change="setKids('{{ K }}', true)" aria-required="true"><span class="check__label">Sí, son contenido creado para niños</span></label>
+      <label class="check"><input type="radio" name="bk-yt-kids-{{ K }}" :checked="opt('{{ K }}').made_for_kids === false" @change="setKids('{{ K }}', false)"><span class="check__label">No, no son contenido creado para niños</span></label>
+    </div>
+    <p class="bk-error" x-show="opt('{{ K }}').made_for_kids !== true && opt('{{ K }}').made_for_kids !== false">Elige una opción: YouTube lo exige (COPPA).</p>
+  </fieldset>
+
+  <div class="bk-grid2">
+    <div class="bk-field">
+      <label class="bk-label" for="bk-yt-cat-{{ K }}">Categoría</label>
+      <select id="bk-yt-cat-{{ K }}" class="select" @change="batch.accounts['{{ K }}'].options.category_id = $event.target.value">
+        <template x-for="c in ytCategoryChoices('{{ K }}')" :key="c.id">
+          <option :value="c.id" x-text="c.title" :selected="String(opt('{{ K }}').category_id) === String(c.id)"></option>
+        </template>
+      </select>
+    </div>
+    <div class="bk-field bk-field--end">
+      <label class="switch">
+        <input type="checkbox" role="switch" x-model="batch.accounts['{{ K }}'].options.notify_subscribers">
+        <span class="switch__track" aria-hidden="true"></span><span class="switch__text"><span class="switch__label">Notificar a los suscriptores</span></span>
+      </label>
+    </div>
+  </div>
+</div>

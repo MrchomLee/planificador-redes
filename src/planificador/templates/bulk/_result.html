@@ -1,0 +1,57 @@
+{#- Result of "Programar todo" / "Guardar todo como borradores": counts, links to the calendar and the list (date range
+    of the new posts), one line per post (drafts with the reasons) and the rows that could not be saved. -#}
+<section class="card bk-result" x-show="result" x-cloak x-ref="result" tabindex="-1" aria-labelledby="bk-result-title">
+  <template x-if="result">
+    <div>
+      <div class="bk-result__head">
+        <span class="bk-result__icon" :class="result.scheduled || result.action === 'draft' ? 'is-ok' : 'is-warn'" aria-hidden="true">
+          <span x-show="result.scheduled || result.action === 'draft'">{{ icon("circle-check", 30) }}</span>
+          <span x-show="!(result.scheduled || result.action === 'draft')">{{ icon("triangle-alert", 30) }}</span>
+        </span>
+        <div class="grow">
+          <h2 class="bk-result__title" id="bk-result-title" x-text="resultTitle()"></h2>
+          <p class="bk-result__text" x-text="resultText()"></p>
+        </div>
+      </div>
+      <div class="bk-result__tiles">
+        <div class="kpi-tile kpi-tile--blue kpi-tile--sm"><span class="kpi-tile__value" x-text="result.scheduled"></span><span class="kpi-tile__label">Programadas</span></div>
+        <div class="kpi-tile kpi-tile--amber kpi-tile--sm"><span class="kpi-tile__value" x-text="result.drafts"></span><span class="kpi-tile__label">Borradores</span></div>
+        <template x-if="result.failed"><div class="kpi-tile kpi-tile--pink kpi-tile--sm"><span class="kpi-tile__value" x-text="result.failed"></span><span class="kpi-tile__label">Sin guardar</span></div></template>
+      </div>
+      <div class="bk-result__actions">
+        <a class="btn btn--primary" :href="result.links.calendar">{{ icon("calendar-days", 18) }}<span>Ver en el calendario</span></a>
+        <a class="btn btn--secondary" :href="result.links.list">{{ icon("list", 18) }}<span>Ver en la lista</span></a>
+        <button type="button" class="btn btn--ghost" @click="newBatchFromResult()" x-text="batch.rows.length ? 'Volver a los vídeos pendientes' : 'Nueva carga masiva'"></button>
+      </div>
+      <template x-if="result.auto_rows">
+        <div class="alert alert--info alert--compact bk-pc" role="note">
+          {{ icon("monitor-check", 18) }}
+          <div class="alert__body">Recuerda: el ordenador tiene que estar encendido y la aplicación abierta a las horas programadas.</div>
+        </div>
+      </template>
+
+      <ul class="bk-result__list" aria-label="Publicaciones creadas">
+        <template x-for="p in result.posts" :key="p.post_id">
+          <li class="bk-result__item">
+            <span class="bk-result__thumb"><template x-if="p.thumb_url"><img :src="p.thumb_url" alt="" loading="lazy"></template></span>
+            <div class="bk-result__body">
+              <a class="bk-result__name" :href="postUrl(p.post_id)" x-text="p.name"></a>
+              <span class="bk-result__when" x-text="p.when_label"></span>
+              <template x-if="p.reasons && p.reasons.length">
+                <ul class="bk-result__reasons"><template x-for="(r, ri) in p.reasons" :key="ri"><li x-text="r"></li></template></ul>
+              </template>
+            </div>
+            <span class="badge" :class="p.status === 'scheduled' ? 'st-scheduled' : 'st-draft'" x-text="p.status === 'scheduled' ? 'Programada' : 'Borrador'"></span>
+          </li>
+        </template>
+        <template x-for="f in result.failures" :key="'f' + f.row_id">
+          <li class="bk-result__item is-failed">
+            <span class="bk-result__thumb"><template x-if="f.thumb_url"><img :src="f.thumb_url" alt="" loading="lazy"></template></span>
+            <div class="bk-result__body"><span class="bk-result__name" x-text="f.name"></span><span class="bk-result__reasons text-danger" x-text="f.message"></span></div>
+            <span class="badge st-error">No guardada</span>
+          </li>
+        </template>
+      </ul>
+    </div>
+  </template>
+</section>

@@ -1,0 +1,157 @@
+{#- Step 3 · Calendario: automatic distribution (start day, N per day or one every N days, times, weekends) in the
+    brand time zone, manual edits per video, mini summary, daily-limit warnings and the "PC on" reminder. -#}
+<section class="bk-panel" role="tabpanel" id="bk-panel-3" aria-labelledby="bk-tab-3" data-step-panel="3" tabindex="-1" :inert="submitting || !!stopReason"
+         x-show="batch.step === 3 && !result" x-cloak>
+  <div class="bk-cols">
+    <div class="bk-col-main">
+      <section class="card bk-card" aria-labelledby="bk-dist-title">
+        <header class="bk-card__head">
+          <span class="bk-card__icon">{{ icon("calendar-range", 18) }}</span>
+          <div>
+            <h2 class="bk-card__title" id="bk-dist-title">Reparto automático</h2>
+            <p class="bk-card__sub">Elige cuándo empezar y con qué frecuencia; las fechas se asignan en el orden de la lista.</p>
+          </div>
+        </header>
+        <div class="bk-card__body bk-dist">
+          <div class="bk-dist__grid">
+            <div class="bk-field">
+              <label class="bk-label" for="bk-start">Empezar el</label>
+              <input id="bk-start" type="date" class="input" x-model="batch.distribution.start_date" :min="cfg.today">
+            </div>
+            <fieldset class="bk-field bk-dist__freq">
+              <legend class="bk-label">Frecuencia</legend>
+              <div class="bk-freq">
+                <label class="bk-freq__opt" :class="{'is-active': batch.distribution.mode === 'per_day'}">
+                  <input type="radio" name="bk-mode" value="per_day" x-model="batch.distribution.mode">
+                  <input type="number" class="input input--sm bk-num" min="1" :max="cfg.limits.max_per_day" x-model.number="batch.distribution.per_day"
+                         @focus="setMode('per_day')" aria-label="Publicaciones por día">
+                  <span>publicaciones al día</span>
+                </label>
+                <label class="bk-freq__opt" :class="{'is-active': batch.distribution.mode === 'every_days'}">
+                  <input type="radio" name="bk-mode" value="every_days" x-model="batch.distribution.mode">
+                  <span>1 cada</span>
+                  <input type="number" class="input input--sm bk-num" min="1" :max="cfg.limits.max_every_days" x-model.number="batch.distribution.every_days"
+                         @focus="setMode('every_days')" aria-label="Días entre publicaciones">
+                  <span x-text="Number(batch.distribution.every_days) === 1 ? 'día' : 'días'">días</span>
+                </label>
+              </div>
+            </fieldset>
+          </div>
+
+          <div class="bk-field">
+            <span class="bk-label" id="bk-slots-label">Horas de publicación <span class="muted fw-500">({{ tz }})</span></span>
+            <div class="bk-slots" role="group" aria-labelledby="bk-slots-label">
+              <template x-for="(s, si) in batch.distribution.slots" :key="s">
+                <span class="chip bk-slot">{{ icon("clock", 14) }}<span x-text="s"></span>
+                  <button type="button" class="bk-chip__x" @click="removeSlot(si)" :aria-label="'Quitar las ' + s">{{ icon("x", 13) }}</button></span>
+              </template>
+              <span class="bk-slot-add">
+                <input type="time" class="input input--sm" x-model="newSlot" @keydown.enter.prevent="addSlot()" aria-label="Nueva hora" step="300">
+                <button type="button" class="btn btn--secondary btn--sm" @click="addSlot()">{{ icon("plus", 15) }}<span>Añadir hora</span></button>
+              </span>
+            </div>
+            <p class="bk-help">
+              <span x-text="slotsHint()"></span>
+              <button type="button" class="btn btn--link btn--sm" x-show="cfg.suggested_slots && cfg.suggested_slots.join() !== batch.distribution.slots.join()" @click="useSuggested()"
+                      x-text="'Usar ' + (cfg.suggested_slots || []).join(' y ')"></button>
+              <span x-show="batch.distribution.mode === 'per_day' && batch.distribution.slots.length > Number(batch.distribution.per_day)"> Con menos publicaciones al día que horas, las horas se van alternando.</span>
+            </p>
+            <p class="bk-error" x-show="perDayError()" x-text="perDayError()"></p>
+          </div>
+
+          <label class="switch">
+            <input type="checkbox" role="switch" x-model="batch.distribution.skip_weekends">
+            <span class="switch__track" aria-hidden="true"></span>
+            <span class="switch__text"><span class="switch__label">Saltar fines de semana</span><span class="switch__help">No se programa nada en sábado ni en domingo.</span></span>
+          </label>
+
+          <div class="bk-dist__go">
+            <button type="button" class="btn btn--primary" @click="distribute()" :disabled="!batch.rows.length || distributing || !!perDayError()">
+              <span class="spinner spinner--light" x-show="distributing" x-cloak aria-hidden="true"></span>
+              <span x-show="!distributing">{{ icon("wand-sparkles", 18) }}</span><span>Repartir fechas</span>
+            </button>
+            <span class="bk-help" x-text="planPreview()"></span>
+          </div>
+          <p class="bk-error" x-show="distError" x-cloak x-text="distError" role="alert"></p>
+          <template x-if="distNotes.length">
+            <div class="callout tone-info bk-callout">{{ icon("clock-alert", 16) }}<div><template x-for="(n, ni) in distNotes" :key="ni"><p x-text="n"></p></template></div></div>
+          </template>
+        </div>
+      </section>
+
+      <section class="card bk-card" aria-labelledby="bk-dates-title">
+        <header class="bk-card__head">
+          <span class="bk-card__icon bk-card__icon--alt">{{ icon("calendar-clock", 18) }}</span>
+          <div class="grow">
+            <h2 class="bk-card__title" id="bk-dates-title">Fecha de cada vídeo</h2>
+            <p class="bk-card__sub">Puedes cambiar cualquiera a mano. Hora de {{ tz }}.</p>
+          </div>
+          <button type="button" class="btn btn--ghost btn--sm" @click="clearDates()" x-show="batch.rows.some(r => r.date || r.time)" x-cloak>{{ icon("calendar-x", 15) }}<span>Quitar fechas</span></button>
+        </header>
+        <div class="bk-dates" x-show="batch.rows.length">
+          <template x-for="(row, i) in batch.rows" :key="row.id">
+            <div class="bk-date-row" :class="{'is-past': rowPast(row), 'is-empty': !(row.date && row.time)}">
+              <span class="bk-date-row__num" x-text="i + 1"></span>
+              <span class="bk-date-row__thumb"><template x-if="thumb(row)"><img :src="thumb(row)" alt="" loading="lazy"></template></span>
+              <span class="bk-date-row__name truncate" x-text="mediaName(row)" :title="mediaName(row)"></span>
+              <span class="bk-date-row__when" x-text="rowWhen(row)"></span>
+              <input type="date" class="input input--sm" x-model="row.date" :min="cfg.today" :aria-label="'Fecha del vídeo ' + (i + 1)">
+              <input type="time" class="input input--sm" x-model="row.time" step="300" :aria-label="'Hora del vídeo ' + (i + 1)">
+            </div>
+          </template>
+        </div>
+        <div class="bk-card__body" x-show="!batch.rows.length"><p class="bk-help">Añade vídeos en el paso 1.</p></div>
+      </section>
+    </div>
+
+    <aside class="bk-col-side">
+      <section class="card bk-card" aria-labelledby="bk-sum-title">
+        <header class="bk-card__head">
+          <span class="bk-card__icon">{{ icon("calendar-check", 18) }}</span>
+          <div><h2 class="bk-card__title" id="bk-sum-title">Resumen</h2>
+            <p class="bk-card__sub" x-text="undatedCount() ? (undatedCount() === 1 ? '1 vídeo sin fecha' : undatedCount() + ' vídeos sin fecha') : 'Todos los vídeos tienen fecha'"></p></div>
+        </header>
+        <div class="bk-card__body">
+          <dl class="bk-sum">
+            <div><dt>Primera</dt><dd x-text="(summary() && summary().first_label) || '—'"></dd></div>
+            <div><dt>Última</dt><dd x-text="(summary() && summary().last_label) || '—'"></dd></div>
+            <div class="bk-sum__pair">
+              <div><dt>Días</dt><dd x-text="(summary() && summary().days) || 0"></dd></div>
+              <div><dt>Máx. al día</dt><dd x-text="(summary() && summary().max_per_day) || 0"></dd></div>
+            </div>
+          </dl>
+          <div class="bk-days" x-show="dayBars().length" x-cloak role="list" aria-label="Publicaciones por día">
+            <template x-for="d in dayBars().slice(0, 21)" :key="d.date">
+              <div class="bk-day" role="listitem" :class="{'is-weekend': d.weekend}" :title="d.count + (d.count === 1 ? ' publicación' : ' publicaciones') + ' el ' + d.weekday + ' ' + d.label">
+                <span class="bk-day__bar" aria-hidden="true"><span :style="'height:' + Math.max(18, Math.round(d.count / maxPerDay() * 100)) + '%'"></span></span>
+                <span class="bk-day__count" x-text="d.count"></span>
+                <span class="bk-day__wd" x-text="d.weekday"></span>
+                <span class="bk-day__dm" x-text="d.label"></span>
+              </div>
+            </template>
+          </div>
+          <p class="bk-help" x-show="dayBars().length > 21" x-cloak x-text="'…y ' + (dayBars().length - 21) + ' días más.'"></p>
+        </div>
+      </section>
+
+      <template x-if="caps().length">
+        <details class="issue-panel issue-panel--warning bk-caps" open>
+          <summary class="issue-panel__head">{{ icon("triangle-alert", 20) }}<span x-text="caps().length === 1 ? 'Límite diario de una red' : caps().length + ' límites diarios de las redes'"></span>{{ icon("chevron-down", 18, cls="issue-panel__chev") }}</summary>
+          <ul class="issue-panel__list">
+            <template x-for="(c, ci) in caps()" :key="ci">
+              <li class="issue-panel__item"><strong class="bk-issues__net" x-text="c.network_label"></strong><span x-text="c.message"></span></li>
+            </template>
+          </ul>
+        </details>
+      </template>
+
+      <div class="alert alert--info bk-pc" role="note">
+        {{ icon("monitor-check", 18) }}
+        <div class="alert__body">
+          <div class="alert__title">El ordenador tiene que estar encendido</div>
+          <div>Para publicar a cada hora, el PC debe estar encendido (no suspendido) y la aplicación abierta. Si estaba apagado o sin internet, al volver se publica lo atrasado (una a una por cuenta, con la separación de Ajustes › Publicación).</div>
+        </div>
+      </div>
+    </aside>
+  </div>
+</section>

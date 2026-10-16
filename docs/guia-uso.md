@@ -48,14 +48,14 @@ horaria de la marca (púlsala para cambiarla).
 | Estado | Qué significa |
 |---|---|
 | **Borrador** | Guardada sin programar (o con algún error que corregir). |
-| **Programado** | Saldrá sola a la hora indicada. |
-| **Publicando** | Se está enviando ahora mismo. |
+| **Programado** | Saldrá sola a la hora indicada. Si ya pasó la hora, el detalle dice **Atrasada**: saldrá en cuanto el ordenador, la app e internet estén disponibles. |
+| **Publicando** | Se está enviando ahora mismo (o, si el detalle dice **Esperando conexión a internet**, saldrá en cuanto vuelva la conexión; si dice **Atrasada**, la conexión ya volvió y espera su turno). |
 | **Publicado** | Ya está en la red (con enlace **Ver en …**). |
 | **Publicación asistida** | Es la hora y te toca publicarla a ti (ver más abajo). |
 | **Hecho a mano** | La marcaste como publicada tú. |
 | **Enviado a la app** | El vídeo está en tu app de TikTok como borrador, pendiente de terminar. |
 | **Error** | No se pudo publicar: abre el detalle para ver el motivo y pulsa **Reintentar**. |
-| **Perdido** | Era la hora pero la aplicación estaba cerrada. Elige **Publicar ahora**, **Reprogramar** o **Descartar**. |
+| **Perdido** | No salió y ya no saldrá sola: superó el **Límite de retraso** (o la **Ventana de gracia**, si desactivaste las publicaciones atrasadas). Elige **Publicar ahora**, **Reprogramar** o **Descartar**. |
 | **Sin confirmar** | Se envió pero la red no confirmó si salió. Compruébalo en la red y márcalo. |
 
 ## El editor: crear una publicación
@@ -153,14 +153,38 @@ En **☰ › Importar o exportar CSV**:
 
 - **Credenciales**: los datos de tus apps de Meta, TikTok y Google, y las direcciones de redirección para
   copiar.
-- **Publicación**: zona horaria por defecto, **Ventana de gracia** (cuánto tiempo después de la hora todavía se
-  publica algo que se retrasó porque el ordenador estaba apagado; por defecto 120 minutos) y **Modo prueba**.
+- **Publicación**: zona horaria por defecto, **Modo prueba** y qué hacer con las publicaciones que no pudieron
+  salir a su hora (ver [Si el ordenador estaba apagado o sin internet](#si-el-ordenador-estaba-apagado-o-sin-internet)):
+  - **Publicar las publicaciones atrasadas en cuanto se pueda (PC encendido, app abierta e internet)**:
+    activado por defecto.
+  - **Límite de retraso**: sin límite (por defecto), 2, 6, 12 o 24 horas.
+  - **Separación entre publicaciones atrasadas de una misma cuenta**: 5, 10, 15 (por defecto), 30 o 60
+    minutos.
+  - **Ventana de gracia**: solo se usa si desactivas la primera opción (por defecto 120 minutos).
 - **URL pública**: necesaria para publicar **fotos** en Instagram (ver la [guía de Meta](guia-meta.md)).
 - **Seguridad**: una contraseña opcional para abrir la aplicación. Si la olvidas, haz doble clic en
   `quitar-contrasena.bat` (en la carpeta del programa): podrás entrar sin contraseña y poner otra.
 - **Avisos**: avisos de escritorio y del navegador.
 - **Acerca de**: versión, carpeta de datos (**Abrir carpeta**) y registros (**Ver registros**) por si algo
   falla.
+
+## Si el ordenador estaba apagado o sin internet
+
+Planificador publica desde tu ordenador, así que a la hora de cada publicación el ordenador tiene que estar
+**encendido** (no dormido), con Planificador **abierto** y con **internet**. Si no lo estaba, con **Publicar las
+publicaciones atrasadas en cuanto se pueda** activado (así viene) no se pierde nada:
+
+- **Ordenador apagado o dormido, o app cerrada**: al encenderlo y abrir Planificador (o al despertar el
+  ordenador) las publicaciones atrasadas salen solas, en su orden. Si hay varias **de la misma cuenta**, salen
+  una a una con la **separación** elegida (15 minutos por defecto), para no publicarlas todas de golpe. Las
+  publicaciones que llegan a su hora no se retrasan por esto.
+- **Sin internet**: la publicación muestra **Esperando conexión a internet**. Planificador lo comprueba cada
+  minuto, sin gastar reintentos, y la publica en cuanto vuelve la conexión, aunque ya haya pasado su hora. Si
+  se juntan varias de la misma cuenta, salen una a una con la misma separación (mientras esperan su turno el
+  detalle dice **Atrasada**). Si el corte dura más de 5 minutos te avisamos una vez.
+- Las que salen tarde lo dicen en su historial («Publicada con retraso: estaba programada para…») y te avisamos.
+- Si eliges un **Límite de retraso**, las que lleven más retraso no se envían: quedan como **Perdido** y
+  decides tú. Las que ya estaban como **Perdido** nunca se publican solas.
 
 ## Modo prueba
 
@@ -173,6 +197,7 @@ estadísticas y responder comentarios de ejemplo sin tocar tus redes reales. Ap�
 - Deja Planificador abierto (la ventana negra puede estar minimizada) y el ordenador encendido a las horas de
   publicación. Para que arranque solo al encender el ordenador, mira «Iniciar con Windows» en el
   [README](../README.md).
-- Si el ordenador estaba apagado a la hora, la publicación sale igualmente al volver a abrir Planificador si no
-  han pasado más minutos que la **Ventana de gracia**; si han pasado, queda como **Perdido** y decides tú.
+- Si el ordenador estaba apagado a la hora (o sin internet), la publicación sale igualmente en cuanto vuelva a
+  estar disponible (ver [arriba](#si-el-ordenador-estaba-apagado-o-sin-internet)); si no quieres que salgan
+  muy tarde, elige un **Límite de retraso** en **Ajustes › Publicación**.
 - Revisa de vez en cuando **Cuentas conectadas**: si una cuenta pide reconexión, hazlo cuanto antes.

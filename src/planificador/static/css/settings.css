@@ -403,6 +403,18 @@ a.conn-brand:hover { border-color: var(--border-strong); color: var(--text); tex
 .input-suffix .input { padding-right: 76px; font-variant-numeric: tabular-nums; }
 .input-suffix__text { position: absolute; right: 12px; color: var(--text-muted); font-size: var(--text-sm); pointer-events: none; }
 
+.settings-late {
+  display: flex; flex-direction: column; gap: var(--sp-4); padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--border); border-radius: 14px;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+.settings-late:has(#sw-publish-late:checked) {
+  background: color-mix(in srgb, var(--primary-soft) 45%, var(--surface));
+  border-color: color-mix(in srgb, var(--primary) 30%, transparent);
+}
+.settings-late__options { padding-left: 46px; }
+.settings-late__options .select { max-width: 280px; }
+@media (max-width: 720px) { .settings-late__options { padding-left: 0; } }
 .settings-demo { padding: var(--sp-3) var(--sp-4); border: 1px solid var(--border); border-radius: 14px; transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease); }
 .settings-demo.is-on, .settings-demo:has(input:checked) { background: var(--demo-soft); border-color: color-mix(in srgb, var(--demo) 35%, transparent); }
 

@@ -1,0 +1,159 @@
+{#- Step 4 · Textos: one card per video — caption with the strictest counter of its networks, hashtags (chips, Instagram
+    30 # count), YouTube title, date/time, per-video network toggles, reorder (drag or ↑/↓), remove and the validation
+    badge (postsvc.validate_post via /api/carga-masiva/comprobar). Helpers: "Pegar textos", "Usar el nombre del
+    archivo como texto", "Aplicar a todos" per row for the hashtags. -#}
+<section class="bk-panel" role="tabpanel" id="bk-panel-4" aria-labelledby="bk-tab-4" data-step-panel="4" tabindex="-1" :inert="submitting || !!stopReason"
+         x-show="batch.step === 4 && !result" x-cloak>
+  <div class="toolbar bk-toolbar" role="toolbar" aria-label="Herramientas de los textos">
+    <button type="button" class="btn tool" x-ref="pasteBtn" @click="openPaste()" :disabled="!batch.rows.length">{{ icon("clipboard-paste", 18) }}<span>Pegar textos</span></button>
+    <button type="button" class="btn tool" @click="useFileNames()" :disabled="!batch.rows.length">{{ icon("file-text", 18) }}<span>Usar el nombre del archivo como texto</span></button>
+    <span class="toolbar__spacer"></span>
+    <label class="switch bk-toolbar__filter">
+      <input type="checkbox" role="switch" x-model="onlyIssues">
+      <span class="switch__track" aria-hidden="true"></span>
+      <span class="switch__text"><span class="switch__label">Solo con avisos o errores</span></span>
+    </label>
+    <span class="bk-toolbar__count" aria-live="polite">
+      <span x-text="batch.rows.length + (batch.rows.length === 1 ? ' vídeo' : ' vídeos')"></span><template x-if="rowsWithErrors()"><span class="text-danger" x-text="' · ' + rowsWithErrors() + ' con errores'"></span></template>
+    </span>
+  </div>
+
+  <p class="bk-help bk-order-hint" x-show="batch.rows.length > 1 && hasDates()" x-cloak>{{ icon("list-ordered", 14) }}<span>El orden de la lista es el de publicación: al mover un vídeo, las fechas se quedan en su sitio y cada vídeo toma la de su nueva posición.</span></p>
+
+  <template x-if="commonErrors().length">
+    <div class="alert alert--danger bk-alert" role="alert">
+      {{ icon("circle-alert", 18) }}
+      <div class="alert__body"><div class="alert__title">Falta algo en los ajustes comunes</div><div x-text="commonErrors()[0].message"></div></div>
+      <div class="alert__actions"><button type="button" class="btn btn--secondary btn--sm" @click="go(2, true)">Ir al paso 2</button></div>
+    </div>
+  </template>
+  <template x-if="caps().length">
+    <div class="alert alert--warning bk-alert" role="note">
+      {{ icon("triangle-alert", 18) }}
+      <div class="alert__body"><div class="alert__title" x-text="caps().length === 1 ? 'Superas el límite diario de una red' : 'Superas el límite diario de ' + caps().length + ' redes'"></div><div x-text="caps()[0].message"></div></div>
+      <div class="alert__actions"><button type="button" class="btn btn--secondary btn--sm" @click="go(3, true)">Cambiar el reparto</button></div>
+    </div>
+  </template>
+
+  <template x-if="sharedWarnings().length">
+    <details class="issue-panel issue-panel--warning bk-shared">
+      <summary class="issue-panel__head">{{ icon("triangle-alert", 20) }}<span x-text="sharedWarnings().length === 1 ? 'Un aviso en todos los vídeos' : sharedWarnings().length + ' avisos en todos los vídeos'"></span>{{ icon("chevron-down", 18, cls="issue-panel__chev") }}</summary>
+      <ul class="issue-panel__list">
+        <template x-for="(w, wi) in sharedWarnings()" :key="'sw' + wi">
+          <li class="issue-panel__item"><span><strong class="bk-issues__net" x-show="w.network_label" x-text="w.network_label + ':'"></strong> <span x-text="w.message"></span></span></li>
+        </template>
+      </ul>
+    </details>
+  </template>
+
+  <div class="bk-rows" role="list" aria-label="Textos de los vídeos" x-show="batch.rows.length">
+    <template x-for="(row, i) in batch.rows" :key="row.id">
+      <article class="bk-row" role="listitem" :data-row="row.id" x-show="!onlyIssues || rowStatus(row) === 'error' || rowStatus(row) === 'warning'"
+               :class="{'is-error': rowStatus(row) === 'error', 'is-warning': rowStatus(row) === 'warning', 'is-drag': dragIndex === i, 'is-over': dragOver === i && dragIndex !== i}"
+               @dragover="onDragOver(i, $event)" @drop="onDropRow(i, $event)" :aria-label="'Vídeo ' + (i + 1) + ': ' + mediaName(row)">
+        <div class="bk-row__side">
+          <span class="bk-row__num" x-text="i + 1"></span>
+          <span class="bk-row__grip" draggable="true" @dragstart="onDragStart(i, $event)" @dragend="onDragEnd()" title="Arrastra para cambiar el orden (las fechas se quedan en su posición)" aria-hidden="true">{{ icon("grip-vertical", 18) }}</span>
+          <button type="button" class="icon-btn icon-btn--sm" data-move="up" @click="moveRow(i, -1)" :disabled="i === 0" :aria-label="'Subir el vídeo ' + (i + 1)" title="Subir">{{ icon("arrow-up", 15) }}</button>
+          <button type="button" class="icon-btn icon-btn--sm" data-move="down" @click="moveRow(i, 1)" :disabled="i === batch.rows.length - 1" :aria-label="'Bajar el vídeo ' + (i + 1)" title="Bajar">{{ icon("arrow-down", 15) }}</button>
+        </div>
+
+        <div class="bk-row__media">
+          <div class="bk-row__thumb">
+            <template x-if="thumb(row)"><img :src="thumb(row)" alt="" loading="lazy"></template>
+            <span class="bk-vid__play" aria-hidden="true">{{ icon("play", 13, stroke=2.5) }}</span>
+            <span class="bk-vid__dur" x-show="mediaDuration(row)" x-text="mediaDuration(row)"></span>
+          </div>
+          <span class="bk-row__name" x-text="mediaName(row)" :title="mediaName(row)"></span>
+        </div>
+
+        <div class="bk-row__main">
+          <div class="bk-row__label-line">
+            <label class="bk-label" :for="'bk-text-' + row.id">Texto</label>
+            <span class="bk-counters">
+              <span class="char-counter" x-show="hasInstagram(row)" :class="{'is-over': hashtagCount(row) > cfg.limits.ig_hashtags}"
+                    :title="'Hashtags (Instagram admite ' + cfg.limits.ig_hashtags + ')'" x-text="hashtagCount(row) + ' / ' + cfg.limits.ig_hashtags + ' #'"></span>
+              <span class="char-counter bk-counter" :class="{'is-over': counter(row).over}" :title="counter(row).label ? 'Límite de ' + counter(row).label + ' (el más estricto de las redes elegidas)' : ''">
+                <span x-text="counterText(row)"></span>
+                {% for net in ["facebook", "instagram", "tiktok", "youtube", "demo"] %}<span x-show="counter(row).network === '{{ net }}'">{{ net_glyph(net, 13) }}</span>{% endfor %}
+              </span>
+            </span>
+          </div>
+          <textarea class="textarea bk-row__text" :id="'bk-text-' + row.id" rows="3" x-model="row.text" placeholder="Escribe el texto de este vídeo…"
+                    x-init="$nextTick(() => autosize($el))" @input="autosize($el)" :aria-invalid="counter(row).over ? 'true' : 'false'"></textarea>
+
+          <div class="bk-row__tags">
+            <div class="bk-chips bk-chips--sm" @click="$event.target === $el && $el.querySelector('input').focus()">
+              <span class="bk-chips__hash" aria-hidden="true">{{ icon("hash", 14) }}</span>
+              <template x-for="(t, ti) in row.hashtags" :key="t + ti">
+                <span class="chip bk-chip"><span x-text="'#' + t"></span>
+                  <button type="button" class="bk-chip__x" @click.stop="removeTag(row, 'hashtags', ti)" :aria-label="'Quitar #' + t">{{ icon("x", 12) }}</button></span>
+              </template>
+              <input type="text" class="bk-chips__input" x-model="drafts[row.id]" :placeholder="row.hashtags.length ? '' : 'Hashtags de este vídeo'" autocomplete="off"
+                     :aria-label="'Hashtags del vídeo ' + (i + 1)" @keydown="tagKey($event, row, 'hashtags', row.id)" @blur="commitTag(row, 'hashtags', row.id)"
+                     @paste="tagPaste($event, row, 'hashtags', row.id)">
+            </div>
+            <button type="button" class="btn btn--ghost btn--sm" x-show="row.hashtags.length && batch.rows.length > 1" @click="applyTagsToAll(row)" title="Usar estos hashtags en todos los vídeos">{{ icon("copy-plus", 15) }}<span>Aplicar a todos</span></button>
+          </div>
+          <p class="bk-help bk-row__common" x-show="batch.common_hashtags.length" x-cloak x-text="'+ comunes: ' + batch.common_hashtags.map(t => '#' + t).join(' ')"></p>
+
+          <div class="bk-row__yt" x-show="hasYoutube(row)" x-cloak>
+            <label class="bk-label" :for="'bk-yt-' + row.id">{{ net_glyph("youtube", 14) }} Título en YouTube</label>
+            <div class="bk-row__yt-line">
+              <input class="input input--sm bk-yt-input" :id="'bk-yt-' + row.id" x-model="row.yt_title" :placeholder="ytTitleDerived(row) || 'Título del vídeo'" maxlength="200"
+                     @focus="if (!row.yt_title) row.yt_title = ytTitleDerived(row)" @blur="if (row.yt_title.trim() === ytTitleDerived(row)) row.yt_title = ''">
+              <span class="bk-auto-tag" x-show="!row.yt_title" title="Se genera solo según el ajuste del paso 2">automático</span>
+              <span class="char-counter" :class="{'is-over': ytTitleLength(row) > cfg.limits.yt_title}" x-text="ytTitleLength(row) + ' / ' + cfg.limits.yt_title"></span>
+              <button type="button" class="btn btn--ghost btn--sm" x-show="row.yt_title" @click="row.yt_title = ''" title="Volver al título automático">{{ icon("rotate-ccw", 14) }}<span class="visually-hidden">Volver al título automático</span></button>
+            </div>
+          </div>
+
+          <ul class="bk-row__issues" x-show="issueList(row).length" x-cloak aria-live="polite">
+            <template x-for="(it, ii) in issueList(row)" :key="row.id + ii">
+              <li :class="it.level === 'error' ? 'is-error' : 'is-warning'">
+                <span class="bk-row__issue-icon" aria-hidden="true" x-html="it.level === 'error' ? $refs.icoErr.innerHTML : $refs.icoWarn.innerHTML"></span>
+                <span class="grow"><strong class="bk-issues__net" x-show="it.network_label" x-text="it.network_label + ':'"></strong> <span x-text="it.message"></span></span>
+                <button type="button" class="btn btn--link btn--sm bk-row__skip" x-show="it.level === 'error' && it.account_key && rowNetOn(row, it.account_key) && rowKeys(row).length > 1"
+                        @click="toggleRowNet(row, it.account_key)" x-text="'No publicar en ' + it.network_label"></button>
+              </li>
+            </template>
+          </ul>
+        </div>
+
+        <div class="bk-row__aside">
+          <span class="bk-badge" :class="'is-' + rowStatus(row)" role="status">
+            <span x-show="rowStatus(row) === 'pending'"><span class="spinner" aria-hidden="true"></span></span>
+            <span x-show="rowStatus(row) === 'ok'">{{ icon("circle-check", 14) }}</span>
+            <span x-show="rowStatus(row) === 'warning'">{{ icon("triangle-alert", 14) }}</span>
+            <span x-show="rowStatus(row) === 'error'">{{ icon("circle-alert", 14) }}</span>
+            <span x-text="rowBadge(row)"></span>
+          </span>
+          <div class="bk-row__when">
+            <input type="date" class="input input--sm" x-model="row.date" :min="cfg.today" :aria-label="'Fecha del vídeo ' + (i + 1)">
+            <input type="time" class="input input--sm" x-model="row.time" step="300" :aria-label="'Hora del vídeo ' + (i + 1)">
+          </div>
+          <div class="bk-row__nets" role="group" :aria-label="'Redes del vídeo ' + (i + 1)">
+            {% for info in state.accounts %}
+            <button type="button" class="bk-rnet bk-rnet--{{ info.network }}" x-show="isSel('{{ info.key }}')" @click="toggleRowNet(row, '{{ info.key }}')"
+                    :aria-pressed="rowNetOn(row, '{{ info.key }}') ? 'true' : 'false'"
+                    :title="(rowNetOn(row, '{{ info.key }}') ? 'Se publica en ' : 'No se publica en ') + '{{ info.network_label }}' + '. Pulsa para cambiarlo.'">
+              {{ net_glyph(info.network, 16) }}<span class="visually-hidden">{{ info.network_label }}</span>
+            </button>
+            {% endfor %}
+          </div>
+          <button type="button" class="btn btn--ghost btn--sm bk-row__remove" @click="removeRow(i)" :aria-label="'Quitar el vídeo ' + (i + 1) + ' de la carga masiva'">{{ icon("trash", 15) }}<span>Quitar</span></button>
+        </div>
+      </article>
+    </template>
+  </div>
+  <template x-if="!batch.rows.length">
+    {% call ui.empty_state("Aún no hay vídeos", "Añade vídeos en el paso 1 para escribir sus textos.", icon_name="film", compact=True) %}
+      <button type="button" class="btn btn--primary" @click="go(1, true)">{{ icon("upload", 16) }}<span>Ir al paso 1</span></button>
+    {% endcall %}
+  </template>
+  <template x-if="onlyIssues && batch.rows.length && !visibleRows().length">
+    <p class="bk-help bk-none">{{ icon("circle-check", 15) }} Ningún vídeo tiene avisos ni errores.</p>
+  </template>
+  <span hidden x-ref="icoErr">{{ icon("circle-alert", 15) }}</span>
+  <span hidden x-ref="icoWarn">{{ icon("triangle-alert", 15) }}</span>
+</section>

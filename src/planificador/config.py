@@ -46,7 +46,13 @@ DEFAULTS: dict[str, Any] = {
     "tiktok_analytics_scopes": False,  # legacy (before tiktok_scopes): also request the Display API scopes
     "google_client_id": None,  # YouTube
     "google_client_secret": None,  # secret
-    "grace_minutes": 120,
+    "grace_minutes": 120,  # only used when publish_late is off
+    # Late publishing (SPEC §10): a post that could not go out at its time (PC off/asleep, app closed, no
+    # internet) is published as soon as possible instead of becoming "missed". On by default, also for
+    # installs that never saved it (the missing key falls back to this default).
+    "publish_late": True,
+    "publish_late_max_hours": 0,  # 0 = no limit; later than this → "missed" anyway
+    "catchup_spacing_minutes": 15,  # minimum gap between overdue posts of the same account
     "public_media_mode": "off",  # "off" | "tunnel" | "base_url"
     "public_media_base_url": None,
     "public_media_tunnel_consent_at": None,  # ISO timestamp of the user's consent to download cloudflared
@@ -63,6 +69,11 @@ SECRET_KEYS: frozenset[str] = frozenset({"meta_app_secret", "tiktok_client_secre
 
 PUBLIC_MEDIA_MODES = ("off", "tunnel", "base_url")
 PKCE_ENCODINGS = ("hex", "base64url")
+#: Ajustes › Publicación choices: "Límite de retraso" (hours, 0 = no limit) and catch-up spacing (minutes).
+PUBLISH_LATE_MAX_HOURS_CHOICES: tuple[int, ...] = (0, 2, 6, 12, 24)
+CATCHUP_SPACING_CHOICES: tuple[int, ...] = (5, 10, 15, 30, 60)
+MAX_PUBLISH_LATE_HOURS = 24 * 30
+MAX_CATCHUP_SPACING_MINUTES = 24 * 60
 
 _MISSING: Any = object()
 
