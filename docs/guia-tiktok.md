@@ -197,7 +197,8 @@ explica: es el único que TikTok te permite. A la hora programada:
 1. Planificador sube el vídeo a tu bandeja de TikTok (todavía no se publica).
 2. En el móvil, TikTok te avisa (o lo ves en la **Bandeja de entrada**). Ábrelo.
 3. Termina en la app: añade música o efectos, pega el texto (TikTok **no** recibe el texto desde Planificador;
-   en la publicación tienes **Copiar texto**) y elige la visibilidad que quieras, incluida **Todo el mundo**.
+   cópialo con el botón **Copiar**, junto al texto, en la ficha de la publicación) y elige la visibilidad que
+   quieras, incluida **Todo el mundo**.
 
 En este modo no hace falta elegir visibilidad, comentarios ni aceptar la confirmación de música en
 Planificador: todo eso se decide en la app de TikTok. Límite de TikTok: como máximo **5 borradores pendientes
@@ -237,7 +238,7 @@ in…*) y, en la dirección de esa página o en sus detalles, un `error_type`. B
 | «Has alcanzado el límite de borradores» | Más de 5 borradores pendientes en 24 h: publica o borra los que tienes en la app de TikTok. |
 | Estadísticas de TikTok vacías | Tu app no tiene `user.info.stats` ni `video.list`, o tus vídeos son privados (paso 14). |
 | No veo los comentarios de TikTok en **Comentarios** | La API pública de TikTok no permite leerlos ni responderlos. Revísalos en la app de TikTok. |
-| La tarjeta dice **Requiere reconexión** | El acceso caduca si pasan muchos meses sin usarse o si lo revocas en TikTok. Pulsa **Reconectar**. |
+| La tarjeta dice **Reconexión necesaria** | El acceso caduca si pasan muchos meses sin usarse o si lo revocas en TikTok. Pulsa **Reconectar**. |
 
 Más guías: [Meta (Facebook e Instagram)](guia-meta.md) · [YouTube](guia-youtube.md) ·
 [Cómo usar Planificador](guia-uso.md).

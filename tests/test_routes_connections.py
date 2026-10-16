@@ -657,6 +657,40 @@ def test_tiktok_connect_inbox_only_app(client: TestClient, db: Session, brand: B
     assert "video.publish" in card  # why direct posting is missing
 
 
+def test_tiktok_connect_real_sandbox_sends_no_doomed_requests(
+    client: TestClient, db: Session, brand: Brand
+) -> None:
+    """Regression: a sandbox app with user.info.basic + video.upload + video.list (no user.info.profile, no
+    video.publish). TikTok would refuse both the profile fields and creator_info, so neither is requested:
+    one ``user/info`` call with the Login Kit fields and no ``creator_info`` call at all."""
+    set_tiktok(db)
+    config.set_setting(db, "tiktok_scopes", ["user.info.basic", "video.upload", "video.list"])
+    _, q = start(client, "/conexiones/tiktok/iniciar")
+    assert q["scope"] == "user.info.basic,video.upload,video.list"
+    scope_err = {"error": {"code": "scope_not_authorized", "message": "no", "log_id": "x"}}
+
+    def user(request: httpx.Request) -> httpx.Response:
+        if "username" in request.url.params.get("fields", ""):
+            return httpx.Response(401, json=scope_err)
+        body = {"user": {"open_id": "open-123", "display_name": "Sandbox", "avatar_url": None}}
+        return httpx.Response(200, json={"data": body, "error": {"code": "ok", "message": "", "log_id": "y"}})
+
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as router:
+        routes = mock_tiktok(router, {}, scope="user.info.basic,video.upload,video.list")
+        routes["user"].side_effect = user
+        routes["creator"].return_value = httpx.Response(401, json=scope_err)
+        r = client.get(
+            f"/conexiones/callback/social1?code=tt-code&state={q['state']}", follow_redirects=False
+        )
+        assert location(r) == "/conexiones"
+        assert routes["user"].call_count == 1
+        assert "username" not in routes["user"].calls.last.request.url.params["fields"]
+        assert routes["creator"].call_count == 0
+    acc = account(db, brand.id, "tiktok")
+    assert acc is not None and acc.status == AccountStatus.CONNECTED and acc.name == "Sandbox"
+    assert acc.meta["profile_available"] is False and acc.meta.get("creator_info") is None
+
+
 def test_tiktok_card_modes(client: TestClient, db: Session, brand: Brand) -> None:
     set_tiktok(db)
     acc = _tiktok_account(db, brand)
@@ -704,7 +738,7 @@ def test_tiktok_flow_with_monkeypatched_provider(
 
     monkeypatch.setattr(tiktok, "exchange_code", fake_exchange)
     monkeypatch.setattr(
-        tiktok, "get_user_info", lambda s, h, t: {"open_id": "open-9", "display_name": "Otra"}
+        tiktok, "get_user_info", lambda s, h, t, **kw: {"open_id": "open-9", "display_name": "Otra"}
     )
     monkeypatch.setattr(tiktok, "query_creator_info", no_creator)
     _, q = start(client, "/conexiones/tiktok/iniciar")
@@ -1200,6 +1234,23 @@ def test_tiktok_guide_follows_the_sandbox_flow(client: TestClient) -> None:
     )
     anchor = re.search(r'href="/ayuda/tiktok#([\w-]+)"', composer_tpl).group(1)
     assert f'id="{anchor}"' in html
+
+
+def test_guides_quote_the_labels_the_app_shows() -> None:
+    """Regression: the guides named a card badge ("Requiere reconexión") and a TikTok draft button ("Copiar
+    texto") the app does not show. The badge is STATUS_LABELS["needs_reconnect"]; for a TikTok draft the text
+    is copied with the post detail's "Copiar" button (the assisted-publishing modal is never opened)."""
+    badge = conn.STATUS_LABELS["needs_reconnect"]
+    guides = {name: conn.guide_path(name) for name in ("tiktok", "meta", "uso")}
+    for name, path in guides.items():
+        assert path is not None, name
+        text = path.read_text(encoding="utf-8")
+        assert "Requiere reconexión" not in text, name
+        assert f"**{badge}**" in text, name
+    tiktok_guide = guides["tiktok"].read_text(encoding="utf-8")
+    assert "Copiar texto" not in tiktok_guide and "**Copiar**" in tiktok_guide
+    detail_tpl = (conn._PACKAGE_DIR / "templates" / "posts" / "_detail.html").read_text(encoding="utf-8")
+    assert "<span>Copiar</span>" in detail_tpl
 
 
 def test_markdown_lists_and_paragraphs() -> None:

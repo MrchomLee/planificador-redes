@@ -1148,7 +1148,7 @@ def tiktok_callback(
             tokens = _call(
                 tiktok.exchange_code, ps, http, code, tiktok.redirect_uri(ps), flow.code_verifier, clock=clock
             )
-            user = tiktok.get_user_info(ps, http, tokens.access_token)
+            user = tiktok.get_user_info(ps, http, tokens.access_token, scopes=tokens.scopes)
             creator = _tiktok_creator_info(ps, http, tokens, now)
             open_id = str(tokens.open_id or user.get("open_id") or "")
             if not open_id:

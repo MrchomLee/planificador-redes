@@ -26,7 +26,7 @@ son de esa zona. Crea más en **☰ › Marcas › Nueva marca**; cambia entre e
 
 En **☰ › Cuentas conectadas** ves una tarjeta por red: si está conectada, el nombre de la cuenta, cuántas
 publicaciones tiene pendientes y los botones **Comprobar**, **Reconectar** y **Desconectar**. Si una tarjeta
-dice **Requiere reconexión**, las publicaciones de esa red no saldrán hasta que pulses **Reconectar**.
+dice **Reconexión necesaria**, las publicaciones de esa red no saldrán hasta que pulses **Reconectar**.
 
 ## Planificación
 

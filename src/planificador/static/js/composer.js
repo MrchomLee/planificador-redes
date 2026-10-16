@@ -107,7 +107,7 @@
 
   function component() {
     // Non-reactive per-instance bookkeeping (kept out of Alpine's proxy so effects never re-trigger on it).
-    const priv = { baseline: "", lastSnap: "", timer: null, seq: 0, caret: null, unload: null };
+    const priv = { baseline: "", lastSnap: "", timer: null, seq: 0, caret: null, unload: null, forcedModes: {} };
     return {
       // ---------------------------------------------------------------- state
       ready: false,
@@ -152,6 +152,7 @@
       ytTitleTouched: {},
       drafts: {},
       notice: {},
+      ttModeNotice: {},
       pickerPurpose: null,
       accountMap: {},
       loadedAt: Date.now(),
@@ -215,6 +216,9 @@
           priv.baseline = this.snapshot();
           priv.lastSnap = priv.baseline;
           this.ready = true;
+          // After the baseline: a saved TikTok mode the account can no longer use is switched here, so the
+          // editor turns dirty and the change is saved (the stored post keeps the old mode until then).
+          this.applyForcedModes();
           this.autosize();
           if (!this.ro) {
             this.validate();
@@ -239,7 +243,14 @@
           if (!options.mode) options.mode = "direct";
           // Only the modes the account's TikTok permissions allow (no video.publish → draft to the app only).
           const modes = this.modesOf(a);
-          if (!this.cfg.readonly && modes.length && !modes.includes(options.mode)) options.mode = modes[0];
+          if (!this.cfg.readonly && modes.length && !modes.includes(options.mode)) {
+            if (t && t.options && t.options.mode) {
+              // A saved target (edit, duplicate, moved post): the stored mode is kept for the baseline and
+              // switched right after it (applyForcedModes), so the editor is dirty and saving fixes the post.
+              priv.forcedModes[a.key] = { from: options.mode, to: modes[0], stored: this.cfg.mode === "edit" };
+              if (this.cfg.mode !== "edit") options.mode = modes[0];
+            } else options.mode = modes[0];
+          }
         }
         if (a.network === "instagram" && !Array.isArray(options.collaborators)) options.collaborators = [];
         if (a.network === "youtube" && !Array.isArray(options.tags)) options.tags = [];
@@ -915,6 +926,21 @@
       ttModeNote(k) {
         const tt = (this.acc[k] || {}).tiktok;
         return (tt && tt.note) || "";
+      },
+      applyForcedModes() {
+        const forced = priv.forcedModes;
+        priv.forcedModes = {};
+        Object.keys(forced).forEach((k) => {
+          const f = forced[k];
+          const t = this.targets[k];
+          if (!t) return;
+          t.options.mode = f.to;
+          const was = f.from === "inbox" ? "como borrador en la app de TikTok" : "en publicación directa";
+          const will = f.to === "inbox" ? "se enviará como borrador a la app de TikTok" : "se publicará directamente";
+          const why = f.to === "inbox" ? "video.publish" : "video.upload";
+          this.ttModeNotice[k] =
+            "Esta publicación estaba " + was + ", pero tu cuenta no tiene el permiso " + why + ": " + (f.stored ? "al guardar " : "") + will + ".";
+        });
       },
       async loadCreator(k) {
         if (k === "demo" && !this.accountMap.demo) return;

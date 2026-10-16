@@ -608,6 +608,46 @@ def test_get_user_info_falls_back_without_profile_scope(settings, http, router):
     assert "username" not in route.calls.last.request.url.params["fields"]
 
 
+def test_get_user_info_known_scopes_skip_profile_and_creator_info(settings, http, router):
+    """Regression: without user.info.profile and video.publish (a typical sandbox app) only the Login Kit
+    fields are requested, once, and creator_info (Direct Post) is never called."""
+    route = router.get(tiktok.USER_INFO_URL).mock(
+        return_value=httpx.Response(200, json=ok({"user": {"open_id": "open-id-123", "display_name": "Sb"}}))
+    )
+    creator = router.post(tiktok.CREATOR_INFO_URL).mock(return_value=httpx.Response(200, json=creator_json()))
+    scopes = ["user.info.basic", "video.upload", "video.list"]
+    info = tiktok.get_user_info(settings, http, ACCESS, scopes=scopes)
+    assert info["open_id"] == "open-id-123" and info["display_name"] == "Sb"
+    assert info["profile_available"] is False and info["username"] is None
+    assert route.call_count == 1
+    assert "username" not in route.calls.last.request.url.params["fields"]
+    assert creator.call_count == 0
+
+
+def test_get_user_info_known_scopes_with_publish_uses_creator_info(settings, http, router):
+    """video.publish granted, user.info.profile not: no doomed profile attempt, username from creator_info."""
+    route = router.get(tiktok.USER_INFO_URL).mock(
+        return_value=httpx.Response(200, json=ok({"user": {"open_id": "open-id-123", "display_name": "Sb"}}))
+    )
+    creator = router.post(tiktok.CREATOR_INFO_URL).mock(return_value=httpx.Response(200, json=creator_json()))
+    info = tiktok.get_user_info(settings, http, ACCESS, scopes="user.info.basic,video.publish")
+    assert info["username"] == "mimarca" and info["profile_available"] is False
+    assert route.call_count == 1 and creator.call_count == 1
+
+
+def test_get_user_info_known_profile_scope_requests_profile_fields(settings, http, router):
+    route = router.get(tiktok.USER_INFO_URL).mock(
+        return_value=httpx.Response(
+            200, json=ok({"user": {"open_id": "open-id-123", "display_name": "Sb", "username": "sb"}})
+        )
+    )
+    creator = router.post(tiktok.CREATOR_INFO_URL).mock(return_value=httpx.Response(200, json=creator_json()))
+    info = tiktok.get_user_info(settings, http, ACCESS, scopes=["user.info.basic", "user.info.profile"])
+    assert info["username"] == "sb" and info["profile_available"] is True
+    assert "username" in route.calls.last.request.url.params["fields"]
+    assert route.call_count == 1 and creator.call_count == 0
+
+
 def test_get_user_info_auth_error(settings, http, router):
     router.get(tiktok.USER_INFO_URL).mock(
         return_value=httpx.Response(401, json=api_error("access_token_invalid"))

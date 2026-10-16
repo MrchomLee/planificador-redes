@@ -3,7 +3,8 @@
     cleared with a notice — composer.js loadCreator), interaction toggles greyed per creator settings, max duration,
     AI-generated, commercial content disclosure with labels, consent sentence; inbox mode ("borrador").
     Only the modes the account's granted scopes allow (info.tiktok.modes): without video.publish the section is
-    locked to the draft mode, without video.upload to Direct Post (composer.js newTarget forces the mode).
+    locked to the draft mode, without video.upload to Direct Post (composer.js newTarget forces the mode; a
+    saved post's mode is switched after the baseline so the editor is dirty, with a ttModeNotice).
     Vars: K, T, O, info. -#}
 <div class="cmp-fields cmp-tt">
   <div class="cmp-tt__creator" x-show="ttCan('{{ K }}', 'direct')">
@@ -34,6 +35,9 @@
          :class="ttModes('{{ K }}').length ? 'tone-info' : 'tone-danger'">
       {{ icon("info", 16) }}<div><span x-text="ttModeNote('{{ K }}')"></span>
         <a href="/ayuda/tiktok#7-content-posting-api-publicar-videos">Ver la guía</a></div>
+    </div>
+    <div class="callout tone-warning cmp-callout" data-tt-mode-changed x-show="ttModeNotice['{{ K }}']" x-cloak>
+      {{ icon("triangle-alert", 16) }}<div x-text="ttModeNotice['{{ K }}']"></div>
     </div>
     <p class="cmp-error" x-show="fieldError('{{ K }}', 'mode')" x-text="fieldError('{{ K }}', 'mode')"></p>
   </div>

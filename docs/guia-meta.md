@@ -187,7 +187,7 @@ las fotos de Instagram se quedan en **Publicación asistida** (te avisamos y las
 | No aparece tu cuenta de Instagram al conectar | La cuenta no es profesional o no está vinculada a la Página (paso 7). Vuelve a conectar y márcala en la pantalla de Facebook. |
 | «The user is not an Instagram Business» al publicar una historia | Las historias solo funcionan en cuentas de **empresa**. Cambia el tipo de cuenta en Instagram. |
 | «Activa la URL pública en Ajustes para publicar fotos en Instagram» | Paso 10. |
-| La tarjeta dice **Requiere reconexión** | Facebook invalidó el acceso (cambio de contraseña, permisos quitados…). Pulsa **Reconectar** en **Cuentas conectadas**. |
+| La tarjeta dice **Reconexión necesaria** | Facebook invalidó el acceso (cambio de contraseña, permisos quitados…). Pulsa **Reconectar** en **Cuentas conectadas**. |
 | Un permiso aparece como no concedido | Desconecta, vuelve a conectar y, en la pantalla de Facebook, pulsa **Editar acceso** y marca todo. |
 
 Más guías: [TikTok](guia-tiktok.md) · [YouTube](guia-youtube.md) · [Cómo usar Planificador](guia-uso.md).

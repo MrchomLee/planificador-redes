@@ -5,7 +5,8 @@ were positioned against the editor card instead of their own control, so they es
 made the clipped card scrollable. Clicking a switch (or tabbing to it) focused the hidden input and Chrome
 scrolled the card to reveal it, leaving the footer floating over an empty area.
 
-Run: ``PLAYWRIGHT_CHROMIUM_EXECUTABLE=/path/to/chrome uv run pytest -m e2e tests/e2e/test_composer_layout_e2e.py``.
+Run: ``PLAYWRIGHT_CHROMIUM_EXECUTABLE=/path/to/chrome uv run pytest -m e2e
+tests/e2e/test_composer_layout_e2e.py``.
 """
 
 from __future__ import annotations
@@ -48,7 +49,9 @@ def seed_tiktok(live: LiveServer) -> None:
 
 def open_composer(browser: Any, live: LiveServer) -> tuple[Any, Any]:
     # A laptop-sized window: the editor content is taller than the card, so a scrollable card would show.
-    context = browser.new_context(viewport={"width": 1366, "height": 657}, locale="es-ES", color_scheme="dark")
+    context = browser.new_context(
+        viewport={"width": 1366, "height": 657}, locale="es-ES", color_scheme="dark"
+    )
     context.set_default_timeout(15_000)
     page = context.new_page()
     page.goto(live.url + "/planificacion", wait_until="networkidle")

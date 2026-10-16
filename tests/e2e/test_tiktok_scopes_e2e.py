@@ -6,13 +6,22 @@ tests/e2e/test_tiktok_scopes_e2e.py``.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
 from planificador import config
 from planificador.deps import ensure_active_brand
-from planificador.models import Account, AccountStatus, Network
+from planificador.models import (
+    Account,
+    AccountStatus,
+    Network,
+    Post,
+    PostKind,
+    PostTarget,
+    TargetStatus,
+)
 
 pytestmark = pytest.mark.e2e
 LiveServer = Any  # tests/e2e/conftest.py::LiveServer
@@ -92,6 +101,63 @@ def test_composer_forces_the_draft_mode_without_video_publish(browser: Any, live
     assert composer.locator(".cmp-issue", has_text="Elige quién puede ver").count() == 0
     assert composer.locator(".cmp-issue", has_text="Confirmación de uso de música").count() == 0
     assert not creator_calls
+    assert not page.errors
+    page.context.close()
+
+
+def test_editing_a_saved_direct_post_without_video_publish_saves_the_draft_mode(
+    browser: Any, live_server: LiveServer
+) -> None:
+    """Regression: a post saved as Direct Post (scheduled before the scopes changed, duplicated, moved) on an
+    account without video.publish. The editor switches it to the draft mode *after* the baseline, so it is
+    dirty, says why, and saving stores the new mode (before, the DB kept "direct" and publishing failed)."""
+    key = str(seed_tiktok(live_server, ["user.info.basic", "video.upload", "video.list"]))
+    now = datetime.now(UTC)
+    when = now + timedelta(days=2)
+    with live_server.app.state.db.session_scope() as db:
+        brand = ensure_active_brand(db)
+        post = Post(
+            brand_id=brand.id,
+            kind=PostKind.SCHEDULED,
+            text="hola",
+            scheduled_at=when,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(post)
+        db.flush()
+        post.targets.append(
+            PostTarget(
+                account_id=int(key),
+                network="tiktok",
+                format="video",
+                options={"mode": "direct", "privacy_level": "SELF_ONLY", "consent": True},
+                auto_publish=True,
+                status=TargetStatus.SCHEDULED,
+                scheduled_at=when,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        db.flush()
+        post_id = post.id
+    page = new_page(browser)
+    page.goto(f"{live_server.url}/publicaciones/{post_id}/editar", wait_until="networkidle")
+    page.locator(".composer.is-ready").wait_for()
+    page.wait_for_function("() => Alpine.$data(document.querySelector('.composer')).dirty === true")
+    assert data(page, f"d.targets['{key}'].options.mode") == "inbox"
+    notice = page.locator(".cmp-tt [data-tt-mode-changed]")
+    notice.wait_for()
+    text = notice.inner_text()
+    assert "publicación directa" in text and "al guardar" in text and "borrador" in text
+    switch = page.locator(".cmp-tt [data-field=mode] input[role=switch]")
+    assert switch.is_checked() and switch.is_disabled()
+    with live_server.app.state.db.session_scope() as db:
+        assert db.query(PostTarget).filter_by(post_id=post_id).one().options["mode"] == "direct"
+    with page.expect_navigation():
+        page.evaluate("() => Alpine.$data(document.querySelector('.composer')).save('draft')")
+    with live_server.app.state.db.session_scope() as db:
+        assert db.query(PostTarget).filter_by(post_id=post_id).one().options["mode"] == "inbox"
     assert not page.errors
     page.context.close()
 

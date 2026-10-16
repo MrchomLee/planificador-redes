@@ -84,6 +84,7 @@ CALLBACK_PATH = "/conexiones/callback/social1"
 SCOPE_BASIC = "user.info.basic"  # Login Kit identity: always requested
 SCOPE_DIRECT = "video.publish"  # Content Posting API, Direct Post
 SCOPE_INBOX = "video.upload"  # Content Posting API, upload as a draft to the TikTok app (inbox)
+SCOPE_PROFILE = "user.info.profile"  # Display API: username, bio, verified badge, profile link
 #: Publishing mode → the scope it needs.
 MODE_SCOPES: dict[str, str] = {"direct": SCOPE_DIRECT, "inbox": SCOPE_INBOX}
 PUBLISH_SCOPES: frozenset[str] = frozenset(MODE_SCOPES.values())
@@ -91,7 +92,7 @@ PUBLISH_SCOPES: frozenset[str] = frozenset(MODE_SCOPES.values())
 #: Login Kit identity + Content Posting (Direct Post and inbox upload). Report 03 §1.1.
 SCOPES_PUBLISH: tuple[str, ...] = (SCOPE_BASIC, SCOPE_DIRECT, SCOPE_INBOX)
 #: Optional Display API scopes (may not be offered to new apps, report 03 §1.1 / §14 #21).
-SCOPES_ANALYTICS: tuple[str, ...] = ("user.info.profile", "user.info.stats", "video.list")
+SCOPES_ANALYTICS: tuple[str, ...] = (SCOPE_PROFILE, "user.info.stats", "video.list")
 #: Every scope the app knows, in the order the settings page lists them. TikTok rejects the whole authorize
 #: request (``error_type=scope``) when it asks for a scope the developer app does not have — sandbox apps
 #: often lack ``video.publish`` or the Display API ones — so the user ticks exactly the scopes of their app
@@ -1037,27 +1038,37 @@ _USER_FIELDS_BASIC = (
 _USER_FIELDS_PROFILE = ("username", "bio_description", "profile_deep_link", "is_verified")
 
 
-def get_user_info(settings: ProviderSettings, http: httpx.Client, access_token: str) -> dict:
+def get_user_info(
+    settings: ProviderSettings, http: httpx.Client, access_token: str, *, scopes: Any = None
+) -> dict:
     """Identity of the connected user: ``open_id``, ``union_id``, ``display_name``, ``username`` (may be
     ``None``), ``avatar_url`` (+ ``avatar_url_100``, ``avatar_large_url``), ``bio_description``,
     ``profile_deep_link``, ``is_verified`` and ``profile_available`` (``user.info.profile`` granted).
 
-    Falls back to the always-granted Login Kit fields when the profile scope is missing, then fills
-    ``username`` / ``display_name`` from ``creator_info`` (``video.publish`` scope) when possible."""
-    profile_available = True
-    try:
-        data = _api(
-            http,
-            "GET",
-            USER_INFO_URL,
-            access_token,
-            params={"fields": ",".join(_USER_FIELDS_BASIC + _USER_FIELDS_PROFILE)},
-            op="user_info",
-        )
-    except ProviderError as err:
-        if err.code not in SCOPE_ERROR_CODES:
-            raise
-        profile_available = False
+    ``scopes`` are the scopes the token was granted (``TokenSet.scopes``). When known, only requests those
+    scopes allow are sent: the profile fields only with ``user.info.profile`` and the ``creator_info``
+    fallback for ``username`` only with ``video.publish`` (a sandbox app with ``user.info.basic`` +
+    ``video.upload`` gets a single ``user/info`` call). Unknown scopes (``None`` / empty): ask for the profile
+    fields, fall back to the always-granted Login Kit fields on a scope error, then try ``creator_info``."""
+    raw = scopes.replace(" ", ",").split(",") if isinstance(scopes, str) else (scopes or ())
+    granted = {str(x).strip() for x in raw if str(x).strip()} or None
+    profile_available = granted is None or SCOPE_PROFILE in granted
+    data: dict[str, Any] | None = None
+    if profile_available:
+        try:
+            data = _api(
+                http,
+                "GET",
+                USER_INFO_URL,
+                access_token,
+                params={"fields": ",".join(_USER_FIELDS_BASIC + _USER_FIELDS_PROFILE)},
+                op="user_info",
+            )
+        except ProviderError as err:
+            if err.code not in SCOPE_ERROR_CODES:
+                raise
+            profile_available = False
+    if data is None:
         data = _api(
             http,
             "GET",
@@ -1079,7 +1090,7 @@ def get_user_info(settings: ProviderSettings, http: httpx.Client, access_token: 
             "TikTok no devolvió el identificador de la cuenta. Inténtalo de nuevo.",
             detail={"op": "user_info"},
         )
-    if not out["username"]:
+    if not out["username"] and (granted is None or SCOPE_DIRECT in granted):
         try:
             creator = _api(http, "POST", CREATOR_INFO_URL, access_token, json_body={}, op="creator_info")
             info: CreatorInfo | None = CreatorInfo.from_api(creator)
